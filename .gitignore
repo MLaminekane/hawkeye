@@ -25,3 +25,12 @@ Thumbs.db
 # Logs
 *.log
 .aider*
+
+# Test coverage
+coverage/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Local development files
+*.local
