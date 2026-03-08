@@ -419,6 +419,10 @@ pnpm --filter @hawkeye/cli build       # Build only CLI
 - `Result<T, E>` pattern for error handling (no throwing in core)
 - Prettier: semi, singleQuote, trailingComma: all, printWidth: 100
 
+## Acknowledgments
+
+Special thanks to **Lamine** for their contributions and support.
+
 ## License
 
 MIT
