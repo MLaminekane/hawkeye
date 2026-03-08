@@ -71,6 +71,16 @@ export const serveCommand = new Command('serve')
       serveStatic(url, dashboardDist, res);
     });
 
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(chalk.yellow(`\n  Port ${port} is already in use.`));
+        console.error(chalk.dim(`  Try: hawkeye serve -p <other-port>`));
+        storage.close();
+        process.exit(1);
+      }
+      throw err;
+    });
+
     server.listen(port, () => {
       console.log('');
       console.log(chalk.green('  Hawkeye Dashboard'));
