@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join, extname } from 'node:path';
-import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { exec, execSync } from 'node:child_process';
 import chalk from 'chalk';
@@ -378,6 +378,20 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
       return;
     }
 
+    // GET /api/pending-reviews — List pending review gate items
+    if (url === '/api/pending-reviews') {
+      const pendingFile = join(cwd || process.cwd(), '.hawkeye', 'pending-reviews.json');
+      let pending: unknown[] = [];
+      try {
+        if (existsSync(pendingFile)) {
+          pending = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+        }
+      } catch {}
+      res.writeHead(200);
+      res.end(JSON.stringify(pending));
+      return;
+    }
+
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'Not found' }));
   } catch (err) {
@@ -592,6 +606,102 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         const config = JSON.parse(body);
         const cfgPath = join(cwd, '.hawkeye', 'config.json');
         writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // POST /api/review-approve — Approve a pending review gate item
+      if (url === '/api/review-approve') {
+        const payload = JSON.parse(body);
+        const reviewId = payload.id;
+        const scope: 'session' | 'always' = payload.scope || 'session';
+        if (!reviewId) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'id required' }));
+          return;
+        }
+
+        const hawkDir = join(cwd, '.hawkeye');
+        if (!existsSync(hawkDir)) mkdirSync(hawkDir, { recursive: true });
+        const pendingFile = join(hawkDir, 'pending-reviews.json');
+        const approvalsFile = join(hawkDir, 'review-approvals.json');
+
+        // Load pending reviews
+        let pending: Array<{ id: string; matchedPattern: string; claudeSessionId: string; command: string }> = [];
+        try {
+          if (existsSync(pendingFile)) {
+            pending = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+          }
+        } catch {}
+
+        const item = pending.find((p) => p.id === reviewId);
+        if (!item) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: 'Pending review not found' }));
+          return;
+        }
+
+        // Load approvals and add the new one
+        let approvals: Array<{ pattern: string; scope: string; sessionId?: string; approvedAt: string; approvedCommand: string }> = [];
+        try {
+          if (existsSync(approvalsFile)) {
+            approvals = JSON.parse(readFileSync(approvalsFile, 'utf-8'));
+          }
+        } catch {}
+
+        approvals.push({
+          pattern: item.matchedPattern,
+          scope,
+          sessionId: scope === 'session' ? item.claudeSessionId : undefined,
+          approvedAt: new Date().toISOString(),
+          approvedCommand: item.command,
+        });
+
+        // Remove from pending
+        const remaining = pending.filter((p) => p.id !== reviewId);
+        writeFileSync(pendingFile, JSON.stringify(remaining, null, 2));
+        writeFileSync(approvalsFile, JSON.stringify(approvals, null, 2));
+
+        broadcast({ type: 'review_approved', reviewId, pattern: item.matchedPattern, scope });
+
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, pattern: item.matchedPattern, scope }));
+        return;
+      }
+
+      // POST /api/review-deny — Deny/dismiss a pending review gate item
+      if (url === '/api/review-deny') {
+        const payload = JSON.parse(body);
+        const reviewId = payload.id;
+        if (!reviewId) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'id required' }));
+          return;
+        }
+
+        const hawkDir = join(cwd, '.hawkeye');
+        const pendingFile = join(hawkDir, 'pending-reviews.json');
+
+        let pending: Array<{ id: string; matchedPattern: string }> = [];
+        try {
+          if (existsSync(pendingFile)) {
+            pending = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+          }
+        } catch {}
+
+        const item = pending.find((p) => p.id === reviewId);
+        if (!item) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: 'Pending review not found' }));
+          return;
+        }
+
+        const remaining = pending.filter((p) => p.id !== reviewId);
+        writeFileSync(pendingFile, JSON.stringify(remaining, null, 2));
+
+        broadcast({ type: 'review_denied', reviewId, pattern: item.matchedPattern });
+
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
         return;

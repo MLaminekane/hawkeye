@@ -61,6 +61,7 @@ export interface RecorderOptions {
 export type EventHandler = (event: TraceEvent) => void;
 export type DriftAlertHandler = (result: DriftCheckResult) => void;
 export type GuardrailViolationHandler = (violation: GuardrailViolation) => void;
+export type ReviewGateHandler = (violation: GuardrailViolation, event: TraceEvent) => Promise<'approve' | 'deny' | 'skip'>;
 
 export interface Recorder {
   readonly sessionId: string;
@@ -74,6 +75,7 @@ export interface Recorder {
   onEvent(handler: EventHandler): () => void;
   onDriftAlert(handler: DriftAlertHandler): void;
   onGuardrailViolation(handler: GuardrailViolationHandler): void;
+  onReviewGate(handler: ReviewGateHandler): void;
   getSession(id: string): Result<SessionRow | null>;
   getEvents(sessionId: string, options?: { type?: EventType; limit?: number }): Result<EventRow[]>;
   getSessions(options?: { limit?: number; status?: string }): Result<SessionRow[]>;
@@ -144,6 +146,8 @@ export function createRecorder(options: RecorderOptions): Recorder {
   const eventHandlers: EventHandler[] = [];
   const driftAlertHandlers: DriftAlertHandler[] = [];
   const guardrailViolationHandlers: GuardrailViolationHandler[] = [];
+  let reviewGateHandler: ReviewGateHandler | null = null;
+  const reviewGateAllowlist: Set<string> = new Set();
 
   function recordEvent(
     type: TraceEvent['type'],
@@ -183,6 +187,74 @@ export function createRecorder(options: RecorderOptions): Recorder {
     if (guardrailEnforcer) {
       const violations = guardrailEnforcer.evaluate(event);
       for (const v of violations) {
+        if (v.actionTaken === 'pending_review') {
+          // Check if this pattern is already in the session-level allowlist
+          if (v.matchedPattern && reviewGateAllowlist.has(v.matchedPattern)) {
+            logger.info(`Review gate auto-approved (allowlisted): ${v.matchedPattern}`);
+            continue;
+          }
+
+          // Persist violation as pending_review
+          storage.insertGuardrailViolation(sessionId, event.id, v);
+
+          for (const handler of guardrailViolationHandlers) {
+            handler(v);
+          }
+
+          // If a review gate handler is registered, trigger async approval
+          if (reviewGateHandler) {
+            const handler = reviewGateHandler;
+            handler(v, event).then((decision) => {
+              if (decision === 'approve') {
+                // Add pattern to session-level allowlist for future events
+                if (v.matchedPattern) {
+                  reviewGateAllowlist.add(v.matchedPattern);
+                }
+                logger.info(`Review gate approved: ${v.description}`);
+              } else if (decision === 'deny') {
+                // Mark the event as blocked retroactively
+                logger.warn(`Review gate denied: ${v.description}`);
+                // Insert a guardrail_trigger event to record the denial
+                const denySeq = storage.getNextSequence(sessionId);
+                storage.insertEvent({
+                  id: uuid(),
+                  sessionId,
+                  timestamp: new Date(),
+                  sequence: denySeq,
+                  type: 'guardrail_trigger',
+                  data: {
+                    ruleName: v.ruleName,
+                    severity: v.severity,
+                    description: v.description,
+                    blockedAction: type,
+                    originalType: type,
+                  } as unknown as TraceEvent['data'],
+                  durationMs: 0,
+                  costUsd: 0,
+                });
+              } else {
+                // 'skip' — allow just this once, no allowlist addition
+                logger.info(`Review gate skipped (one-time allow): ${v.description}`);
+              }
+            }).catch((err) => {
+              logger.error(`Review gate handler error: ${String(err)}`);
+            });
+          } else {
+            // No handler registered — treat as blocked (safe default)
+            logger.warn(`Event blocked by review gate (no handler): ${v.description}`);
+            event.type = 'guardrail_trigger';
+            event.data = {
+              ...(event.data as unknown as Record<string, unknown>),
+              ruleName: v.ruleName,
+              severity: v.severity,
+              description: v.description,
+              blockedAction: type,
+              originalType: type,
+            } as typeof event.data;
+          }
+          continue;
+        }
+
         // Persist violation
         storage.insertGuardrailViolation(sessionId, event.id, v);
 
@@ -294,6 +366,10 @@ export function createRecorder(options: RecorderOptions): Recorder {
 
     onGuardrailViolation(handler: GuardrailViolationHandler): void {
       guardrailViolationHandlers.push(handler);
+    },
+
+    onReviewGate(handler: ReviewGateHandler): void {
+      reviewGateHandler = handler;
     },
 
     start() {

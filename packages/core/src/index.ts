@@ -23,7 +23,7 @@ export { Storage } from './storage/sqlite.js';
 export type { SessionRow, EventRow, GlobalStats, GuardrailViolationRow, SessionStats, SessionComparison } from './storage/sqlite.js';
 
 export { createRecorder } from './recorder.js';
-export type { Recorder, RecorderOptions, EventHandler, DriftAlertHandler, GuardrailViolationHandler } from './recorder.js';
+export type { Recorder, RecorderOptions, EventHandler, DriftAlertHandler, GuardrailViolationHandler, ReviewGateHandler } from './recorder.js';
 
 export { createTerminalInterceptor } from './interceptors/terminal.js';
 export type { TerminalInterceptor, TerminalInterceptorOptions, CommandCallback } from './interceptors/terminal.js';

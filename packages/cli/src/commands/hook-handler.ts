@@ -399,11 +399,83 @@ function checkDirectoryScope(
   return null;
 }
 
+// ── Review gate approval system (file-based) ──
+
+interface PendingReview {
+  id: string;
+  timestamp: string;
+  sessionId: string;
+  claudeSessionId: string;
+  command: string;
+  matchedPattern: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+}
+
+interface ReviewApproval {
+  pattern: string;
+  scope: 'session' | 'always';
+  sessionId?: string;
+  approvedAt: string;
+  approvedCommand: string;
+}
+
+function getPendingReviewsFile(): string {
+  return join(getHawkDir(), 'pending-reviews.json');
+}
+
+function getReviewApprovalsFile(): string {
+  return join(getHawkDir(), 'review-approvals.json');
+}
+
+function loadPendingReviews(): PendingReview[] {
+  const file = getPendingReviewsFile();
+  if (!existsSync(file)) return [];
+  try {
+    return JSON.parse(readFileSync(file, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function savePendingReviews(reviews: PendingReview[]): void {
+  const dir = getHawkDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(getPendingReviewsFile(), JSON.stringify(reviews, null, 2));
+}
+
+function loadReviewApprovals(): ReviewApproval[] {
+  const file = getReviewApprovalsFile();
+  if (!existsSync(file)) return [];
+  try {
+    return JSON.parse(readFileSync(file, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function saveReviewApprovals(approvals: ReviewApproval[]): void {
+  const dir = getHawkDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(getReviewApprovalsFile(), JSON.stringify(approvals, null, 2));
+}
+
+function isPatternApproved(pattern: string, claudeSessionId: string): boolean {
+  const approvals = loadReviewApprovals();
+  for (const approval of approvals) {
+    if (approval.pattern !== pattern) continue;
+    if (approval.scope === 'always') return true;
+    if (approval.scope === 'session' && approval.sessionId === claudeSessionId) return true;
+  }
+  return false;
+}
+
 function checkReviewGate(
   toolName: string,
   toolInput: Record<string, unknown>,
   config: GuardrailConfig,
-): string | null {
+  claudeSessionId?: string,
+): { message: string; matchedPattern: string } | null {
   if (toolName !== 'Bash' || config.reviewGatePatterns.length === 0) return null;
   const cmd = String(toolInput.command || '');
   if (!cmd) return null;
@@ -411,7 +483,14 @@ function checkReviewGate(
   for (const pattern of config.reviewGatePatterns) {
     const check = pattern.replace(/\*/g, '');
     if (check && cmd.includes(check)) {
-      return `Review gate: command matches "${pattern}" — requires human approval`;
+      // Check if this pattern has already been approved
+      if (claudeSessionId && isPatternApproved(pattern, claudeSessionId)) {
+        return null; // Approved — allow through
+      }
+      return {
+        message: `Review gate: command matches "${pattern}" — requires human approval`,
+        matchedPattern: pattern,
+      };
     }
   }
   return null;
@@ -764,10 +843,87 @@ export const hookHandlerCommand = new Command('hook-handler')
           if (cmdCheck) violations.push(cmdCheck);
           const dirCheck = checkDirectoryScope(toolName, toolInput, config);
           if (dirCheck) violations.push(dirCheck);
-          const reviewCheck = checkReviewGate(toolName, toolInput, config);
-          if (reviewCheck) violations.push(reviewCheck);
           const networkCheck = checkNetworkLock(toolName, toolInput, config);
           if (networkCheck) violations.push(networkCheck);
+
+          // Review gate check — separate from other violations because it uses
+          // a file-based approval system instead of immediate blocking
+          const reviewCheck = checkReviewGate(toolName, toolInput, config, claudeSessionId);
+
+          if (reviewCheck) {
+            // Write a pending review entry for the user to approve
+            const cmd = String(toolInput.command || '');
+            const pendingReview: PendingReview = {
+              id: randomUUID(),
+              timestamp: new Date().toISOString(),
+              sessionId: claudeSessionId,
+              claudeSessionId,
+              command: cmd,
+              matchedPattern: reviewCheck.matchedPattern,
+              toolName,
+              toolInput,
+            };
+
+            const pending = loadPendingReviews();
+            pending.push(pendingReview);
+            savePendingReviews(pending);
+
+            // Record the review gate event
+            const session = getOrCreateSession(
+              claudeSessionId,
+              storage,
+              hookData.objective,
+            );
+            const seq = storage.getNextSequence(session.hawkeyeSessionId);
+            const eventId = randomUUID();
+
+            storage.insertEvent({
+              id: eventId,
+              sessionId: session.hawkeyeSessionId,
+              timestamp: new Date(),
+              sequence: seq,
+              type: 'guardrail_block' as EventType,
+              data: {
+                ruleName: 'review_gate',
+                severity: 'block' as const,
+                description: reviewCheck.message,
+                blockedAction: `${toolName}: ${cmd.slice(0, 200)}`,
+                pendingReviewId: pendingReview.id,
+              } as unknown as TraceEvent['data'],
+              durationMs: 0,
+              costUsd: 0,
+            });
+
+            storage.insertGuardrailViolation(
+              session.hawkeyeSessionId,
+              eventId,
+              {
+                ruleName: 'review_gate',
+                severity: 'block',
+                description: reviewCheck.message,
+                actionTaken: 'pending_review',
+                matchedPattern: reviewCheck.matchedPattern,
+              },
+            );
+
+            // Output block reason and guidance to stderr
+            process.stderr.write(
+              `[hawkeye] Review gate: "${cmd.slice(0, 100)}" requires approval (pattern: "${reviewCheck.matchedPattern}")\n`,
+            );
+            process.stderr.write(
+              `[hawkeye] Run \`hawkeye approve\` or approve in the dashboard to allow this pattern\n`,
+            );
+
+            // Block the action (exit code 2)
+            process.stdout.write(
+              JSON.stringify({
+                decision: 'block',
+                reason: `Hawkeye Review Gate: ${reviewCheck.message}. Run \`hawkeye approve\` to allow.`,
+              }),
+            );
+            storage.close();
+            process.exit(2);
+          }
 
           if (violations.length > 0) {
             // Record the guardrail block event

@@ -200,6 +200,29 @@ export const recordCommand = new Command('record')
       });
     }
 
+    // Read a single keypress from /dev/tty for review gate approval
+    function promptReviewAction(): Promise<'approve' | 'deny' | 'skip'> {
+      return new Promise((resolve) => {
+        try {
+          const fd = openSync('/dev/tty', 'r');
+          const ttyIn = new ReadStream(fd);
+          ttyIn.setRawMode(true);
+          ttyIn.resume();
+          ttyIn.once('data', (data: Buffer) => {
+            const key = data.toString().toLowerCase();
+            ttyIn.setRawMode(false);
+            ttyIn.destroy();
+            if (key === 'a') resolve('approve');
+            else if (key === 'd') resolve('deny');
+            else resolve('skip');
+          });
+        } catch {
+          // /dev/tty not available (CI, piped mode) — auto-deny for safety
+          resolve('deny');
+        }
+      });
+    }
+
     // Wire up drift alerts with interactive prompt for critical
     recorder.onDriftAlert((result: DriftCheckResult) => {
       overlay.update({ driftScore: result.score, driftFlag: result.flag });
@@ -275,6 +298,32 @@ export const recordCommand = new Command('record')
       console.error(chalk.dim(`    ${violation.description}`));
       console.error('');
       overlay.start();
+    });
+
+    // Wire up review gate interactive prompt
+    recorder.onReviewGate(async (violation, _event) => {
+      overlay.stop();
+      console.error('');
+      console.error(chalk.yellow('  ┌─ REVIEW GATE ─────────────────────────────────────────────┐'));
+      console.error(chalk.yellow(`  │  ${violation.description}`));
+      if (violation.matchedPattern) {
+        console.error(chalk.dim(`  │  Pattern: "${violation.matchedPattern}"`));
+      }
+      console.error('  │');
+      console.error(`  │  ${chalk.green('[A]')}pprove   ${chalk.red('[D]')}eny   ${chalk.yellow('[S]')}kip (once)`);
+      console.error(chalk.yellow('  └────────────────────────────────────────────────────────────┘'));
+
+      const action = await promptReviewAction();
+      if (action === 'approve') {
+        console.error(chalk.green('  Approved (pattern allowlisted for this session)'));
+      } else if (action === 'deny') {
+        console.error(chalk.red('  Denied'));
+      } else {
+        console.error(chalk.yellow('  Skipped (allowed once)'));
+      }
+      console.error('');
+      overlay.start();
+      return action;
     });
 
     // Track events for overlay

@@ -62,6 +62,7 @@ const COMMANDS: SlashCommand[] = [
   { name: 'export', desc: 'Export session as JSON' },
   { name: 'end', desc: 'End active sessions' },
   { name: 'restart', desc: 'Restart a session' },
+  { name: 'approve', desc: 'Approve pending review gate actions' },
   { name: 'revert', desc: 'Revert file changes' },
   { name: 'delete', desc: 'Delete a session' },
   { name: 'purge', desc: 'Delete ALL sessions (including old)' },
@@ -517,6 +518,8 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     await cmdRestart(dbPath, cwd, args);
   } else if (c === 'revert') {
     await cmdRevert(dbPath, cwd, args);
+  } else if (c === 'approve') {
+    await cmdApprove(cwd);
   } else if (c === 'delete') {
     await cmdDelete(dbPath, args);
   } else if (c === 'purge') {
@@ -1633,6 +1636,134 @@ function revertSingleEvent(
   }
 }
 
+async function cmdApprove(cwd: string): Promise<void> {
+  const hawkDir = join(cwd, '.hawkeye');
+  const pendingFile = join(hawkDir, 'pending-reviews.json');
+  const approvalsFile = join(hawkDir, 'review-approvals.json');
+
+  // Load pending reviews
+  let pending: Array<{
+    id: string;
+    timestamp: string;
+    sessionId: string;
+    claudeSessionId: string;
+    command: string;
+    matchedPattern: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+  }> = [];
+  try {
+    if (existsSync(pendingFile)) {
+      pending = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+    }
+  } catch {}
+
+  if (pending.length === 0) {
+    console.log(chalk.dim('  No pending review gate actions.'));
+    return;
+  }
+
+  console.log('');
+  console.log(o('  Pending Review Gate Actions'));
+  console.log(chalk.dim('  ─'.repeat(30)));
+  console.log('');
+
+  for (let i = 0; i < pending.length; i++) {
+    const p = pending[i];
+    const ts = new Date(p.timestamp);
+    const timeStr = ts.toLocaleTimeString();
+    console.log(`  ${chalk.bold(String(i + 1))}. ${chalk.yellow(p.command.slice(0, 80))}`);
+    console.log(chalk.dim(`     Pattern: "${p.matchedPattern}"  |  ${timeStr}  |  Session: ${p.claudeSessionId.slice(0, 8)}`));
+  }
+  console.log('');
+
+  const choice = await nextLine(chalk.dim('  Select # (or "all"), then [A]pprove/[P]ermanent/[D]eny/[S]kip: '));
+  const trimmed = choice.trim().toLowerCase();
+  if (!trimmed || trimmed === 'skip' || trimmed === 's') {
+    console.log(chalk.dim('  Skipped.'));
+    return;
+  }
+
+  // Determine which items to process
+  let indices: number[];
+  if (trimmed.startsWith('all')) {
+    indices = pending.map((_, i) => i);
+  } else {
+    const num = parseInt(trimmed, 10);
+    if (isNaN(num) || num < 1 || num > pending.length) {
+      console.log(chalk.dim('  Invalid selection.'));
+      return;
+    }
+    indices = [num - 1];
+  }
+
+  // Ask for action
+  let action = '';
+  if (trimmed.includes(' ')) {
+    // e.g., "1 a" or "all p"
+    action = trimmed.split(/\s+/).pop() || '';
+  }
+
+  if (!action) {
+    const actionInput = await nextLine(chalk.dim('  [A]pprove (session) / [P]ermanent / [D]eny: '));
+    action = actionInput.trim().toLowerCase();
+  }
+
+  // Load current approvals
+  let approvals: Array<{
+    pattern: string;
+    scope: 'session' | 'always';
+    sessionId?: string;
+    approvedAt: string;
+    approvedCommand: string;
+  }> = [];
+  try {
+    if (existsSync(approvalsFile)) {
+      approvals = JSON.parse(readFileSync(approvalsFile, 'utf-8'));
+    }
+  } catch {}
+
+  const removedIds = new Set<string>();
+
+  for (const idx of indices) {
+    const p = pending[idx];
+    if (action === 'a' || action === 'approve') {
+      approvals.push({
+        pattern: p.matchedPattern,
+        scope: 'session',
+        sessionId: p.claudeSessionId,
+        approvedAt: new Date().toISOString(),
+        approvedCommand: p.command,
+      });
+      removedIds.add(p.id);
+      console.log(chalk.green(`  Approved (session): "${p.matchedPattern}"`));
+    } else if (action === 'p' || action === 'permanent') {
+      approvals.push({
+        pattern: p.matchedPattern,
+        scope: 'always',
+        approvedAt: new Date().toISOString(),
+        approvedCommand: p.command,
+      });
+      removedIds.add(p.id);
+      console.log(chalk.green(`  Approved (permanent): "${p.matchedPattern}"`));
+    } else if (action === 'd' || action === 'deny') {
+      removedIds.add(p.id);
+      console.log(chalk.red(`  Denied: "${p.matchedPattern}"`));
+    } else {
+      console.log(chalk.dim(`  Skipped: "${p.matchedPattern}"`));
+    }
+  }
+
+  // Save updated approvals and remove processed pending reviews
+  if (removedIds.size > 0) {
+    const remaining = pending.filter((p) => !removedIds.has(p.id));
+    writeFileSync(pendingFile, JSON.stringify(remaining, null, 2));
+    writeFileSync(approvalsFile, JSON.stringify(approvals, null, 2));
+  }
+
+  console.log('');
+}
+
 async function cmdDelete(dbPath: string, args: string): Promise<void> {
   const db = getStorage(dbPath);
   if (!db) return;
@@ -1769,9 +1900,6 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
   }));
 
   // ─── Header ───
-  const startDate = new Date(s.started_at);
-  const endDate = s.ended_at ? new Date(s.ended_at) : new Date();
-  const durationMs = endDate.getTime() - startDate.getTime();
   const statusIcon =
     s.status === 'completed' ? chalk.green('✓') :
     s.status === 'recording' ? chalk.yellow('●') :

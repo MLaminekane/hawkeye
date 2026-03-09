@@ -190,7 +190,8 @@ export function createGuardrailEnforcer(
           ruleName: rule.name,
           severity: 'block',
           description: `Review gate: "${fullCommand}" requires human approval (matches: "${pattern}")`,
-          actionTaken: 'blocked',
+          actionTaken: 'pending_review',
+          matchedPattern: pattern,
         };
       }
     }

@@ -63,5 +63,6 @@ export interface GuardrailViolation {
   ruleName: string;
   severity: 'warn' | 'block';
   description: string;
-  actionTaken: 'logged' | 'blocked' | 'session_aborted';
+  actionTaken: 'logged' | 'blocked' | 'session_aborted' | 'pending_review';
+  matchedPattern?: string;
 }
