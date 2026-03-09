@@ -62,6 +62,8 @@ export interface SettingsData {
     warningThreshold: number;
     criticalThreshold: number;
     contextWindow: number;
+    autoPause?: boolean;
+    ollamaUrl?: string;
   };
   guardrails: Array<{
     name: string;
@@ -69,6 +71,11 @@ export interface SettingsData {
     enabled: boolean;
     action: string;
     config: Record<string, unknown>;
+  }>;
+  webhooks?: Array<{
+    enabled: boolean;
+    url: string;
+    events: string[];
   }>;
 }
 

@@ -6,7 +6,27 @@ import { ReadStream } from 'node:tty';
 import chalk from 'chalk';
 import { createRecorder, type DriftCheckResult, type GuardrailViolation, type GuardrailRuleConfig } from '@hawkeye/core';
 import { RecordOverlay } from './record-overlay.js';
-import { loadConfig, getDefaultConfig } from '../config.js';
+import { loadConfig, getDefaultConfig, type WebhookSettings } from '../config.js';
+
+function fireWebhooks(
+  webhooks: WebhookSettings[],
+  eventType: string,
+  payload: Record<string, unknown>,
+): void {
+  for (const wh of webhooks) {
+    if (!wh.enabled) continue;
+    if (wh.events.length > 0 && !wh.events.includes(eventType)) continue;
+    fetch(wh.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event: eventType,
+        timestamp: new Date().toISOString(),
+        ...payload,
+      }),
+    }).catch(() => {});
+  }
+}
 
 export const recordCommand = new Command('record')
   .alias('watch')
@@ -57,6 +77,7 @@ export const recordCommand = new Command('record')
     }
 
     const config = loadConfig(cwd);
+    const webhooks = config.webhooks || [];
 
     // Inject saved API keys into current process env (for drift engine)
     // and they will also be inherited by the child process via ...process.env
@@ -188,6 +209,13 @@ export const recordCommand = new Command('record')
         recorder.pause();
         overlay.stop();
 
+        fireWebhooks(webhooks, 'drift_critical', {
+          sessionId: recorder.sessionId,
+          score: result.score,
+          reason: result.reason,
+          suggestion: result.suggestion,
+        });
+
         console.error('');
         console.error(chalk.red('  ┌─ DRIFT CRITICAL ──────────────────────────────────────────┐'));
         console.error(chalk.red(`  │  Score: ${result.score}/100`));
@@ -235,6 +263,11 @@ export const recordCommand = new Command('record')
       overlay.stop();
       console.error('');
       if (violation.severity === 'block') {
+        fireWebhooks(webhooks, 'guardrail_block', {
+          sessionId: recorder.sessionId,
+          ruleName: violation.ruleName,
+          description: violation.description,
+        });
         console.error(chalk.red(`  ⛔ GUARDRAIL BLOCKED [${violation.ruleName}]`));
       } else {
         console.error(chalk.yellow(`  ⚠ GUARDRAIL WARNING [${violation.ruleName}]`));

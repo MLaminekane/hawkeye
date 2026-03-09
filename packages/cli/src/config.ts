@@ -178,6 +178,7 @@ export function getDefaultConfig(): HawkeyeConfig {
       },
     ],
     apiKeys: {},
+    webhooks: [],
   };
 }
 
@@ -200,6 +201,7 @@ export function loadConfig(cwd: string): HawkeyeConfig {
         apiKeys: { ...def.apiKeys, ...raw.apiKeys },
         recording: { ...def.recording, ...raw.recording },
         dashboard: { ...def.dashboard, ...raw.dashboard },
+        webhooks: raw.webhooks || [],
       };
     } catch {
       return getDefaultConfig();

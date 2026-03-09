@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, type SettingsData } from '../api';
 
 interface GuardrailRule {
@@ -7,6 +7,12 @@ interface GuardrailRule {
   enabled: boolean;
   action: string;
   config: Record<string, unknown>;
+}
+
+interface WebhookSetting {
+  enabled: boolean;
+  url: string;
+  events: string[];
 }
 
 const DEFAULT_DRIFT = {
@@ -18,7 +24,10 @@ const DEFAULT_DRIFT = {
   criticalThreshold: 30,
   contextWindow: 10,
   autoPause: false,
+  ollamaUrl: 'http://localhost:11434',
 };
+
+const WEBHOOK_EVENTS = ['drift_critical', 'guardrail_block'];
 
 const DEFAULT_RULES: GuardrailRule[] = [
   {
@@ -75,17 +84,25 @@ const DEFAULT_RULES: GuardrailRule[] = [
 export function SettingsPage() {
   const [rules, setRules] = useState<GuardrailRule[]>(DEFAULT_RULES);
   const [driftConfig, setDriftConfig] = useState(DEFAULT_DRIFT);
+  const [webhooks, setWebhooks] = useState<WebhookSetting[]>([]);
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
-  const [saved, setSaved] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [loadError, setLoadError] = useState('');
+  const loaded = useRef(false);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load settings + provider list from API
   useEffect(() => {
     api.getSettings().then((data) => {
       if (data.drift) setDriftConfig({ ...DEFAULT_DRIFT, ...data.drift });
       if (data.guardrails) setRules(data.guardrails);
-    }).catch(() => setLoadError('Could not load settings from server'));
+      if (data.webhooks) setWebhooks(data.webhooks);
+      // Mark loaded after state settles
+      setTimeout(() => { loaded.current = true; }, 100);
+    }).catch(() => {
+      setLoadError('Could not load settings from server');
+      loaded.current = true;
+    });
 
     api.getProviders().then(setProviderModels).catch(() => {
       // Fallback provider list
@@ -100,6 +117,23 @@ export function SettingsPage() {
     });
   }, []);
 
+  // Auto-save with debounce
+  useEffect(() => {
+    if (!loaded.current) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      setSaveStatus('saving');
+      try {
+        await api.saveSettings({ drift: driftConfig, guardrails: rules, webhooks });
+        setSaveStatus('saved');
+        setTimeout(() => setSaveStatus('idle'), 1500);
+      } catch {
+        setSaveStatus('error');
+      }
+    }, 600);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [driftConfig, rules, webhooks]);
+
   // When provider changes, auto-select first model for that provider
   const handleProviderChange = (newProvider: string) => {
     const models = providerModels[newProvider] || [];
@@ -108,32 +142,14 @@ export function SettingsPage() {
       provider: newProvider,
       model: models[0] || '',
     }));
-    setSaved(false);
   };
 
   const toggleRule = (index: number) => {
     setRules((prev) => prev.map((r, i) => i === index ? { ...r, enabled: !r.enabled } : r));
-    setSaved(false);
   };
 
   const toggleAction = (index: number) => {
     setRules((prev) => prev.map((r, i) => i === index ? { ...r, action: r.action === 'block' ? 'warn' : 'block' } : r));
-    setSaved(false);
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await api.saveSettings({
-        drift: driftConfig,
-        guardrails: rules,
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch {
-      setLoadError('Failed to save settings');
-    }
-    setSaving(false);
   };
 
   const currentModels = providerModels[driftConfig.provider] || [];
@@ -145,19 +161,17 @@ export function SettingsPage() {
           <h1 className="font-display text-2xl font-bold text-hawk-text">Settings</h1>
           <p className="text-sm text-hawk-text3 mt-1">Configure DriftDetect and Guardrails</p>
         </div>
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className={`rounded-lg px-4 py-2 font-mono text-xs font-semibold transition-all ${
-            saved
-              ? 'bg-hawk-green/20 text-hawk-green border border-hawk-green/30'
-              : saving
-              ? 'bg-hawk-surface3 text-hawk-text3 cursor-wait'
-              : 'bg-hawk-orange text-black hover:bg-hawk-orange/90'
-          }`}
-        >
-          {saved ? 'Saved' : saving ? 'Saving...' : 'Save Changes'}
-        </button>
+        <div className="flex items-center gap-2">
+          {saveStatus === 'saving' && (
+            <span className="rounded-lg border border-hawk-border-subtle bg-hawk-surface2 px-3 py-1.5 font-mono text-xs text-hawk-text3 animate-pulse">Saving...</span>
+          )}
+          {saveStatus === 'saved' && (
+            <span className="rounded-lg border border-hawk-green/30 bg-hawk-green/10 px-3 py-1.5 font-mono text-xs text-hawk-green">Saved</span>
+          )}
+          {saveStatus === 'error' && (
+            <span className="rounded-lg border border-hawk-red/30 bg-hawk-red/10 px-3 py-1.5 font-mono text-xs text-hawk-red">Save failed</span>
+          )}
+        </div>
       </div>
 
       {loadError && (
@@ -170,7 +184,7 @@ export function SettingsPage() {
       <div className="mb-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
         <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">DriftDetect</h2>
-          <Toggle enabled={driftConfig.enabled} onToggle={() => { setDriftConfig((p) => ({ ...p, enabled: !p.enabled })); setSaved(false); }} />
+          <Toggle enabled={driftConfig.enabled} onToggle={() => { setDriftConfig((p) => ({ ...p, enabled: !p.enabled })); }} />
         </div>
 
         {driftConfig.enabled && (
@@ -193,7 +207,7 @@ export function SettingsPage() {
               {currentModels.length > 0 ? (
                 <select
                   value={driftConfig.model}
-                  onChange={(e) => { setDriftConfig((p) => ({ ...p, model: e.target.value })); setSaved(false); }}
+                  onChange={(e) => { setDriftConfig((p) => ({ ...p, model: e.target.value })); }}
                   className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
                 >
                   {currentModels.map((m) => (
@@ -204,12 +218,18 @@ export function SettingsPage() {
                 <input
                   type="text"
                   value={driftConfig.model}
-                  onChange={(e) => { setDriftConfig((p) => ({ ...p, model: e.target.value })); setSaved(false); }}
+                  onChange={(e) => { setDriftConfig((p) => ({ ...p, model: e.target.value })); }}
                   placeholder="Model name"
                   className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
                 />
               )}
             </div>
+
+            {driftConfig.provider === 'ollama' && (
+              <div className="col-span-2">
+                <Field label="Ollama URL" value={driftConfig.ollamaUrl || 'http://localhost:11434'} onChange={(v) => { setDriftConfig((p) => ({ ...p, ollamaUrl: v })); }} />
+              </div>
+            )}
 
             {driftConfig.provider !== 'ollama' && (
               <div className="col-span-2">
@@ -223,13 +243,13 @@ export function SettingsPage() {
               </div>
             )}
 
-            <Field label="Check every N actions" value={String(driftConfig.checkEvery)} onChange={(v) => { setDriftConfig((p) => ({ ...p, checkEvery: parseInt(v) || 5 })); setSaved(false); }} type="number" />
-            <Field label="Context window" value={String(driftConfig.contextWindow)} onChange={(v) => { setDriftConfig((p) => ({ ...p, contextWindow: parseInt(v) || 10 })); setSaved(false); }} type="number" />
-            <Field label="Warning threshold" value={String(driftConfig.warningThreshold)} onChange={(v) => { setDriftConfig((p) => ({ ...p, warningThreshold: parseInt(v) || 60 })); setSaved(false); }} type="number" />
-            <Field label="Critical threshold" value={String(driftConfig.criticalThreshold)} onChange={(v) => { setDriftConfig((p) => ({ ...p, criticalThreshold: parseInt(v) || 30 })); setSaved(false); }} type="number" />
+            <Field label="Check every N actions" value={String(driftConfig.checkEvery)} onChange={(v) => { setDriftConfig((p) => ({ ...p, checkEvery: parseInt(v) || 5 })); }} type="number" />
+            <Field label="Context window" value={String(driftConfig.contextWindow)} onChange={(v) => { setDriftConfig((p) => ({ ...p, contextWindow: parseInt(v) || 10 })); }} type="number" />
+            <Field label="Warning threshold" value={String(driftConfig.warningThreshold)} onChange={(v) => { setDriftConfig((p) => ({ ...p, warningThreshold: parseInt(v) || 60 })); }} type="number" />
+            <Field label="Critical threshold" value={String(driftConfig.criticalThreshold)} onChange={(v) => { setDriftConfig((p) => ({ ...p, criticalThreshold: parseInt(v) || 30 })); }} type="number" />
 
             <div className="col-span-2 flex items-center gap-3 border-t border-hawk-border-subtle pt-2">
-              <Toggle enabled={driftConfig.autoPause ?? false} onToggle={() => { setDriftConfig((p) => ({ ...p, autoPause: !p.autoPause })); setSaved(false); }} />
+              <Toggle enabled={driftConfig.autoPause ?? false} onToggle={() => { setDriftConfig((p) => ({ ...p, autoPause: !p.autoPause })); }} />
               <div>
                 <span className="font-mono text-xs text-hawk-text">Auto-pause on critical drift</span>
                 <p className="font-mono text-[10px] text-hawk-text3">Automatically pause recording when drift score drops to critical level</p>
@@ -275,6 +295,71 @@ export function SettingsPage() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Webhooks */}
+      <div className="mt-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
+        <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
+          <h2 className="font-display text-base font-semibold text-hawk-text">Webhooks</h2>
+          <button
+            onClick={() => { setWebhooks((prev) => [...prev, { enabled: true, url: '', events: ['drift_critical'] }]); }}
+            className="rounded bg-hawk-surface3 px-2.5 py-1 font-mono text-[10px] text-hawk-text3 hover:text-hawk-text transition-colors"
+          >
+            + Add webhook
+          </button>
+        </div>
+
+        {webhooks.length === 0 ? (
+          <div className="px-5 py-6 text-center">
+            <p className="font-mono text-xs text-hawk-text3">No webhooks configured</p>
+            <p className="font-mono text-[10px] text-hawk-text3/60 mt-1">Add a webhook to receive Slack/Discord notifications on drift or guardrail events</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-hawk-border-subtle">
+            {webhooks.map((wh, i) => (
+              <div key={i} className="px-5 py-4 space-y-3">
+                <div className="flex items-center gap-3">
+                  <Toggle enabled={wh.enabled} onToggle={() => { setWebhooks((prev) => prev.map((w, j) => j === i ? { ...w, enabled: !w.enabled } : w)); }} />
+                  <input
+                    type="url"
+                    value={wh.url}
+                    onChange={(e) => { setWebhooks((prev) => prev.map((w, j) => j === i ? { ...w, url: e.target.value } : w)); }}
+                    placeholder="https://hooks.slack.com/services/... or Discord webhook URL"
+                    className="flex-1 rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40"
+                  />
+                  <button
+                    onClick={() => { setWebhooks((prev) => prev.filter((_, j) => j !== i)); }}
+                    className="shrink-0 rounded px-2 py-1 font-mono text-[10px] text-hawk-red hover:bg-hawk-red/10 transition-colors"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 ml-12">
+                  <span className="font-mono text-[10px] text-hawk-text3 mr-1">Events:</span>
+                  {WEBHOOK_EVENTS.map((ev) => (
+                    <button
+                      key={ev}
+                      onClick={() => {
+                        setWebhooks((prev) => prev.map((w, j) => {
+                          if (j !== i) return w;
+                          const has = w.events.includes(ev);
+                          return { ...w, events: has ? w.events.filter((e) => e !== ev) : [...w.events, ev] };
+                        }));
+                      }}
+                      className={`rounded px-2 py-0.5 font-mono text-[10px] transition-colors ${
+                        wh.events.includes(ev)
+                          ? 'bg-hawk-orange/15 text-hawk-orange border border-hawk-orange/30'
+                          : 'bg-hawk-surface3 text-hawk-text3 border border-hawk-border-subtle hover:text-hawk-text'
+                      }`}
+                    >
+                      {ev}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Config file hint */}

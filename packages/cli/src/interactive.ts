@@ -280,6 +280,14 @@ function rawPrompt(): Promise<string> {
       if (sel >= scrollOff + PAGE_SIZE) scrollOff = sel - PAGE_SIZE + 1;
       scrollOff = Math.max(0, Math.min(scrollOff, Math.max(0, filtered.length - PAGE_SIZE)));
 
+      // First: clear all previous picker lines (move down, erase, move back)
+      if (prevLines > 0) {
+        for (let i = 0; i < prevLines; i++) {
+          process.stdout.write('\n\x1b[K');
+        }
+        process.stdout.write(`\x1b[${prevLines}A`);
+      }
+
       // Redraw prompt line
       process.stdout.write(`\r\x1b[K${o('›')} ${buf}`);
 
@@ -318,16 +326,9 @@ function rawPrompt(): Promise<string> {
         lines++;
       }
 
-      // Clear leftover lines from previous render
-      const extra = Math.max(0, prevLines - lines);
-      for (let i = 0; i < extra; i++) {
-        process.stdout.write('\n\x1b[K');
-      }
-
       // Move cursor back up to prompt line
-      const total = lines + extra;
-      if (total > 0) {
-        process.stdout.write(`\x1b[${total}A`);
+      if (lines > 0) {
+        process.stdout.write(`\x1b[${lines}A`);
       }
 
       // Position cursor on prompt line (col = 3 + pos, 1-based)
@@ -1817,7 +1818,8 @@ async function cmdSettings(cwd: string): Promise<void> {
     console.log(`  ${o.bold('1)')} DriftDetect     ${config.drift.enabled ? chalk.green('ON') : chalk.red('OFF')}  ${chalk.dim(`${config.drift.provider}/${config.drift.model}`)}`);
     console.log(`  ${o.bold('2)')} Guardrails      ${chalk.dim(`${config.guardrails.filter((r) => r.enabled).length}/${config.guardrails.length} active`)}`);
     console.log(`  ${o.bold('3)')} API Keys        ${chalk.dim(countKeys(config) + ' configured')}`);
-    console.log(`  ${o.bold('4)')} ${chalk.dim('Back')}`);
+    console.log(`  ${o.bold('4)')} Webhooks        ${chalk.dim(`${(config.webhooks || []).filter((w) => w.enabled).length} active`)}`);
+    console.log(`  ${o.bold('5)')} ${chalk.dim('Back')}`);
     console.log('');
 
     const pick = await ask(`  ${o('›')} `);
@@ -1827,6 +1829,8 @@ async function cmdSettings(cwd: string): Promise<void> {
       await settingsGuardrails(config, cwd);
     } else if (pick === '3') {
       await settingsApiKeys(config, cwd);
+    } else if (pick === '4') {
+      await settingsWebhooks(config, cwd);
     } else {
       break;
     }
@@ -2157,6 +2161,113 @@ async function settingsApiKeys(config: HawkeyeConfig, cwd: string): Promise<void
       }
     } else {
       break;
+    }
+  }
+}
+
+async function settingsWebhooks(config: HawkeyeConfig, cwd: string): Promise<void> {
+  if (!config.webhooks) config.webhooks = [];
+  const EVENTS = ['drift_critical', 'guardrail_block'];
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    console.log('');
+    console.log(chalk.bold.white('  Webhooks'));
+    console.log(chalk.dim('  ─'.repeat(20)));
+    console.log('');
+
+    if (config.webhooks.length === 0) {
+      console.log(chalk.dim('  No webhooks configured.'));
+    } else {
+      for (let i = 0; i < config.webhooks.length; i++) {
+        const wh = config.webhooks[i];
+        const status = wh.enabled ? chalk.green('ON') : chalk.red('OFF');
+        const url = wh.url ? chalk.dim(wh.url.length > 40 ? wh.url.slice(0, 40) + '…' : wh.url) : chalk.red('no URL');
+        const events = chalk.dim(wh.events.join(', ') || 'all events');
+        console.log(`  ${o.bold(`${i + 1})`)} ${status}  ${url}`);
+        console.log(`     ${events}`);
+      }
+    }
+
+    console.log('');
+    console.log(`  ${o.bold(`${config.webhooks.length + 1})`)} ${o('+ Add webhook')}`);
+    console.log(`  ${o.bold(`${config.webhooks.length + 2})`)} ${chalk.dim('Back')}`);
+    console.log('');
+
+    const pick = await ask(`  ${o('›')} `);
+    const idx = parseInt(pick, 10) - 1;
+
+    if (idx === config.webhooks.length) {
+      // Add new webhook
+      const url = await ask(`  ${chalk.dim('Webhook URL:')} `);
+      if (!url) continue;
+
+      console.log('');
+      console.log(chalk.dim('  Select events (comma-separated numbers, or Enter for all):'));
+      for (let i = 0; i < EVENTS.length; i++) {
+        console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(EVENTS[i])}`);
+      }
+      const evPick = await ask(`  ${o('›')} `);
+      let events: string[] = [];
+      if (evPick.trim()) {
+        events = evPick.split(/[\s,]+/).map((n) => {
+          const i = parseInt(n, 10) - 1;
+          return i >= 0 && i < EVENTS.length ? EVENTS[i] : '';
+        }).filter(Boolean);
+      } else {
+        events = [...EVENTS];
+      }
+
+      config.webhooks.push({ enabled: true, url, events });
+      saveConfig(cwd, config);
+      console.log(chalk.green(`  ✓ Webhook added`));
+    } else if (idx === config.webhooks.length + 1 || pick === '' || pick === 'b') {
+      break;
+    } else if (idx >= 0 && idx < config.webhooks.length) {
+      // Edit existing webhook
+      const wh = config.webhooks[idx];
+      console.log('');
+      console.log(`  ${o.bold('1)')} Toggle ${wh.enabled ? chalk.green('ON') : chalk.red('OFF')}`);
+      console.log(`  ${o.bold('2)')} Edit URL`);
+      console.log(`  ${o.bold('3)')} Edit events`);
+      console.log(`  ${o.bold('4)')} ${chalk.red('Delete')}`);
+      console.log(`  ${o.bold('5)')} ${chalk.dim('Back')}`);
+      const sub = await ask(`  ${o('›')} `);
+
+      if (sub === '1') {
+        wh.enabled = !wh.enabled;
+        saveConfig(cwd, config);
+        console.log(chalk.green(`  ✓ Webhook ${wh.enabled ? 'enabled' : 'disabled'}`));
+      } else if (sub === '2') {
+        const url = await ask(`  ${chalk.dim('New URL:')} `);
+        if (url) {
+          wh.url = url;
+          saveConfig(cwd, config);
+          console.log(chalk.green(`  ✓ URL updated`));
+        }
+      } else if (sub === '3') {
+        console.log(chalk.dim('  Select events (comma-separated numbers):'));
+        for (let i = 0; i < EVENTS.length; i++) {
+          const cur = wh.events.includes(EVENTS[i]) ? o(' ●') : '  ';
+          console.log(`  ${o.bold(`${i + 1})`)}${cur} ${chalk.white(EVENTS[i])}`);
+        }
+        const evPick = await ask(`  ${o('›')} `);
+        if (evPick.trim()) {
+          wh.events = evPick.split(/[\s,]+/).map((n) => {
+            const i = parseInt(n, 10) - 1;
+            return i >= 0 && i < EVENTS.length ? EVENTS[i] : '';
+          }).filter(Boolean);
+          saveConfig(cwd, config);
+          console.log(chalk.green(`  ✓ Events updated: ${wh.events.join(', ')}`));
+        }
+      } else if (sub === '4') {
+        const y = await ask(chalk.red(`  Delete this webhook? (y/N) `));
+        if (y.toLowerCase() === 'y') {
+          config.webhooks.splice(idx, 1);
+          saveConfig(cwd, config);
+          console.log(chalk.green(`  ✓ Webhook deleted`));
+        }
+      }
     }
   }
 }

@@ -3,12 +3,38 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { join, extname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { exec } from 'node:child_process';
+import { exec, execSync } from 'node:child_process';
 import chalk from 'chalk';
 import { randomUUID } from 'node:crypto';
 import { Storage } from '@hawkeye/core';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, getDefaultConfig, PROVIDER_MODELS } from '../config.js';
+
+/**
+ * Kill any existing process listening on the given port.
+ * Uses lsof on macOS/Linux to find the PID, then sends SIGTERM.
+ */
+function killProcessOnPort(port: number): boolean {
+  try {
+    const cmd = process.platform === 'win32'
+      ? `netstat -ano | findstr :${port} | findstr LISTENING`
+      : `lsof -ti tcp:${port}`;
+    const output = execSync(cmd, { encoding: 'utf-8', timeout: 5000 }).trim();
+    if (!output) return false;
+
+    const pids = output.split('\n').map((p) => p.trim()).filter(Boolean);
+    const selfPid = String(process.pid);
+    for (const pid of pids) {
+      if (pid === selfPid) continue;
+      try {
+        process.kill(parseInt(pid, 10), 'SIGTERM');
+      } catch {}
+    }
+    return pids.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -25,7 +51,7 @@ const MIME_TYPES: Record<string, string> = {
 export const serveCommand = new Command('serve')
   .description('Launch the Hawkeye dashboard')
   .option('-p, --port <number>', 'Port number', '4242')
-  .action((options) => {
+  .action(async (options) => {
     const port = parseInt(options.port, 10);
     const cwd = process.cwd();
     const dbPath = join(cwd, '.hawkeye', 'traces.db');
@@ -134,6 +160,14 @@ export const serveCommand = new Command('serve')
         }
       } catch {}
     }, 1000);
+
+    // Kill any stale hawkeye serve process on the target port
+    const killed = killProcessOnPort(port);
+    if (killed) {
+      console.log(chalk.dim(`  Killed previous process on port ${port}`));
+      // Give the OS a moment to release the port
+      await new Promise((r) => setTimeout(r, 500));
+    }
 
     const MAX_PORT_RETRIES = 10;
     let currentPort = port;
@@ -297,7 +331,7 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
 
     // GET /api/settings
     if (url === '/api/settings') {
-      const config = loadConfig(process.cwd());
+      const config = loadConfig(cwd || process.cwd());
       res.writeHead(200);
       res.end(JSON.stringify(config));
       return;
@@ -556,8 +590,8 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
       // POST /api/settings — Save configuration
       if (url === '/api/settings') {
         const config = JSON.parse(body);
-        const configPath = join(process.cwd(), '.hawkeye', 'config.json');
-        writeFileSync(configPath, JSON.stringify(config, null, 2));
+        const cfgPath = join(cwd, '.hawkeye', 'config.json');
+        writeFileSync(cfgPath, JSON.stringify(config, null, 2));
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
         return;
