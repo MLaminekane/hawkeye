@@ -35,18 +35,73 @@ function sanitizeHeaders(headers: Record<string, string | string[] | undefined>)
 
 export type LlmCallback = (event: LlmEvent) => void;
 export type ApiCallback = (event: ApiEvent) => void;
+export type NetworkBlockCallback = (hostname: string, url: string, reason: string) => void;
+
+export interface NetworkLockConfig {
+  enabled: boolean;
+  action: 'warn' | 'block';
+  allowedHosts: string[];
+  blockedHosts: string[];
+}
 
 export interface NetworkInterceptor {
   install(): void;
   uninstall(): void;
 }
 
+const LOCALHOST_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+
+function isLocalhostOrInternal(hostname: string): boolean {
+  return LOCALHOST_HOSTS.has(hostname);
+}
+
+function checkNetworkLock(
+  hostname: string,
+  config: NetworkLockConfig,
+): { blocked: boolean; reason: string } | null {
+  if (!config.enabled || config.action !== 'block') return null;
+
+  // Always allow localhost / internal communication
+  if (isLocalhostOrInternal(hostname)) return null;
+
+  // Check blocked hosts first
+  for (const pattern of config.blockedHosts) {
+    if (hostname === pattern || hostname.endsWith('.' + pattern)) {
+      return {
+        blocked: true,
+        reason: `Network request blocked by Hawkeye guardrail: hostname "${hostname}" is in the blocklist (matched: "${pattern}")`,
+      };
+    }
+  }
+
+  // Check allowlist (if specified, only allowed hosts pass through)
+  if (config.allowedHosts.length > 0) {
+    const isAllowed = config.allowedHosts.some(
+      (pattern) => hostname === pattern || hostname.endsWith('.' + pattern),
+    );
+    if (!isAllowed) {
+      return {
+        blocked: true,
+        reason: `Network request blocked by Hawkeye guardrail: hostname "${hostname}" is not in the allowlist`,
+      };
+    }
+  }
+
+  return null;
+}
+
 export function createNetworkInterceptor(
   onLlmEvent: LlmCallback,
   onApiEvent: ApiCallback,
-  options?: { capturePrompts?: boolean },
+  options?: {
+    capturePrompts?: boolean;
+    networkLockRules?: NetworkLockConfig;
+    onNetworkBlock?: NetworkBlockCallback;
+  },
 ): NetworkInterceptor {
   const capturePrompts = options?.capturePrompts ?? false;
+  const networkLockConfig = options?.networkLockRules;
+  const onNetworkBlock = options?.onNetworkBlock;
 
   // Save originals
   const originalHttpRequest = http.request;
@@ -60,10 +115,30 @@ export function createNetworkInterceptor(
       this: unknown,
       ...args: Parameters<typeof http.request>
     ): http.ClientRequest {
+      // Extract URL info BEFORE making the request to check network lock
+      const urlInfo = extractUrlInfo(args, protocol);
+
+      // Check network lock rules before making the request
+      if (urlInfo && networkLockConfig) {
+        const blockResult = checkNetworkLock(urlInfo.hostname, networkLockConfig);
+        if (blockResult?.blocked) {
+          const fullUrl = `${protocol}//${urlInfo.hostname}${urlInfo.port ? ':' + urlInfo.port : ''}${urlInfo.path}`;
+          logger.warn(`Network blocked: ${fullUrl} — ${blockResult.reason}`);
+
+          if (onNetworkBlock) {
+            onNetworkBlock(urlInfo.hostname, fullUrl, blockResult.reason);
+          }
+
+          // Return a fake ClientRequest that immediately emits an error
+          const fakeReq = new http.ClientRequest(`${protocol}//localhost/__hawkeye_blocked`);
+          // Prevent the actual connection by destroying the socket
+          fakeReq.destroy(new Error(blockResult.reason));
+          return fakeReq;
+        }
+      }
+
       const req = originalFn.apply(this, args) as http.ClientRequest;
 
-      // Extract URL info from the request
-      const urlInfo = extractUrlInfo(args, protocol);
       if (!urlInfo) return req;
 
       const { hostname, path, method } = urlInfo;

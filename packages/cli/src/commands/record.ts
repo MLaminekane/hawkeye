@@ -303,6 +303,20 @@ export const recordCommand = new Command('record')
     const preloadPath = join(hawkDir, '_preload.mjs');
     writeFileSync(preloadPath, generatePreloadScript());
 
+    // Build network lock env var for the preload script
+    const networkLockRule = config.guardrails.find(
+      (r) => r.type === 'network_lock' && r.enabled,
+    );
+    const networkLockEnv: Record<string, string> = {};
+    if (networkLockRule && options.guardrails !== false) {
+      networkLockEnv.HAWKEYE_NETWORK_LOCK = JSON.stringify({
+        enabled: true,
+        action: networkLockRule.action,
+        allowedHosts: (networkLockRule.config as Record<string, unknown>).allowedHosts || [],
+        blockedHosts: (networkLockRule.config as Record<string, unknown>).blockedHosts || [],
+      });
+    }
+
     // Spawn the wrapped command with IPC channel + network preload
     const [cmd, ...args] = commandArgs;
     const existingNodeOpts = process.env.NODE_OPTIONS || '';
@@ -311,15 +325,24 @@ export const recordCommand = new Command('record')
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       env: {
         ...process.env,
+        ...networkLockEnv,
         NODE_OPTIONS: `${existingNodeOpts} --import file://${preloadPath}`.trim(),
       },
     });
 
-    // Listen for LLM events from child process via IPC
+    // Listen for LLM events and network block events from child process via IPC
     childProcess.on('message', (msg: unknown) => {
-      const m = msg as { type?: string; event?: Record<string, unknown> };
+      const m = msg as { type?: string; event?: Record<string, unknown>; hostname?: string; url?: string; reason?: string };
       if (m?.type === 'hawkeye:llm' && m.event) {
         recorder.recordLlmEvent(m.event as unknown as import('@hawkeye/core').LlmEvent);
+      } else if (m?.type === 'hawkeye:network_block' && m.hostname && m.reason) {
+        // Network block happened in child process — log it in the parent
+        overlay.stop();
+        console.error('');
+        console.error(chalk.red(`  ⛔ NETWORK BLOCKED [network_lock]`));
+        console.error(chalk.dim(`    ${m.reason}`));
+        console.error('');
+        overlay.start();
       }
     });
 
@@ -389,6 +412,53 @@ const LLM_HOSTS = new Set([
   'generativelanguage.googleapis.com',
   'localhost:11434', '127.0.0.1:11434',
 ]);
+
+// ── Network Lock (blocking) ──
+const LOCALHOST_SET = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+let _networkLock = null;
+try {
+  const raw = process.env.HAWKEYE_NETWORK_LOCK;
+  if (raw) _networkLock = JSON.parse(raw);
+} catch {}
+
+function isNetworkBlocked(hostname, port) {
+  if (!_networkLock || !_networkLock.enabled || _networkLock.action !== 'block') return null;
+  // Always allow localhost / internal
+  if (LOCALHOST_SET.has(hostname)) return null;
+  // Always allow known LLM hosts (Hawkeye uses these for drift detection)
+  const hostPort = port ? hostname + ':' + port : hostname;
+  if (LLM_HOSTS.has(hostPort) || LLM_HOSTS.has(hostname)) return null;
+
+  // Check blocked hosts
+  const blockedHosts = _networkLock.blockedHosts || [];
+  for (const pattern of blockedHosts) {
+    if (hostname === pattern || hostname.endsWith('.' + pattern)) {
+      return 'Network request blocked by Hawkeye guardrail: hostname "' + hostname + '" is in the blocklist (matched: "' + pattern + '")';
+    }
+  }
+
+  // Check allowlist
+  const allowedHosts = _networkLock.allowedHosts || [];
+  if (allowedHosts.length > 0) {
+    let allowed = false;
+    for (const pattern of allowedHosts) {
+      if (hostname === pattern || hostname.endsWith('.' + pattern)) { allowed = true; break; }
+    }
+    if (!allowed) {
+      return 'Network request blocked by Hawkeye guardrail: hostname "' + hostname + '" is not in the allowlist';
+    }
+  }
+
+  return null;
+}
+
+function sendBlockEvent(hostname, url, reason) {
+  try {
+    if (typeof process.send === 'function') {
+      process.send({ type: 'hawkeye:network_block', hostname, url, reason });
+    }
+  } catch {}
+}
 
 const LLM_PATHS = {
   '/v1/messages': 'anthropic',
@@ -498,6 +568,14 @@ if (originalFetch) {
 
     if (!url) return originalFetch.call(this, input, init);
 
+    // ── Network lock check (BEFORE making the request) ──
+    const blockReason = isNetworkBlocked(url.hostname, url.port);
+    if (blockReason) {
+      const fullUrl = url.href;
+      sendBlockEvent(url.hostname, fullUrl, blockReason);
+      throw new Error(blockReason);
+    }
+
     const headers = {};
     const rawHeaders = init?.headers || (input && typeof input === 'object' ? input.headers : null);
     if (rawHeaders) {
@@ -582,11 +660,10 @@ if (originalFetch) {
 function patchModule(mod) {
   const origRequest = mod.request;
   mod.request = function(...args) {
-    const req = origRequest.apply(this, args);
     const first = args[0];
     let hostname, port, path, method;
     if (typeof first === 'string') {
-      try { const u = new URL(first); hostname = u.hostname; port = u.port; path = u.pathname; method = 'GET'; } catch { return req; }
+      try { const u = new URL(first); hostname = u.hostname; port = u.port; path = u.pathname; method = 'GET'; } catch { return origRequest.apply(this, args); }
     } else if (first instanceof URL) {
       hostname = first.hostname; port = first.port; path = first.pathname; method = 'GET';
     } else if (first && typeof first === 'object') {
@@ -594,8 +671,23 @@ function patchModule(mod) {
       port = first.port ? String(first.port) : (first.hostname || first.host || '').split(':')[1];
       path = first.path || '/';
       method = first.method || 'GET';
-    } else { return req; }
+    } else { return origRequest.apply(this, args); }
 
+    // ── Network lock check (BEFORE making the request) ──
+    const blockReason = isNetworkBlocked(hostname, port);
+    if (blockReason) {
+      const proto = mod === https ? 'https:' : 'http:';
+      const fullUrl = proto + '//' + hostname + (port ? ':' + port : '') + (path || '/');
+      sendBlockEvent(hostname, fullUrl, blockReason);
+      // Return a fake request that immediately errors
+      const fakeReq = origRequest.call(this, { hostname: 'localhost', port: 1, path: '/__hawkeye_blocked' });
+      process.nextTick(() => {
+        fakeReq.destroy(new Error(blockReason));
+      });
+      return fakeReq;
+    }
+
+    const req = origRequest.apply(this, args);
     const headers = (first && typeof first === 'object' && !(first instanceof URL)) ? (first.headers || {}) : {};
     const provider = detectProvider(hostname, port, path, headers);
     if (!provider) return req;

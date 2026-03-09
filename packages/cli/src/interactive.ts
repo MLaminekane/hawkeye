@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import chalk from 'chalk';
-import { Storage, type SessionRow } from '@hawkeye/core';
+import { Storage, type SessionRow, type EventRow } from '@hawkeye/core';
 import {
   loadConfig,
   saveConfig,
@@ -54,6 +54,7 @@ const COMMANDS: SlashCommand[] = [
   { name: 'attach', desc: 'Launch agent on active session' },
   { name: 'sessions', desc: 'List & manage sessions' },
   { name: 'active', desc: 'Current recording' },
+  { name: 'watch', desc: 'Live event stream (tail -f style)' },
   { name: 'stats', desc: 'Session or global statistics' },
   { name: 'inspect', desc: 'Detailed session inspection' },
   { name: 'compare', desc: 'Compare sessions side by side' },
@@ -502,6 +503,8 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     await cmdAttach(dbPath, cwd);
   } else if (c === 'active') {
     cmdActive(dbPath);
+  } else if (c === 'watch') {
+    await cmdWatch(dbPath, args);
   } else if (c === 'stats') {
     await cmdStats(dbPath, args);
   } else if (c === 'replay') {
@@ -578,6 +581,298 @@ function cmdActive(dbPath: string): void {
       `  ${o('●')} ${chalk.white(s.objective)}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.dim(dur(s.started_at, null))}  ${chalk.dim(`${s.total_actions}a`)}`,
     );
   }
+}
+
+async function cmdWatch(dbPath: string, args: string): Promise<void> {
+  const db = getStorage(dbPath);
+  if (!db) return;
+
+  // Find recording or paused sessions
+  let candidates: SessionRow[] = [];
+  const recResult = db.listSessions({ status: 'recording' });
+  if (recResult.ok) candidates.push(...recResult.value);
+  if (candidates.length === 0) {
+    const pausedResult = db.listSessions({ status: 'paused' });
+    if (pausedResult.ok) candidates.push(...pausedResult.value);
+  }
+  if (candidates.length === 0) {
+    console.log(chalk.dim('  No active or paused sessions to watch.'));
+    db.close();
+    return;
+  }
+
+  let session: SessionRow;
+
+  if (args) {
+    // Resolve session ID from args
+    const match = candidates.find((s) => s.id === args || s.id.startsWith(args));
+    if (!match) {
+      console.log(chalk.red(`  Not found: ${args}`));
+      db.close();
+      return;
+    }
+    session = match;
+  } else if (candidates.length === 1) {
+    session = candidates[0];
+  } else {
+    // Multiple active sessions — let user pick
+    console.log('');
+    console.log(chalk.bold.white('  Active sessions:'));
+    for (let i = 0; i < candidates.length; i++) {
+      const s = candidates[i];
+      console.log(
+        `  ${o.bold(`${i + 1})`)} ${badge(s.status)}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.white(s.objective.slice(0, 40))}  ${chalk.dim(dur(s.started_at, null))}`,
+      );
+    }
+    console.log('');
+    db.close();
+    const pick = await ask(chalk.dim('  # ') + o('› '));
+    const idx = parseInt(pick, 10) - 1;
+    if (idx < 0 || idx >= candidates.length) return;
+    session = candidates[idx];
+    // Re-open db for the watch loop
+    const db2 = getStorage(dbPath);
+    if (!db2) return;
+    return runWatchLoop(db2, session);
+  }
+
+  return runWatchLoop(db, session);
+}
+
+async function runWatchLoop(db: Storage, session: SessionRow): Promise<void> {
+  const POLL_MS = 1000;
+
+  // Event type icons
+  const watchIcons: Record<string, string> = {
+    command: chalk.blue('$'),
+    file_write: chalk.green('\u270e'),
+    file_read: chalk.dim('\u25c9'),
+    file_delete: chalk.red('\u2715'),
+    llm_call: chalk.magenta('\u26a1'),
+    api_call: chalk.cyan('\u2197'),
+    guardrail_trigger: chalk.red('\u26d4'),
+    guardrail_block: chalk.red('\u26d4'),
+    error: chalk.red('\u2718'),
+    git_commit: chalk.green('\u25cf'),
+    git_push: chalk.cyan('\u2191'),
+    git_checkout: chalk.yellow('\u21b7'),
+    git_pull: chalk.cyan('\u2193'),
+    git_merge: chalk.magenta('\u2934'),
+    drift_alert: chalk.yellow('\u26a0'),
+  };
+
+  function driftColor(score: number | null): (s: string) => string {
+    if (score == null) return chalk.dim;
+    if (score >= 70) return chalk.green;
+    if (score >= 40) return chalk.hex('#f0a830');
+    return chalk.red;
+  }
+
+  function formatEventLine(e: EventRow): string {
+    const time = new Date(e.timestamp).toLocaleTimeString();
+    const icon = watchIcons[e.type] || chalk.dim('\u00b7');
+    const parsed = JSON.parse(e.data) as Record<string, unknown>;
+    let summary = e.type;
+
+    if (e.type === 'command') {
+      const cmd = String(parsed.command || '');
+      const cmdArgs = ((parsed.args as string[]) || []).join(' ');
+      summary = `${cmd} ${cmdArgs}`.trim();
+    } else if (e.type === 'file_write') {
+      summary = String(parsed.path || '');
+    } else if (e.type === 'file_read') {
+      summary = String(parsed.path || '');
+    } else if (e.type === 'file_delete') {
+      summary = String(parsed.path || '');
+    } else if (e.type === 'llm_call') {
+      const model = `${parsed.provider || '?'}/${parsed.model || '?'}`;
+      const tokens = (parsed.totalTokens as number) || 0;
+      summary = `${model} ${tokens > 0 ? chalk.dim(`${tokens.toLocaleString()} tok`) : ''}`;
+    } else if (e.type === 'api_call') {
+      summary = String(parsed.url || parsed.hostname || '');
+    } else if (e.type === 'error') {
+      summary = String(parsed.message || parsed.error || 'error');
+    } else if (e.type === 'guardrail_trigger' || e.type === 'guardrail_block') {
+      summary = String(parsed.rule || parsed.message || 'guardrail');
+    } else if (e.type.startsWith('git_')) {
+      summary = String(parsed.message || parsed.branch || e.type);
+    }
+
+    const cost = e.cost_usd > 0 ? chalk.yellow(` $${e.cost_usd.toFixed(4)}`) : '';
+    const drift =
+      e.drift_score != null
+        ? ' ' + driftColor(e.drift_score)(`[${e.drift_score.toFixed(0)}]`)
+        : '';
+
+    return `  ${chalk.dim(time)} ${icon} ${summary.slice(0, 60)}${cost}${drift}`;
+  }
+
+  // Get initial events to determine baseline
+  const initEvents = db.getEvents(session.id);
+  const allEvents = initEvents.ok ? initEvents.value : [];
+  let lastSeenSeq = allEvents.length > 0 ? allEvents[allEvents.length - 1].sequence : -1;
+
+  // Print initial header (blank lines that will be overwritten)
+  const w = process.stdout.columns || 80;
+  console.log('');
+  console.log(chalk.dim('━'.repeat(w)));
+  console.log(`  ${badge(session.status)}  ${chalk.bold.white(session.objective.slice(0, 40))}  ${chalk.dim(session.id.slice(0, 8))}  ${chalk.dim(dur(session.started_at, null))}`);
+  console.log(`  ${chalk.dim(session.agent || '?')}  ${chalk.dim('drift:—')}  ${chalk.dim('$0.00')}  ${chalk.dim(`${allEvents.length} actions`)}`);
+  console.log(`  ${chalk.dim('[q]uit  [p]ause/resume')}`);
+  console.log(chalk.dim('━'.repeat(w)));
+
+  // Show last 10 events as initial context
+  const tail = allEvents.slice(-10);
+  if (tail.length > 0) {
+    if (allEvents.length > 10) {
+      console.log(chalk.dim(`  ... ${allEvents.length - 10} earlier events`));
+    }
+    for (const e of tail) {
+      console.log(formatEventLine(e));
+    }
+  } else {
+    console.log(chalk.dim('  Waiting for events...'));
+  }
+
+  // Set up raw mode for keypress listening
+  let watching = true;
+  const wasRaw = process.stdin.isRaw;
+
+  return new Promise<void>((resolve) => {
+    const onData = (data: Buffer) => {
+      const keys = parseKeys(data);
+      for (const key of keys) {
+        if (key.name === 'escape' || (key.name === 'char' && key.ch === 'q')) {
+          watching = false;
+          cleanup();
+          return;
+        }
+        if (key.name === 'char' && key.ch === 'p') {
+          // Toggle pause/resume
+          const freshSession = db.getSession(session.id);
+          if (!freshSession.ok || !freshSession.value) return;
+          const current = freshSession.value;
+          if (current.status === 'recording') {
+            db.pauseSession(session.id);
+            console.log(`  ${chalk.blue('\u23f8')} ${chalk.blue('Session paused')}`);
+          } else if (current.status === 'paused') {
+            db.resumeSession(session.id);
+            console.log(`  ${o('\u25cf')} ${chalk.green('Session resumed')}`);
+          }
+        }
+      }
+    };
+
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', onData);
+
+    const interval = setInterval(() => {
+      if (!watching) return;
+
+      // Refresh session data
+      const sr = db.getSession(session.id);
+      if (!sr.ok || !sr.value) return;
+      session = sr.value;
+
+      // Compute live stats from events (session table only updates on end)
+      const evResult = db.getEvents(session.id);
+      const events = evResult.ok ? evResult.value : [];
+      const liveActions = events.length;
+      const liveCost = events.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
+      const liveTokens = events.reduce((sum, e) => {
+        try {
+          const d = JSON.parse(e.data) as Record<string, unknown>;
+          return sum + ((d.totalTokens as number) || 0);
+        } catch {
+          return sum;
+        }
+      }, 0);
+
+      // Get latest drift score from drift_snapshots
+      const driftSnaps = db.getDriftSnapshots(session.id);
+      const drifts = driftSnaps.ok ? driftSnaps.value : [];
+      const latestDrift = drifts.length > 0 ? drifts[drifts.length - 1].score : null;
+
+      // Build live session object for header
+      const liveSession: SessionRow = {
+        ...session,
+        total_cost_usd: liveCost,
+        total_tokens: liveTokens,
+        total_actions: liveActions,
+        final_drift_score: latestDrift,
+      };
+
+      // Find new events
+      const newEvents = events.filter((e) => e.sequence > lastSeenSeq);
+
+      // Print new events
+      for (const e of newEvents) {
+        console.log(formatEventLine(e));
+
+        // Inline drift alerts
+        if (e.drift_score != null && e.drift_score < 40) {
+          console.log(
+            `  ${chalk.red('\u26a0 DRIFT CRITICAL')} ${chalk.red(`score: ${e.drift_score.toFixed(0)}/100`)}${e.drift_flag ? chalk.dim(` — ${e.drift_flag}`) : ''}`,
+          );
+        } else if (e.drift_score != null && e.drift_score < 70) {
+          console.log(
+            `  ${chalk.hex('#f0a830')('\u26a0 drift warning')} ${chalk.hex('#f0a830')(`score: ${e.drift_score.toFixed(0)}/100`)}`,
+          );
+        }
+      }
+
+      if (newEvents.length > 0) {
+        lastSeenSeq = newEvents[newEvents.length - 1].sequence;
+      }
+
+      // Check for new drift snapshots with alerts
+      if (drifts.length > 0) {
+        const latest = drifts[drifts.length - 1];
+        if (latest.score < 40 && latest.reason) {
+          // Only show if it's recent (within last 2 poll cycles)
+          const snapAge = Date.now() - new Date(latest.created_at).getTime();
+          if (snapAge < POLL_MS * 2.5) {
+            console.log(
+              `  ${chalk.red('\u2501\u2501\u2501 DRIFT ALERT \u2501\u2501\u2501')} ${chalk.red(latest.score.toFixed(0) + '/100')} ${chalk.dim(latest.reason)}`,
+            );
+          }
+        }
+      }
+
+      // Redraw header by moving cursor up past newly printed lines + header
+      // We need a smarter approach: save cursor, move to top, redraw header, restore
+      // Using ANSI save/restore cursor
+      process.stdout.write('\x1b7'); // save cursor position
+      // Move to the header location: we need to track how many lines have been printed
+      // Simpler approach: just use the terminal title for live status
+      process.stdout.write(
+        `\x1b]0;Hawkeye Watch: ${liveSession.objective.slice(0, 30)} | ${liveSession.status} | ${liveActions}a | $${liveCost.toFixed(2)} | drift:${latestDrift != null ? latestDrift.toFixed(0) : '—'}\x07`,
+      );
+      process.stdout.write('\x1b8'); // restore cursor position
+
+      // Check if session ended
+      if (session.status === 'completed' || session.status === 'aborted') {
+        console.log('');
+        console.log(`  ${chalk.green('\u2713')} Session ${session.status} (${dur(session.started_at, session.ended_at)})`);
+        watching = false;
+        cleanup();
+      }
+    }, POLL_MS);
+
+    function cleanup() {
+      clearInterval(interval);
+      process.stdin.removeListener('data', onData);
+      process.stdin.setRawMode(wasRaw ?? false);
+      process.stdin.pause();
+      // Reset terminal title
+      process.stdout.write('\x1b]0;\x07');
+      db.close();
+      console.log('');
+      console.log(chalk.dim('  Watch ended.'));
+      resolve();
+    }
+  });
 }
 
 async function cmdStats(dbPath: string, sid: string): Promise<void> {

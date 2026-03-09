@@ -78,11 +78,19 @@ interface WebhookConfig {
   events: string[];
 }
 
+interface NetworkLockConfig {
+  enabled: boolean;
+  action: string;
+  allowedHosts: string[];
+  blockedHosts: string[];
+}
+
 interface GuardrailConfig {
   protectedFiles: string[];
   dangerousCommands: string[];
   blockedDirs: string[];
   reviewGatePatterns: string[];
+  networkLock: NetworkLockConfig | null;
   autoPause: boolean;
   webhooks: WebhookConfig[];
 }
@@ -99,6 +107,7 @@ function loadGuardrailConfig(): GuardrailConfig {
     ],
     blockedDirs: ['/etc', '/usr', '/var', '/sys', '/boot', '~/.ssh', '~/.gnupg', '~/.aws'],
     reviewGatePatterns: [],
+    networkLock: null,
     autoPause: true,
     webhooks: [],
   };
@@ -126,6 +135,14 @@ function loadGuardrailConfig(): GuardrailConfig {
         }
         if (rule.type === 'review_gate' && rule.config?.patterns?.length) {
           reviewPatterns.push(...rule.config.patterns);
+        }
+        if (rule.type === 'network_lock' && rule.config) {
+          defaults.networkLock = {
+            enabled: true,
+            action: rule.action || 'block',
+            allowedHosts: rule.config.allowedHosts || [],
+            blockedHosts: rule.config.blockedHosts || [],
+          };
         }
       }
       if (filePaths.length) defaults.protectedFiles = filePaths;
@@ -397,6 +414,60 @@ function checkReviewGate(
       return `Review gate: command matches "${pattern}" — requires human approval`;
     }
   }
+  return null;
+}
+
+const LOCALHOST_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0']);
+
+function checkNetworkLock(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  config: GuardrailConfig,
+): string | null {
+  if (!config.networkLock || config.networkLock.action !== 'block') return null;
+  if (toolName !== 'Bash') return null;
+
+  const cmd = String(toolInput.command || '');
+  if (!cmd) return null;
+
+  // Extract hostnames from curl/wget/fetch commands
+  const urlPatterns = [
+    // curl https://example.com/... or curl http://example.com/...
+    /\bcurl\b[^|]*?\b(?:https?:\/\/)([^\/\s:]+)/g,
+    // wget https://example.com/...
+    /\bwget\b[^|]*?\b(?:https?:\/\/)([^\/\s:]+)/g,
+    // curl -X POST https://... (already covered above)
+    // nc / ncat hostname port
+    /\b(?:nc|ncat)\b\s+([^\s-][^\s]*)/g,
+  ];
+
+  const { allowedHosts, blockedHosts } = config.networkLock;
+
+  for (const pattern of urlPatterns) {
+    let match;
+    while ((match = pattern.exec(cmd)) !== null) {
+      const hostname = match[1];
+      if (!hostname || LOCALHOST_HOSTS.has(hostname)) continue;
+
+      // Check blocked hosts
+      for (const blocked of blockedHosts) {
+        if (hostname === blocked || hostname.endsWith('.' + blocked)) {
+          return `Network request blocked by Hawkeye guardrail: hostname "${hostname}" is in the blocklist (matched: "${blocked}")`;
+        }
+      }
+
+      // Check allowlist
+      if (allowedHosts.length > 0) {
+        const isAllowed = allowedHosts.some(
+          (allowed: string) => hostname === allowed || hostname.endsWith('.' + allowed),
+        );
+        if (!isAllowed) {
+          return `Network request blocked by Hawkeye guardrail: hostname "${hostname}" is not in the allowlist`;
+        }
+      }
+    }
+  }
+
   return null;
 }
 
@@ -695,6 +766,8 @@ export const hookHandlerCommand = new Command('hook-handler')
           if (dirCheck) violations.push(dirCheck);
           const reviewCheck = checkReviewGate(toolName, toolInput, config);
           if (reviewCheck) violations.push(reviewCheck);
+          const networkCheck = checkNetworkLock(toolName, toolInput, config);
+          if (networkCheck) violations.push(networkCheck);
 
           if (violations.length > 0) {
             // Record the guardrail block event

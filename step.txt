@@ -208,3 +208,38 @@
 
   Tu veux que j'implémente les gaps manquants ? Je recommande de commencer par les Tier 1 restants
    : git events, error events, alias watch, et npm publish setup.
+
+apres:
+  4. Universal Ingestion & MCP
+
+  Statut : API générique, zéro MCP
+
+  - POST /api/ingest fonctionne bien comme endpoint générique
+  - Auto-création de sessions, broadcast WebSocket
+  - Mais : aucun code MCP dans tout le codebase — pas de serveur MCP, pas de
+  types MCP, pas de binding MCP
+  - C'est juste un POST endpoint REST classique
+
+  Verdict : 30% — L'ingestion marche, mais "MCP support" est du marketing
+  prématuré.
+
+   gere ca :
+     Ce qui manque :
+  - Pas de live stream d'events depuis le TUI (pas de hawkeye tail ou mode
+  watch)
+  - /active montre un snapshot, pas du temps réel
+  - Pour voir les events défiler live, il faut ouvrir le dashboard web
+
+  Verdict : 70% — L'inspection post-hoc est excellente, mais le monitoring live
+   reste browser-only.
+  Ce qui est trompeur :
+  - network_lock — log only, ne bloque PAS les requêtes réseau (elles sont déjà
+   parties)
+  - review_gate — identique à command_block, pas de prompt d'approbation
+  humaine
+  - En mode record, les guardrails sont post-hoc, pas proactifs
+
+  Verdict : 60% — Excellent via hooks Claude Code, mais le mode record est plus
+   "observabilité" que "sécurité".
+    │ hawkeye record            │ NON — l'action s'exécute, puis est flaggée │
+  │                           │  dans la DB

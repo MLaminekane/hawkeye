@@ -32,7 +32,7 @@ export { createFilesystemInterceptor } from './interceptors/filesystem.js';
 export type { FilesystemInterceptor, FilesystemInterceptorOptions, FileCallback } from './interceptors/filesystem.js';
 
 export { createNetworkInterceptor } from './interceptors/network.js';
-export type { NetworkInterceptor, LlmCallback, ApiCallback } from './interceptors/network.js';
+export type { NetworkInterceptor, LlmCallback, ApiCallback, NetworkBlockCallback, NetworkLockConfig } from './interceptors/network.js';
 
 export { estimateCost, COST_TABLE, LLM_ENDPOINTS } from './interceptors/llm.js';
 export type { TokenInfo, LlmEndpointConfig } from './interceptors/llm.js';
