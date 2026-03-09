@@ -1,8 +1,9 @@
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { execSync } from 'node:child_process';
 import chalk from 'chalk';
 import { Storage, type SessionRow } from '@hawkeye/core';
 import {
@@ -60,7 +61,10 @@ const COMMANDS: SlashCommand[] = [
   { name: 'export', desc: 'Export session as JSON' },
   { name: 'end', desc: 'End active sessions' },
   { name: 'restart', desc: 'Restart a session' },
+  { name: 'revert', desc: 'Revert file changes' },
   { name: 'delete', desc: 'Delete a session' },
+  { name: 'purge', desc: 'Delete ALL sessions (including old)' },
+  { name: 'kill', desc: 'Kill hawkeye background processes' },
   { name: 'settings', desc: 'Configure Hawkeye' },
   { name: 'serve', desc: 'Open dashboard :4242' },
   { name: 'init', desc: 'Initialize Hawkeye (auto-runs on /new)' },
@@ -477,8 +481,14 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     await cmdEnd(dbPath, args);
   } else if (c === 'restart') {
     await cmdRestart(dbPath, cwd, args);
+  } else if (c === 'revert') {
+    await cmdRevert(dbPath, cwd, args);
   } else if (c === 'delete') {
     await cmdDelete(dbPath, args);
+  } else if (c === 'purge') {
+    await cmdPurge(dbPath);
+  } else if (c === 'kill') {
+    await cmdKill();
   } else if (c === 'inspect') {
     await cmdInspect(dbPath, args);
   } else if (c === 'compare') {
@@ -1154,6 +1164,149 @@ async function cmdRestart(dbPath: string, cwd: string, args: string): Promise<vo
   console.log(chalk.dim(`    Launch Claude Code to start recording.`));
 }
 
+async function cmdRevert(dbPath: string, cwd: string, args: string): Promise<void> {
+  const db = getStorage(dbPath);
+  if (!db) return;
+
+  // Pick a session
+  let sessionId = args;
+  if (!sessionId) {
+    const r = db.listSessions({ limit: 10 });
+    const sessions = r.ok ? r.value : [];
+    if (sessions.length === 0) {
+      console.log(chalk.dim('  No sessions.'));
+      db.close();
+      return;
+    }
+    console.log('');
+    for (let i = 0; i < sessions.length; i++) {
+      const s = sessions[i];
+      console.log(
+        `  ${o.bold(`${i + 1})`)} ${chalk.dim(s.id.slice(0, 8))}  ${chalk.white(s.objective.slice(0, 40))}  ${chalk.dim(`${s.total_actions}a`)}`,
+      );
+    }
+    console.log('');
+    const pick = await ask(`  ${o('›')} `);
+    const idx = parseInt(pick, 10);
+    if (isNaN(idx) || idx < 1 || idx > sessions.length) {
+      db.close();
+      return;
+    }
+    sessionId = sessions[idx - 1].id;
+  }
+
+  // Get session
+  const sess = db.getSession(sessionId);
+  if (!sess.ok || !sess.value) {
+    console.log(chalk.red(`  Not found: ${sessionId}`));
+    db.close();
+    return;
+  }
+
+  // Get file_write events
+  const evts = db.getEvents(sess.value.id, { type: 'file_write' });
+  if (!evts.ok || evts.value.length === 0) {
+    console.log(chalk.dim('  No file changes in this session.'));
+    db.close();
+    return;
+  }
+
+  // Collect files
+  const fileEvents: { id: string; path: string; seq: number }[] = [];
+  for (const ev of evts.value) {
+    const data = JSON.parse(ev.data);
+    if (data.path) {
+      fileEvents.push({ id: ev.id, path: data.path, seq: ev.sequence });
+    }
+  }
+
+  if (fileEvents.length === 0) {
+    console.log(chalk.dim('  No file paths in events.'));
+    db.close();
+    return;
+  }
+
+  // Show file list
+  const shortPath = (p: string) => p.startsWith(cwd) ? p.slice(cwd.length + 1) : p;
+  console.log('');
+  console.log(`  ${o.bold('0)')} ${o('Revert ALL files')}`);
+  for (let i = 0; i < fileEvents.length; i++) {
+    const fe = fileEvents[i];
+    console.log(`  ${o.bold(`${i + 1})`)} ${chalk.dim(`#${fe.seq}`)} ${shortPath(fe.path)}`);
+  }
+  console.log('');
+  const pick = await ask(`  ${o('›')} `);
+  const idx = parseInt(pick, 10);
+  if (isNaN(idx) || idx < 0 || idx > fileEvents.length) {
+    db.close();
+    return;
+  }
+
+  if (idx === 0) {
+    // Revert all — reverse order, deduplicate by path
+    const reversed = [...fileEvents].reverse();
+    const seen = new Set<string>();
+    let ok = 0;
+    let fail = 0;
+    for (const fe of reversed) {
+      if (seen.has(fe.path)) continue;
+      seen.add(fe.path);
+      const result = revertSingleEvent(db, fe.id, cwd);
+      if (result.ok) {
+        console.log(chalk.green(`  ✓ ${shortPath(fe.path)} (${result.method})`));
+        ok++;
+      } else {
+        console.log(chalk.red(`  ✗ ${shortPath(fe.path)} — ${result.error}`));
+        fail++;
+      }
+    }
+    console.log(chalk.dim(`\n  ${ok} reverted, ${fail} failed`));
+  } else {
+    // Revert single
+    const fe = fileEvents[idx - 1];
+    const result = revertSingleEvent(db, fe.id, cwd);
+    if (result.ok) {
+      console.log(chalk.green(`  ✓ Reverted ${shortPath(fe.path)} (${result.method})`));
+    } else {
+      console.log(chalk.red(`  ✗ ${result.error}`));
+    }
+  }
+
+  db.close();
+}
+
+function revertSingleEvent(
+  db: Storage,
+  eventId: string,
+  cwd: string,
+): { ok: true; path: string; method: string } | { ok: false; error: string } {
+  const ev = db.getEventById(eventId);
+  if (!ev.ok || !ev.value) return { ok: false, error: 'Event not found' };
+
+  const data = JSON.parse(ev.value.data);
+  const filePath = data.path;
+  if (!filePath) return { ok: false, error: 'No file path' };
+
+  // Strategy 1: Reverse string replacement
+  if (data.contentBefore != null && data.contentAfter != null && existsSync(filePath)) {
+    try {
+      const current = readFileSync(filePath, 'utf-8');
+      if (current.includes(data.contentAfter)) {
+        writeFileSync(filePath, current.replace(data.contentAfter, data.contentBefore), 'utf-8');
+        return { ok: true, path: filePath, method: 'reverse-edit' };
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Strategy 2: git checkout
+  try {
+    execSync(`git checkout HEAD -- "${filePath}"`, { cwd, stdio: 'pipe' });
+    return { ok: true, path: filePath, method: 'git-checkout' };
+  } catch (err) {
+    return { ok: false, error: `git checkout failed: ${String(err)}` };
+  }
+}
+
 async function cmdDelete(dbPath: string, args: string): Promise<void> {
   const db = getStorage(dbPath);
   if (!db) return;
@@ -1193,7 +1346,9 @@ async function cmdDelete(dbPath: string, args: string): Promise<void> {
 
   // Parse selection: support "1 2 3", "1-5", "all"
   let indices: number[] = [];
+  let deleteAll = false;
   if (pick.toLowerCase() === 'all') {
+    deleteAll = true;
     indices = r.value.map((_, i) => i);
   } else {
     for (const part of pick.split(/[\s,]+/)) {
@@ -1210,9 +1365,15 @@ async function cmdDelete(dbPath: string, args: string): Promise<void> {
   }
 
   // Filter valid indices
-  const sessions = indices
+  let sessions = indices
     .filter((i) => i >= 0 && i < r.value.length)
     .map((i) => r.value[i]);
+
+  // When "all" is selected, fetch every session (not just the displayed 15)
+  if (deleteAll) {
+    const all = db.listSessions({ limit: 10000 });
+    sessions = all.ok ? all.value : sessions;
+  }
 
   if (sessions.length === 0) { db.close(); return; }
 
@@ -1968,6 +2129,62 @@ async function settingsApiKeys(config: HawkeyeConfig, cwd: string): Promise<void
       break;
     }
   }
+}
+
+async function cmdKill(): Promise<void> {
+  const http = await import('node:http');
+  let killed = 0;
+
+  for (let p = 4242; p <= 4252; p++) {
+    const info = await new Promise<{ cwd?: string } | null>((resolve) => {
+      const req = http.get(`http://localhost:${p}/api/info`, { timeout: 500 }, (res) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); } catch { resolve(null); }
+        });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+
+    if (info) {
+      try {
+        execSync(`lsof -ti :${p} | xargs kill 2>/dev/null`, { stdio: 'ignore' });
+        console.log(chalk.green(`  ✓ Killed hawkeye on :${p}`));
+        killed++;
+      } catch {
+        // process already dead or permission denied
+      }
+    }
+  }
+
+  if (killed === 0) {
+    console.log(chalk.dim('  No hawkeye background processes found.'));
+  }
+}
+
+async function cmdPurge(dbPath: string): Promise<void> {
+  const db = getStorage(dbPath);
+  if (!db) return;
+
+  const r = db.listSessions({ limit: 10000 });
+  if (!r.ok || r.value.length === 0) {
+    console.log(chalk.dim('  No sessions to purge.'));
+    db.close();
+    return;
+  }
+
+  const y = await ask(chalk.red(`  Purge ALL ${r.value.length} sessions? (y/N) `));
+  if (y.toLowerCase() !== 'y') { db.close(); return; }
+
+  let deleted = 0;
+  for (const s of r.value) {
+    const del = db.deleteSession(s.id);
+    if (del.ok) deleted++;
+  }
+  console.log(chalk.green(`  ✓ Purged ${deleted} session${deleted > 1 ? 's' : ''}`));
+  db.close();
 }
 
 async function cmdServe(): Promise<void> {

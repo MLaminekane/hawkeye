@@ -15,6 +15,7 @@ import { endCommand } from './commands/end.js';
 import { restartCommand } from './commands/restart.js';
 import { inspectCommand } from './commands/inspect.js';
 import { compareCommand } from './commands/compare.js';
+import { revertCommand } from './commands/revert.js';
 import { startInteractive } from './interactive.js';
 
 const program = new Command();
@@ -38,6 +39,7 @@ program.addCommand(endCommand);
 program.addCommand(restartCommand);
 program.addCommand(inspectCommand);
 program.addCommand(compareCommand);
+program.addCommand(revertCommand);
 
 // If no subcommand is given, launch interactive mode
 const knownCommands = program.commands.flatMap((c) => [c.name(), ...c.aliases()]);

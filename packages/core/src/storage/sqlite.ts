@@ -251,6 +251,15 @@ export class Storage {
     }
   }
 
+  getEventById(eventId: string): Result<EventRow | null> {
+    try {
+      const row = this.db.prepare('SELECT * FROM events WHERE id = ?').get(eventId) as EventRow | undefined;
+      return { ok: true, value: row ?? null };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
   getNextSequence(sessionId: string): number {
     const row = this.db
       .prepare('SELECT COALESCE(MAX(sequence), 0) as max_seq FROM events WHERE session_id = ?')
