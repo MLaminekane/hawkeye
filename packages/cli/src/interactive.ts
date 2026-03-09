@@ -260,7 +260,9 @@ function rawPrompt(): Promise<string> {
     let buf = '';
     let pos = 0;
     let sel = 0;
+    let scrollOff = 0;
     let prevLines = 0;
+    const PAGE_SIZE = 5;
 
     const render = () => {
       const filtered = getFiltered(buf);
@@ -270,7 +272,13 @@ function rawPrompt(): Promise<string> {
         sel = Math.max(0, Math.min(sel, filtered.length - 1));
       } else {
         sel = 0;
+        scrollOff = 0;
       }
+
+      // Adjust scroll offset to keep selection visible
+      if (sel < scrollOff) scrollOff = sel;
+      if (sel >= scrollOff + PAGE_SIZE) scrollOff = sel - PAGE_SIZE + 1;
+      scrollOff = Math.max(0, Math.min(scrollOff, Math.max(0, filtered.length - PAGE_SIZE)));
 
       // Redraw prompt line
       process.stdout.write(`\r\x1b[K${o('›')} ${buf}`);
@@ -280,16 +288,34 @@ function rawPrompt(): Promise<string> {
         process.stdout.write(chalk.dim('/ for commands'));
       }
 
-      // Draw picker lines
-      const lines = filtered.length;
-      for (let i = 0; i < lines; i++) {
+      // Draw visible picker lines (windowed)
+      const visCount = Math.min(PAGE_SIZE, filtered.length);
+      const hasAbove = scrollOff > 0;
+      const hasBelow = scrollOff + PAGE_SIZE < filtered.length;
+      let lines = 0;
+
+      if (hasAbove) {
         process.stdout.write('\n\x1b[K');
-        const isSel = i === sel;
+        process.stdout.write(chalk.dim('    ↑ more'));
+        lines++;
+      }
+
+      for (let i = 0; i < visCount; i++) {
+        const idx = scrollOff + i;
+        process.stdout.write('\n\x1b[K');
+        const isSel = idx === sel;
         const arrow = isSel ? o(' ❯') : '  ';
         const name = isSel
-          ? o.bold(`/${filtered[i].name.padEnd(14)}`)
-          : chalk.dim(`/${filtered[i].name.padEnd(14)}`);
-        process.stdout.write(`${arrow} ${name} ${chalk.dim(filtered[i].desc)}`);
+          ? o.bold(`/${filtered[idx].name.padEnd(14)}`)
+          : chalk.dim(`/${filtered[idx].name.padEnd(14)}`);
+        process.stdout.write(`${arrow} ${name} ${chalk.dim(filtered[idx].desc)}`);
+        lines++;
+      }
+
+      if (hasBelow) {
+        process.stdout.write('\n\x1b[K');
+        process.stdout.write(chalk.dim('    ↓ more'));
+        lines++;
       }
 
       // Clear leftover lines from previous render
@@ -340,6 +366,7 @@ function rawPrompt(): Promise<string> {
             buf = buf.slice(0, pos) + (key.ch || '') + buf.slice(pos);
             pos++;
             sel = 0;
+            scrollOff = 0;
             break;
 
           case 'backspace':
@@ -347,6 +374,7 @@ function rawPrompt(): Promise<string> {
               buf = buf.slice(0, pos - 1) + buf.slice(pos);
               pos--;
               sel = 0;
+              scrollOff = 0;
             }
             break;
 
@@ -407,6 +435,7 @@ function rawPrompt(): Promise<string> {
               buf = '';
               pos = 0;
               sel = 0;
+              scrollOff = 0;
             }
             break;
 
@@ -430,6 +459,7 @@ function rawPrompt(): Promise<string> {
             buf = buf.slice(pos);
             pos = 0;
             sel = 0;
+            scrollOff = 0;
             break;
 
           case 'ctrl-l':
