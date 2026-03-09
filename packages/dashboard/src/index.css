@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;700&family=Outfit:wght@500;600;700&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -6,14 +6,18 @@
 
 /* Dark theme (default) */
 html.dark {
-  --hawk-bg: #09090B;
-  --hawk-surface: #16161D;
-  --hawk-surface2: #1E1E28;
-  --hawk-surface3: #262632;
-  --hawk-border: #2A2A3A;
-  --hawk-text: #E8E8ED;
-  --hawk-text2: #9898A8;
-  --hawk-text3: #5A5A6E;
+  --hawk-bg: #060608;
+  --hawk-surface: #111117;
+  --hawk-surface2: #18181f;
+  --hawk-surface3: #202028;
+  --hawk-border: #242430;
+  --hawk-border-subtle: rgba(36, 36, 48, 0.35);
+  --hawk-glow-a: rgba(255, 95, 31, 0.14);
+  --hawk-glow-b: rgba(34, 197, 94, 0.08);
+  --hawk-glow-c: rgba(240, 168, 48, 0.08);
+  --hawk-text: #ececf0;
+  --hawk-text2: #8f8fa3;
+  --hawk-text3: #555568;
 }
 
 /* Light theme */
@@ -23,6 +27,10 @@ html.light {
   --hawk-surface2: #F0F0F5;
   --hawk-surface3: #E4E4EC;
   --hawk-border: #D0D0DE;
+  --hawk-border-subtle: rgba(208, 208, 222, 0.5);
+  --hawk-glow-a: rgba(255, 107, 43, 0.12);
+  --hawk-glow-b: rgba(46, 204, 113, 0.08);
+  --hawk-glow-c: rgba(255, 180, 67, 0.08);
   --hawk-text: #1A1A2E;
   --hawk-text2: #5A5A70;
   --hawk-text3: #8888A0;
@@ -30,10 +38,18 @@ html.light {
 
 body {
   background-color: var(--hawk-bg);
+  background-image:
+    radial-gradient(1000px 500px at 10% -10%, var(--hawk-glow-a), transparent 60%),
+    radial-gradient(800px 440px at 100% 0%, var(--hawk-glow-b), transparent 62%),
+    radial-gradient(860px 420px at 50% 120%, var(--hawk-glow-c), transparent 60%);
   color: var(--hawk-text);
-  font-family: 'DM Sans', sans-serif;
+  font-family: 'Instrument Sans', sans-serif;
   -webkit-font-smoothing: antialiased;
   transition: background-color 0.2s, color 0.2s;
+}
+
+#root {
+  isolation: isolate;
 }
 
 ::-webkit-scrollbar {

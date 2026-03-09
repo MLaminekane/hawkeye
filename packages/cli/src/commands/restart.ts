@@ -76,6 +76,9 @@ export const restartCommand = new Command('restart')
         model,
         workingDir: cwd,
       },
+      totalCostUsd: 0,
+      totalTokens: 0,
+      totalActions: 0,
     });
 
     // 4. Update hook-sessions.json so the hook handler uses this new session

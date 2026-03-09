@@ -33,16 +33,21 @@ export interface TerminalInterceptor {
   destroy(): void;
 }
 
-export function createTerminalInterceptor(onEvent: CommandCallback): TerminalInterceptor {
+export interface TerminalInterceptorOptions {
+  maxStdoutBytes?: number;
+}
+
+export function createTerminalInterceptor(onEvent: CommandCallback, options?: TerminalInterceptorOptions): TerminalInterceptor {
+  const maxBytes = options?.maxStdoutBytes ?? 10240;
   return {
-    spawn(command: string, args: string[], options?: SpawnOptions): ChildProcess {
+    spawn(command: string, args: string[], spawnOptions?: SpawnOptions): ChildProcess {
       const startTime = Date.now();
-      const cwd = (options?.cwd as string) ?? process.cwd();
+      const cwd = (spawnOptions?.cwd as string) ?? process.cwd();
 
       logger.debug(`Spawning: ${command} ${args.join(' ')}`);
 
       const child = spawn(command, args, {
-        ...options,
+        ...spawnOptions,
         stdio: ['inherit', 'pipe', 'pipe'],
       });
 
@@ -67,8 +72,8 @@ export function createTerminalInterceptor(onEvent: CommandCallback): TerminalInt
           args: args.map(sanitize),
           cwd,
           exitCode: exitCode ?? undefined,
-          stdout: truncate(sanitize(stdout)),
-          stderr: truncate(sanitize(stderr)),
+          stdout: truncate(sanitize(stdout), maxBytes),
+          stderr: truncate(sanitize(stderr), maxBytes),
         };
 
         logger.debug(`Command exited with code ${exitCode}: ${command}`);

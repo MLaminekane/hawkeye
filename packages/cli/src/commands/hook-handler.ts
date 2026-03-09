@@ -13,7 +13,7 @@
 
 import { Command } from 'commander';
 import { join, extname } from 'node:path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { Storage, scoreHeuristic, slidingDriftScore } from '@hawkeye/core';
 import type { TraceEvent, EventType, DriftFlag } from '@hawkeye/core';
@@ -72,22 +72,35 @@ function truncate(text: string, max: number = 10240): string {
 
 // ── Guardrail config ──
 
+interface WebhookConfig {
+  enabled: boolean;
+  url: string;
+  events: string[];
+}
+
 interface GuardrailConfig {
   protectedFiles: string[];
   dangerousCommands: string[];
   blockedDirs: string[];
+  reviewGatePatterns: string[];
+  autoPause: boolean;
+  webhooks: WebhookConfig[];
 }
 
 function loadGuardrailConfig(): GuardrailConfig {
   const defaults: GuardrailConfig = {
-    protectedFiles: ['.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519'],
+    protectedFiles: ['.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519', '*.credentials', '*.secret'],
     dangerousCommands: [
       'rm -rf /', 'rm -rf ~', 'rm -rf .', 'sudo rm',
       'DROP TABLE', 'DROP DATABASE', 'TRUNCATE TABLE',
-      'curl * | bash', 'wget * | bash',
-      '> /dev/sda', 'mkfs', 'dd if=',
+      'curl * | bash', 'curl * | sh', 'wget * | bash', 'wget * | sh',
+      'chmod 777', 'mkfs*', 'dd if=*of=/dev/*',
+      '> /dev/sda',
     ],
-    blockedDirs: ['/etc', '/usr', '/var', '/sys', '/boot', '~/.ssh', '~/.gnupg'],
+    blockedDirs: ['/etc', '/usr', '/var', '/sys', '/boot', '~/.ssh', '~/.gnupg', '~/.aws'],
+    reviewGatePatterns: [],
+    autoPause: true,
+    webhooks: [],
   };
 
   // Load custom config from .hawkeye/config.json if exists
@@ -96,22 +109,63 @@ function loadGuardrailConfig(): GuardrailConfig {
     if (existsSync(configPath)) {
       const config = JSON.parse(readFileSync(configPath, 'utf-8'));
       const rules = config.guardrails || [];
+      const filePaths: string[] = [];
+      const cmdPatterns: string[] = [];
+      const blockDirs: string[] = [];
+      const reviewPatterns: string[] = [];
       for (const rule of rules) {
         if (!rule.enabled) continue;
-        if (rule.type === 'file_protect' && rule.config?.paths) {
-          defaults.protectedFiles = rule.config.paths;
+        if (rule.type === 'file_protect' && rule.config?.paths?.length) {
+          filePaths.push(...rule.config.paths);
         }
-        if (rule.type === 'command_block' && rule.config?.patterns) {
-          defaults.dangerousCommands = rule.config.patterns;
+        if (rule.type === 'command_block' && rule.config?.patterns?.length) {
+          cmdPatterns.push(...rule.config.patterns);
         }
-        if (rule.type === 'directory_scope' && rule.config?.blockedDirs) {
-          defaults.blockedDirs = rule.config.blockedDirs;
+        if (rule.type === 'directory_scope' && rule.config?.blockedDirs?.length) {
+          blockDirs.push(...rule.config.blockedDirs);
         }
+        if (rule.type === 'review_gate' && rule.config?.patterns?.length) {
+          reviewPatterns.push(...rule.config.patterns);
+        }
+      }
+      if (filePaths.length) defaults.protectedFiles = filePaths;
+      if (cmdPatterns.length) defaults.dangerousCommands = cmdPatterns;
+      if (blockDirs.length) defaults.blockedDirs = blockDirs;
+      if (reviewPatterns.length) defaults.reviewGatePatterns = reviewPatterns;
+
+      // Load auto-pause setting from drift config
+      if (config.drift?.autoPause) defaults.autoPause = true;
+
+      // Load webhooks
+      if (config.webhooks?.length) {
+        defaults.webhooks = config.webhooks.filter((w: WebhookConfig) => w.enabled);
       }
     }
   } catch {}
 
   return defaults;
+}
+
+// ── Webhook notifications ──
+
+function fireWebhooks(
+  webhooks: WebhookConfig[],
+  eventType: string,
+  payload: Record<string, unknown>,
+): void {
+  for (const wh of webhooks) {
+    if (wh.events.length > 0 && !wh.events.includes(eventType)) continue;
+    // Fire-and-forget — don't block the hook handler
+    fetch(wh.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event: eventType,
+        timestamp: new Date().toISOString(),
+        ...payload,
+      }),
+    }).catch(() => {});
+  }
 }
 
 // ── Session tracking ──
@@ -165,27 +219,46 @@ function getOrCreateSession(
     return sessions[claudeSessionId];
   }
 
-  const sessionId = randomUUID();
-  const now = new Date();
+  // Check for a pending session pre-created by /new in the TUI
+  let resolvedObjective = objective || 'Claude Code Session';
+  let sessionId: string | null = null;
+  const pendingPath = join(getHawkDir(), 'pending-session.json');
+  try {
+    if (existsSync(pendingPath)) {
+      const pending = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+      if (pending.sessionId) sessionId = pending.sessionId;
+      if (pending.objective) resolvedObjective = pending.objective;
+      // Consume it — one-time use
+      unlinkSync(pendingPath);
+    }
+  } catch {}
 
-  storage.createSession({
-    id: sessionId,
-    objective: objective || 'Claude Code Session',
-    startedAt: now,
-    status: 'recording',
-    metadata: {
-      agent: 'claude-code',
-      model: DEFAULT_MODEL,
-      workingDir: process.cwd(),
-    },
-  });
+  // If no pre-created session, create one now
+  if (!sessionId) {
+    sessionId = randomUUID();
+    const now = new Date();
+    storage.createSession({
+      id: sessionId,
+      objective: resolvedObjective,
+      startedAt: now,
+      status: 'recording',
+      metadata: {
+        agent: 'claude-code',
+        model: DEFAULT_MODEL,
+        workingDir: process.cwd(),
+      },
+      totalCostUsd: 0,
+      totalTokens: 0,
+      totalActions: 0,
+    });
+  }
 
   const hookSession: HookSession = {
     hawkeyeSessionId: sessionId,
     claudeSessionId,
-    objective: objective || 'Claude Code Session',
-    startedAt: now.toISOString(),
-    lastActivityAt: now.toISOString(),
+    objective: resolvedObjective,
+    startedAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString(),
     eventCount: 0,
     totalCostUsd: 0,
     driftScores: [],
@@ -230,10 +303,10 @@ function checkFileProtection(
   toolInput: Record<string, unknown>,
   config: GuardrailConfig,
 ): string | null {
-  if (!['Write', 'Edit', 'Bash'].includes(toolName)) return null;
+  if (!['Write', 'Edit', 'Read', 'Bash'].includes(toolName)) return null;
 
   let filePath = '';
-  if (toolName === 'Write' || toolName === 'Edit') {
+  if (toolName === 'Write' || toolName === 'Edit' || toolName === 'Read') {
     filePath = String(toolInput.file_path || toolInput.path || '');
   } else if (toolName === 'Bash') {
     const cmd = String(toolInput.command || '');
@@ -266,8 +339,11 @@ function checkDangerousCommand(
   if (!cmd) return null;
 
   for (const pattern of config.dangerousCommands) {
-    const check = pattern.replace(/\*/g, '');
-    if (check && cmd.includes(check)) {
+    // Convert wildcard pattern to regex: * → .* , escape regex-special chars
+    const escaped = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*');
+    if (new RegExp(escaped, 'i').test(cmd)) {
       return `Command matches dangerous pattern: "${pattern}"`;
     }
   }
@@ -285,9 +361,10 @@ function checkDirectoryScope(
     targetPath = String(toolInput.file_path || toolInput.path || '');
   } else if (toolName === 'Bash') {
     const cmd = String(toolInput.command || '');
+    const home = process.env.HOME || '/root';
     for (const dir of config.blockedDirs) {
-      const expanded = dir.replace('~', process.env.HOME || '/root');
-      if (cmd.includes(expanded) || cmd.includes(dir)) {
+      const expanded = dir.replace('~', home);
+      if (cmd.includes(expanded) || cmd.includes(dir) || cmd.includes(expanded.replace(home, '~'))) {
         return `Command accesses blocked directory: ${dir}`;
       }
     }
@@ -305,9 +382,88 @@ function checkDirectoryScope(
   return null;
 }
 
+function checkReviewGate(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  config: GuardrailConfig,
+): string | null {
+  if (toolName !== 'Bash' || config.reviewGatePatterns.length === 0) return null;
+  const cmd = String(toolInput.command || '');
+  if (!cmd) return null;
+
+  for (const pattern of config.reviewGatePatterns) {
+    const check = pattern.replace(/\*/g, '');
+    if (check && cmd.includes(check)) {
+      return `Review gate: command matches "${pattern}" — requires human approval`;
+    }
+  }
+  return null;
+}
+
 // ── Event mapping ──
 
-function mapToolToEventType(toolName: string): EventType {
+// ── Git command detection ──
+
+const GIT_PATTERNS: Array<{ regex: RegExp; type: EventType; operation: string }> = [
+  { regex: /\bgit\s+commit\b/, type: 'git_commit', operation: 'commit' },
+  { regex: /\bgit\s+push\b/, type: 'git_push', operation: 'push' },
+  { regex: /\bgit\s+pull\b/, type: 'git_pull', operation: 'pull' },
+  { regex: /\bgit\s+merge\b/, type: 'git_merge', operation: 'merge' },
+  { regex: /\bgit\s+(?:checkout|switch)\b/, type: 'git_checkout', operation: 'checkout' },
+];
+
+function detectGitCommand(command: string): { type: EventType; operation: string } | null {
+  for (const pattern of GIT_PATTERNS) {
+    if (pattern.regex.test(command)) {
+      return { type: pattern.type, operation: pattern.operation };
+    }
+  }
+  return null;
+}
+
+function parseGitOutput(operation: string, command: string, output: string): Record<string, unknown> {
+  const data: Record<string, unknown> = { operation };
+
+  if (operation === 'commit') {
+    // Extract commit hash from output like "[main abc1234] message"
+    const hashMatch = output.match(/\[[\w/.-]+\s+([a-f0-9]{7,40})\]/);
+    if (hashMatch) data.commitHash = hashMatch[1];
+    // Extract message from -m flag
+    const msgMatch = command.match(/-m\s+["']([^"']+)["']/);
+    if (msgMatch) data.message = msgMatch[1];
+    // Extract stats: "3 files changed, 10 insertions(+), 5 deletions(-)"
+    const statsMatch = output.match(/(\d+)\s+files?\s+changed(?:,\s+(\d+)\s+insertions?)?(?:.*?(\d+)\s+deletions?)?/);
+    if (statsMatch) {
+      data.filesChanged = parseInt(statsMatch[1]) || 0;
+      data.linesAdded = parseInt(statsMatch[2]) || 0;
+      data.linesRemoved = parseInt(statsMatch[3]) || 0;
+    }
+  } else if (operation === 'checkout') {
+    // Extract branch from "Switched to branch 'foo'" or from command
+    const branchMatch = output.match(/Switched to (?:a new )?branch '([^']+)'/) ||
+                        command.match(/(?:checkout|switch)\s+(?:-[bB]\s+)?(\S+)/);
+    if (branchMatch) data.branch = branchMatch[1];
+  } else if (operation === 'push') {
+    const remoteMatch = command.match(/push\s+(\S+)(?:\s+(\S+))?/);
+    if (remoteMatch) {
+      data.branch = remoteMatch[2] || undefined;
+    }
+  } else if (operation === 'pull') {
+    const statsMatch = output.match(/(\d+)\s+files?\s+changed/);
+    if (statsMatch) data.filesChanged = parseInt(statsMatch[1]) || 0;
+  } else if (operation === 'merge') {
+    const branchMatch = command.match(/merge\s+(\S+)/);
+    if (branchMatch) data.targetBranch = branchMatch[1];
+  }
+
+  return data;
+}
+
+function mapToolToEventType(toolName: string, toolInput?: Record<string, unknown>): EventType {
+  if (toolName === 'Bash' && toolInput?.command) {
+    const gitCmd = detectGitCommand(String(toolInput.command));
+    if (gitCmd) return gitCmd.type;
+  }
   switch (toolName) {
     case 'Bash':
       return 'command';
@@ -329,7 +485,17 @@ function buildEventData(
   toolName: string,
   toolInput: Record<string, unknown>,
   toolOutput?: string,
+  eventType?: EventType,
 ): Record<string, unknown> {
+  // ── Git events ──
+  if (eventType && eventType.startsWith('git_') && toolName === 'Bash') {
+    const command = String(toolInput.command || '');
+    const gitCmd = detectGitCommand(command);
+    if (gitCmd) {
+      return parseGitOutput(gitCmd.operation, command, toolOutput || '');
+    }
+  }
+
   switch (toolName) {
     case 'Bash': {
       const command = String(toolInput.command || '');
@@ -360,27 +526,36 @@ function buildEventData(
     }
     case 'Write': {
       const filePath = String(toolInput.file_path || toolInput.path || '');
+      const content = toolInput.content ? String(toolInput.content) : undefined;
       return {
         path: filePath,
         action: 'write',
         sizeBytes: getFileSize(filePath),
         contentHash: computeFileHash(filePath),
+        contentAfter: content ? truncate(content, 5000) : undefined,
       };
     }
     case 'Edit': {
       const filePath = String(toolInput.file_path || toolInput.path || '');
+      const oldStr = toolInput.old_string ? String(toolInput.old_string) : undefined;
+      const newStr = toolInput.new_string ? String(toolInput.new_string) : undefined;
+      // Build a unified diff for display
+      let diff: string | undefined;
+      if (oldStr != null || newStr != null) {
+        const oldLines = (oldStr || '').split('\n').map((l: string) => `- ${l}`);
+        const newLines = (newStr || '').split('\n').map((l: string) => `+ ${l}`);
+        diff = [...oldLines, ...newLines].join('\n');
+      }
       return {
         path: filePath,
         action: 'write',
         sizeBytes: getFileSize(filePath),
         contentHash: computeFileHash(filePath),
-        // Approximate line diff from old_string/new_string if available
-        linesAdded: toolInput.new_string
-          ? String(toolInput.new_string).split('\n').length
-          : undefined,
-        linesRemoved: toolInput.old_string
-          ? String(toolInput.old_string).split('\n').length
-          : undefined,
+        linesAdded: newStr ? newStr.split('\n').length : undefined,
+        linesRemoved: oldStr ? oldStr.split('\n').length : undefined,
+        diff,
+        contentBefore: oldStr ? truncate(oldStr, 5000) : undefined,
+        contentAfter: newStr ? truncate(newStr, 5000) : undefined,
       };
     }
     case 'Read': {
@@ -518,6 +693,8 @@ export const hookHandlerCommand = new Command('hook-handler')
           if (cmdCheck) violations.push(cmdCheck);
           const dirCheck = checkDirectoryScope(toolName, toolInput, config);
           if (dirCheck) violations.push(dirCheck);
+          const reviewCheck = checkReviewGate(toolName, toolInput, config);
+          if (reviewCheck) violations.push(reviewCheck);
 
           if (violations.length > 0) {
             // Record the guardrail block event
@@ -558,6 +735,16 @@ export const hookHandlerCommand = new Command('hook-handler')
               );
             }
 
+            // Webhook notification for guardrail block
+            if (config.webhooks.length > 0) {
+              fireWebhooks(config.webhooks, 'guardrail_block', {
+                sessionId: session.hawkeyeSessionId,
+                violations,
+                tool: toolName,
+                objective: session.objective,
+              });
+            }
+
             // Output block reason and exit 2
             process.stdout.write(
               JSON.stringify({
@@ -592,8 +779,8 @@ export const hookHandlerCommand = new Command('hook-handler')
             hookData.objective,
           );
           const seq = storage.getNextSequence(session.hawkeyeSessionId);
-          const type = mapToolToEventType(toolName);
-          const data = buildEventData(toolName, toolInput, toolOutput);
+          const type = mapToolToEventType(toolName, toolInput);
+          const data = buildEventData(toolName, toolInput, toolOutput, type);
           const eventId = randomUUID();
 
           // ── LLM cost estimation ──
@@ -644,6 +831,31 @@ export const hookHandlerCommand = new Command('hook-handler')
             costUsd,
           });
 
+          // ── Error event emission ──
+          // If a command failed (non-zero exit code), emit a separate error event
+          if (type === 'command' && data.exitCode && data.exitCode !== 0) {
+            const errSeq = storage.getNextSequence(session.hawkeyeSessionId);
+            const stderr = typeof data.stdout === 'string'
+              ? data.stdout.split('\n').filter((l: string) => /error|fail|denied|not found/i.test(l)).join('\n').slice(0, 2048)
+              : '';
+            storage.insertEvent({
+              id: randomUUID(),
+              sessionId: session.hawkeyeSessionId,
+              timestamp: new Date(),
+              sequence: errSeq,
+              type: 'error',
+              data: {
+                message: `Command failed with exit code ${data.exitCode}: ${String(data.command || '').slice(0, 200)}`,
+                code: data.exitCode,
+                stderr: stderr || undefined,
+                source: 'command',
+                relatedEventId: eventId,
+              } as unknown as TraceEvent['data'],
+              durationMs: 0,
+              costUsd: 0,
+            });
+          }
+
           // ── Drift detection ──
           const drift = runDriftCheck(
             storage,
@@ -657,6 +869,25 @@ export const hookHandlerCommand = new Command('hook-handler')
           // Update event with drift info if we got a score
           if (drift) {
             storage.updateEventDrift(eventId, drift.score, drift.flag);
+          }
+
+          // Auto-pause on critical drift + webhook notification
+          if (drift && drift.flag === 'critical') {
+            const guardConfig = loadGuardrailConfig();
+            if (guardConfig.autoPause) {
+              storage.pauseSession(session.hawkeyeSessionId);
+              process.stderr.write(
+                `[hawkeye] Auto-paused session: drift score critical (${drift.score}/100)\n`,
+              );
+            }
+            if (guardConfig.webhooks.length > 0) {
+              fireWebhooks(guardConfig.webhooks, 'drift_critical', {
+                sessionId: session.hawkeyeSessionId,
+                score: drift.score,
+                objective: session.objective,
+                autoPaused: guardConfig.autoPause,
+              });
+            }
           }
 
           // Update session tracking

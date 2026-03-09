@@ -109,6 +109,18 @@ export const api = {
 
   getStats: () =>
     fetchJson<GlobalStatsData>(`${API_BASE}/stats`),
+
+  pauseSession: (id: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/pause`, {}),
+
+  resumeSession: (id: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/resume`, {}),
+
+  endSession: (id: string, status: 'completed' | 'aborted' = 'completed') =>
+    postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/end`, { status }),
+
+  revertFile: (eventId: string) =>
+    postJson<{ ok: boolean; path?: string; error?: string }>(`${API_BASE}/revert`, { event_id: eventId }),
 };
 
 // ─── WebSocket client ────────────────────────────────────────
@@ -118,6 +130,8 @@ export type WsMessage =
   | { type: 'drift_update'; sessionId: string; score: number; flag: string; reason: string }
   | { type: 'session_start'; session: SessionData }
   | { type: 'session_end'; session: SessionData }
+  | { type: 'session_pause'; sessionId: string }
+  | { type: 'session_resume'; sessionId: string }
   | { type: 'guardrail_violation'; sessionId: string; violation: Record<string, unknown> };
 
 type WsListener = (msg: WsMessage) => void;

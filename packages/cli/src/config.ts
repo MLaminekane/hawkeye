@@ -12,6 +12,17 @@ export interface DriftSettings {
   criticalThreshold: number;
   contextWindow: number;
   autoPause?: boolean;
+  ollamaUrl?: string;
+}
+
+export interface RecordingSettings {
+  ignorePatterns: string[];
+  maxStdoutBytes: number;
+  captureLlmContent: boolean;
+}
+
+export interface DashboardSettings {
+  openBrowser: boolean;
 }
 
 export interface GuardrailRuleSetting {
@@ -30,10 +41,19 @@ export interface ApiKeysSettings {
   google?: string;
 }
 
+export interface WebhookSettings {
+  enabled: boolean;
+  url: string;
+  events: string[];
+}
+
 export interface HawkeyeConfig {
   drift: DriftSettings;
   guardrails: GuardrailRuleSetting[];
   apiKeys?: ApiKeysSettings;
+  recording?: RecordingSettings;
+  dashboard?: DashboardSettings;
+  webhooks?: WebhookSettings[];
 }
 
 // ─── Provider models ─────────────────────────────────────────
@@ -87,7 +107,16 @@ export function getDefaultConfig(): HawkeyeConfig {
       warningThreshold: 60,
       criticalThreshold: 30,
       contextWindow: 10,
-      autoPause: false,
+      autoPause: true,
+      ollamaUrl: 'http://localhost:11434',
+    },
+    recording: {
+      ignorePatterns: [],
+      maxStdoutBytes: 10240,
+      captureLlmContent: false,
+    },
+    dashboard: {
+      openBrowser: true,
     },
     guardrails: [
       {
@@ -95,7 +124,7 @@ export function getDefaultConfig(): HawkeyeConfig {
         type: 'file_protect',
         enabled: true,
         action: 'block',
-        config: { paths: ['.env', '.env.*', '*.pem', '*.key'] },
+        config: { paths: ['.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519', '*.credentials', '*.secret'] },
       },
       {
         name: 'dangerous_commands',
@@ -103,7 +132,13 @@ export function getDefaultConfig(): HawkeyeConfig {
         enabled: true,
         action: 'block',
         config: {
-          patterns: ['rm -rf /', 'rm -rf ~', 'sudo rm', 'DROP TABLE', 'curl * | bash'],
+          patterns: [
+            'rm -rf /', 'rm -rf ~', 'rm -rf .', 'sudo rm',
+            'DROP TABLE', 'DROP DATABASE', 'TRUNCATE TABLE',
+            'curl * | bash', 'curl * | sh', 'wget * | bash', 'wget * | sh',
+            'chmod 777', 'mkfs*', 'dd if=*of=/dev/*',
+            '> /dev/sda',
+          ],
         },
       },
       {
@@ -123,9 +158,23 @@ export function getDefaultConfig(): HawkeyeConfig {
       {
         name: 'project_scope',
         type: 'directory_scope',
+        enabled: true,
+        action: 'block',
+        config: { blockedDirs: ['/etc', '/usr', '/var', '/sys', '/boot', '~/.ssh', '~/.gnupg', '~/.aws'] },
+      },
+      {
+        name: 'network_lock',
+        type: 'network_lock',
         enabled: false,
         action: 'block',
-        config: { blockedDirs: ['/etc', '/usr', '~/.ssh'] },
+        config: { allowedHosts: [], blockedHosts: [] },
+      },
+      {
+        name: 'review_gate',
+        type: 'review_gate',
+        enabled: false,
+        action: 'block',
+        config: { patterns: ['git push --force', 'git push -f', 'migrate', 'DROP DATABASE'] },
       },
     ],
     apiKeys: {},
@@ -149,6 +198,8 @@ export function loadConfig(cwd: string): HawkeyeConfig {
         drift: { ...def.drift, ...raw.drift },
         guardrails: raw.guardrails || def.guardrails,
         apiKeys: { ...def.apiKeys, ...raw.apiKeys },
+        recording: { ...def.recording, ...raw.recording },
+        dashboard: { ...def.dashboard, ...raw.dashboard },
       };
     } catch {
       return getDefaultConfig();

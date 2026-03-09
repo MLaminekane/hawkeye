@@ -73,6 +73,17 @@ export class Storage {
     }
   }
 
+  updateSessionStatus(sessionId: string, status: string): Result<void> {
+    try {
+      this.db
+        .prepare(`UPDATE sessions SET status = ? WHERE id = ?`)
+        .run(status, sessionId);
+      return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
   endSession(
     sessionId: string,
     status: 'completed' | 'aborted',
@@ -81,16 +92,18 @@ export class Storage {
     try {
       const stats = this.db
         .prepare(
-          `SELECT COUNT(*) as total_actions, COALESCE(SUM(cost_usd), 0) as total_cost
+          `SELECT COUNT(*) as total_actions,
+                  COALESCE(SUM(cost_usd), 0) as total_cost,
+                  COALESCE(SUM(CASE WHEN type = 'llm_call' THEN json_extract(data, '$.totalTokens') ELSE 0 END), 0) as total_tokens
          FROM events WHERE session_id = ?`,
         )
-        .get(sessionId) as { total_actions: number; total_cost: number };
+        .get(sessionId) as { total_actions: number; total_cost: number; total_tokens: number };
 
       this.db
         .prepare(
           `UPDATE sessions
          SET status = ?, ended_at = ?, git_commit_after = ?,
-             total_actions = ?, total_cost_usd = ?
+             total_actions = ?, total_cost_usd = ?, total_tokens = ?
          WHERE id = ?`,
         )
         .run(
@@ -99,8 +112,42 @@ export class Storage {
           gitCommitAfter ?? null,
           stats.total_actions,
           stats.total_cost,
+          stats.total_tokens,
           sessionId,
         );
+      return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
+  pauseSession(sessionId: string): Result<void> {
+    try {
+      this.db
+        .prepare(`UPDATE sessions SET status = 'paused' WHERE id = ? AND status = 'recording'`)
+        .run(sessionId);
+      return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
+  resumeSession(sessionId: string): Result<void> {
+    try {
+      this.db
+        .prepare(`UPDATE sessions SET status = 'recording' WHERE id = ? AND status = 'paused'`)
+        .run(sessionId);
+      return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
+  reopenSession(sessionId: string): Result<void> {
+    try {
+      this.db
+        .prepare(`UPDATE sessions SET status = 'recording', ended_at = NULL WHERE id = ?`)
+        .run(sessionId);
       return { ok: true, value: undefined };
     } catch (e) {
       return { ok: false, error: e as Error };
@@ -299,11 +346,30 @@ export class Storage {
 
   deleteSession(sessionId: string): Result<void> {
     try {
-      this.db.prepare('DELETE FROM events WHERE session_id = ?').run(sessionId);
+      // Delete in FK-safe order: children first, then parents
       this.db.prepare('DELETE FROM drift_snapshots WHERE session_id = ?').run(sessionId);
       this.db.prepare('DELETE FROM guardrail_violations WHERE session_id = ?').run(sessionId);
+      this.db.prepare('DELETE FROM events WHERE session_id = ?').run(sessionId);
       this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
       return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
+  getCostByFile(sessionId: string): Result<Array<{ path: string; cost: number; edits: number }>> {
+    try {
+      const rows = this.db.prepare(`
+        SELECT json_extract(data, '$.path') as path,
+               COALESCE(SUM(cost_usd), 0) as cost,
+               COUNT(*) as edits
+        FROM events
+        WHERE session_id = ? AND type IN ('file_write', 'file_delete', 'file_rename')
+        AND json_extract(data, '$.path') IS NOT NULL
+        GROUP BY path
+        ORDER BY cost DESC
+      `).all(sessionId) as Array<{ path: string; cost: number; edits: number }>;
+      return { ok: true, value: rows };
     } catch (e) {
       return { ok: false, error: e as Error };
     }
@@ -334,6 +400,98 @@ export class Storage {
   close(): void {
     this.db.close();
   }
+
+  getEventCount(sessionId: string): Result<number> {
+    try {
+      const row = this.db
+        .prepare('SELECT COUNT(*) as count FROM events WHERE session_id = ?')
+        .get(sessionId) as { count: number };
+      return { ok: true, value: row.count };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
+  getViolations(sessionId: string): Result<GuardrailViolationRow[]> {
+    try {
+      const rows = this.db
+        .prepare('SELECT * FROM guardrail_violations WHERE session_id = ? ORDER BY created_at ASC')
+        .all(sessionId) as GuardrailViolationRow[];
+      return { ok: true, value: rows };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
+  compareSessions(sessionIds: string[]): Result<SessionComparison[]> {
+    try {
+      const results: SessionComparison[] = [];
+      for (const sid of sessionIds) {
+        const sResult = this.getSession(sid);
+        if (!sResult.ok || !sResult.value) continue;
+        const session = sResult.value;
+
+        const statsResult = this.getSessionStats(sid);
+        const stats = statsResult.ok ? statsResult.value : {
+          total_events: 0, command_count: 0, file_count: 0, llm_count: 0,
+          api_count: 0, git_count: 0, error_count: 0, guardrail_count: 0,
+          total_cost_usd: 0, total_duration_ms: 0,
+        };
+
+        const startMs = new Date(session.started_at).getTime();
+        const endMs = session.ended_at ? new Date(session.ended_at).getTime() : Date.now();
+        const durationMs = endMs - startMs;
+
+        const files = this.db.prepare(`
+          SELECT DISTINCT json_extract(data, '$.path') as path
+          FROM events
+          WHERE session_id = ? AND type IN ('file_write', 'file_delete', 'file_rename')
+          AND json_extract(data, '$.path') IS NOT NULL
+        `).all(sid) as Array<{ path: string }>;
+
+        const topCost = this.db.prepare(`
+          SELECT json_extract(data, '$.path') as path, COALESCE(SUM(cost_usd), 0) as cost
+          FROM events
+          WHERE session_id = ? AND type IN ('file_write', 'file_delete', 'file_rename')
+          AND json_extract(data, '$.path') IS NOT NULL
+          GROUP BY path ORDER BY cost DESC LIMIT 5
+        `).all(sid) as Array<{ path: string; cost: number }>;
+
+        results.push({
+          session,
+          stats,
+          durationMs,
+          filesChanged: files.map((f) => f.path),
+          topCostFiles: topCost,
+        });
+      }
+      return { ok: true, value: results };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
+  getSessionStats(sessionId: string): Result<SessionStats> {
+    try {
+      const row = this.db.prepare(`
+        SELECT
+          COUNT(*) as total_events,
+          SUM(CASE WHEN type = 'command' THEN 1 ELSE 0 END) as command_count,
+          SUM(CASE WHEN type IN ('file_read','file_write','file_delete','file_rename') THEN 1 ELSE 0 END) as file_count,
+          SUM(CASE WHEN type = 'llm_call' THEN 1 ELSE 0 END) as llm_count,
+          SUM(CASE WHEN type = 'api_call' THEN 1 ELSE 0 END) as api_count,
+          SUM(CASE WHEN type LIKE 'git_%' THEN 1 ELSE 0 END) as git_count,
+          SUM(CASE WHEN type = 'error' THEN 1 ELSE 0 END) as error_count,
+          SUM(CASE WHEN type IN ('guardrail_trigger','guardrail_block') THEN 1 ELSE 0 END) as guardrail_count,
+          COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+          COALESCE(SUM(duration_ms), 0) as total_duration_ms
+        FROM events WHERE session_id = ?
+      `).get(sessionId) as SessionStats;
+      return { ok: true, value: row };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
 }
 
 export interface GlobalStats {
@@ -347,4 +505,36 @@ export interface GlobalStats {
   total_tokens: number;
   first_session: string | null;
   last_session: string | null;
+}
+
+export interface GuardrailViolationRow {
+  id: string;
+  session_id: string;
+  event_id: string;
+  rule_name: string;
+  severity: string;
+  description: string;
+  action_taken: string;
+  created_at: string;
+}
+
+export interface SessionStats {
+  total_events: number;
+  command_count: number;
+  file_count: number;
+  llm_count: number;
+  api_count: number;
+  git_count: number;
+  error_count: number;
+  guardrail_count: number;
+  total_cost_usd: number;
+  total_duration_ms: number;
+}
+
+export interface SessionComparison {
+  session: SessionRow;
+  stats: SessionStats;
+  durationMs: number;
+  filesChanged: string[];
+  topCostFiles: Array<{ path: string; cost: number }>;
 }

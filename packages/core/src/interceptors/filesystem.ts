@@ -109,13 +109,24 @@ function computeUnifiedDiff(beforeLines: string[], afterLines: string[]): string
   return lines.join('\n');
 }
 
+export interface FilesystemInterceptorOptions {
+  extraIgnored?: string[];
+  extraBlockedSegments?: string[];
+  extraBlockedExtensions?: string[];
+}
+
 export function createFilesystemInterceptor(
   watchDir: string,
   onEvent: FileCallback,
-  extraIgnored: string[] = [],
+  extraIgnoredOrOptions?: string[] | FilesystemInterceptorOptions,
 ): FilesystemInterceptor {
   let watcher: FSWatcher | null = null;
   const fileSnapshots = new Map<string, string | undefined>();
+
+  // Support both legacy array and new options object
+  const opts: FilesystemInterceptorOptions = Array.isArray(extraIgnoredOrOptions)
+    ? { extraIgnored: extraIgnoredOrOptions }
+    : (extraIgnoredOrOptions ?? {});
 
   function snapshotFile(filePath: string): void {
     fileSnapshots.set(filePath, safeReadFile(filePath));
@@ -123,12 +134,16 @@ export function createFilesystemInterceptor(
 
   return {
     start() {
-      const ignored = [...DEFAULT_IGNORED, ...extraIgnored];
+      const ignored = [...DEFAULT_IGNORED, ...(opts.extraIgnored ?? [])];
 
       const blockedSegments = [
         '.hawkeye', 'node_modules', '.git', '.turbo', 'dist',
+        ...(opts.extraBlockedSegments ?? []),
       ];
-      const blockedExtensions = ['.db', '.db-journal', '.db-wal', '.db-shm'];
+      const blockedExtensions = [
+        '.db', '.db-journal', '.db-wal', '.db-shm',
+        ...(opts.extraBlockedExtensions ?? []),
+      ];
 
       watcher = watch(watchDir, {
         ignored: (filePath: string) => {

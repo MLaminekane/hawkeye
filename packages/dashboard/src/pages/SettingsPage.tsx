@@ -56,6 +56,20 @@ const DEFAULT_RULES: GuardrailRule[] = [
     action: 'block',
     config: { blockedDirs: ['/etc', '/usr', '~/.ssh'] },
   },
+  {
+    name: 'network_lock',
+    type: 'network_lock',
+    enabled: false,
+    action: 'block',
+    config: { allowedHosts: [], blockedHosts: [] },
+  },
+  {
+    name: 'review_gate',
+    type: 'review_gate',
+    enabled: false,
+    action: 'block',
+    config: { patterns: ['git push --force', 'git push -f', 'migrate', 'DROP DATABASE'] },
+  },
 ];
 
 export function SettingsPage() {
@@ -153,8 +167,8 @@ export function SettingsPage() {
       )}
 
       {/* DriftDetect Config */}
-      <div className="mb-6 rounded-lg border border-hawk-border bg-hawk-surface overflow-hidden">
-        <div className="px-5 py-3 border-b border-hawk-border bg-hawk-surface2 flex items-center justify-between">
+      <div className="mb-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
+        <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">DriftDetect</h2>
           <Toggle enabled={driftConfig.enabled} onToggle={() => { setDriftConfig((p) => ({ ...p, enabled: !p.enabled })); setSaved(false); }} />
         </div>
@@ -199,7 +213,7 @@ export function SettingsPage() {
 
             {driftConfig.provider !== 'ollama' && (
               <div className="col-span-2">
-                <div className="rounded bg-hawk-surface2/50 border border-hawk-border/50 px-3 py-2 font-mono text-[10px] text-hawk-text3">
+                <div className="rounded border border-hawk-border-subtle bg-hawk-surface2/60 px-3 py-2 font-mono text-[10px] text-hawk-text3">
                   {driftConfig.provider === 'anthropic' && 'Requires ANTHROPIC_API_KEY environment variable'}
                   {driftConfig.provider === 'openai' && 'Requires OPENAI_API_KEY environment variable'}
                   {driftConfig.provider === 'deepseek' && 'Requires DEEPSEEK_API_KEY environment variable'}
@@ -214,7 +228,7 @@ export function SettingsPage() {
             <Field label="Warning threshold" value={String(driftConfig.warningThreshold)} onChange={(v) => { setDriftConfig((p) => ({ ...p, warningThreshold: parseInt(v) || 60 })); setSaved(false); }} type="number" />
             <Field label="Critical threshold" value={String(driftConfig.criticalThreshold)} onChange={(v) => { setDriftConfig((p) => ({ ...p, criticalThreshold: parseInt(v) || 30 })); setSaved(false); }} type="number" />
 
-            <div className="col-span-2 flex items-center gap-3 pt-2 border-t border-hawk-border/50">
+            <div className="col-span-2 flex items-center gap-3 border-t border-hawk-border-subtle pt-2">
               <Toggle enabled={driftConfig.autoPause ?? false} onToggle={() => { setDriftConfig((p) => ({ ...p, autoPause: !p.autoPause })); setSaved(false); }} />
               <div>
                 <span className="font-mono text-xs text-hawk-text">Auto-pause on critical drift</span>
@@ -226,14 +240,14 @@ export function SettingsPage() {
       </div>
 
       {/* Guardrails */}
-      <div className="rounded-lg border border-hawk-border bg-hawk-surface overflow-hidden">
-        <div className="px-5 py-3 border-b border-hawk-border bg-hawk-surface2">
+      <div className="overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
+        <div className="border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">Guardrails</h2>
         </div>
 
-        <div className="divide-y divide-hawk-border/50">
+        <div className="divide-y divide-hawk-border-subtle">
           {rules.map((rule, i) => (
-            <div key={rule.name} className="px-5 py-4 flex items-start gap-4">
+            <div key={rule.name} className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-hawk-surface2/35">
               <Toggle enabled={rule.enabled} onToggle={() => toggleRule(i)} />
 
               <div className="flex-1 min-w-0">
@@ -264,7 +278,7 @@ export function SettingsPage() {
       </div>
 
       {/* Config file hint */}
-      <div className="mt-6 rounded-lg border border-hawk-border/50 bg-hawk-surface2/50 p-4">
+      <div className="mt-6 rounded-xl border border-hawk-border-subtle bg-hawk-surface2/55 p-4">
         <p className="font-mono text-xs text-hawk-text3">
           Settings are saved to{' '}
           <code className="text-hawk-orange">.hawkeye/config.json</code>{' '}
@@ -313,6 +327,14 @@ function describeRule(rule: GuardrailRule): string {
     case 'cost_limit': return `Max $${c.maxUsdPerSession}/session, $${c.maxUsdPerHour}/hour`;
     case 'token_limit': return `Max ${(c.maxTokensPerSession as number).toLocaleString()} tokens/session`;
     case 'directory_scope': return `Blocked: ${(c.blockedDirs as string[]).join(', ')}`;
+    case 'network_lock': {
+      const allowed = (c.allowedHosts as string[] || []);
+      const blocked = (c.blockedHosts as string[] || []);
+      if (allowed.length > 0) return `Allowed hosts: ${allowed.join(', ')}`;
+      if (blocked.length > 0) return `Blocked hosts: ${blocked.join(', ')}`;
+      return 'No hosts configured — add allowed or blocked hosts';
+    }
+    case 'review_gate': return `Requires approval: ${(c.patterns as string[]).slice(0, 3).join(', ')}${(c.patterns as string[]).length > 3 ? '...' : ''}`;
     default: return '';
   }
 }

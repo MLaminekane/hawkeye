@@ -59,12 +59,13 @@ export const sessionsCommand = new Command('sessions')
 
       const date = new Date(s.started_at).toLocaleString();
       const cost = s.total_cost_usd > 0 ? chalk.dim(` $${s.total_cost_usd.toFixed(4)}`) : '';
+      const tokens = s.total_tokens > 0 ? chalk.dim(` ${s.total_tokens.toLocaleString()} tok`) : '';
       const drift = s.final_drift_score != null
         ? chalk.dim(` drift:${s.final_drift_score.toFixed(0)}`)
         : '';
 
       console.log(
-        `  ${statusIcon} ${chalk.cyan(s.id.slice(0, 8))}  ${chalk.dim(date)}  ${s.total_actions} actions${cost}${drift}`,
+        `  ${statusIcon} ${chalk.cyan(s.id.slice(0, 8))}  ${chalk.dim(date)}  ${s.total_actions} actions${cost}${tokens}${drift}`,
       );
       console.log(
         `    ${chalk.white(s.objective)}${s.agent ? chalk.dim(` (${s.agent})`) : ''}`,

@@ -3,10 +3,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { join, extname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { exec } from 'node:child_process';
 import chalk from 'chalk';
 import { randomUUID } from 'node:crypto';
 import { Storage } from '@hawkeye/core';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { loadConfig, getDefaultConfig, PROVIDER_MODELS } from '../config.js';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -63,7 +65,7 @@ export const serveCommand = new Command('serve')
         if (req.method === 'POST') {
           handlePostApi(url, req, storage, res, broadcast);
         } else {
-          handleApi(url, storage, res);
+          handleApi(url, storage, res, dbPath, cwd);
         }
         return;
       }
@@ -133,27 +135,53 @@ export const serveCommand = new Command('serve')
       } catch {}
     }, 1000);
 
-    server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        console.error(chalk.yellow(`\n  Port ${port} is already in use.`));
-        console.error(chalk.dim(`  Try: hawkeye serve -p <other-port>`));
-        storage.close();
-        process.exit(1);
-      }
-      throw err;
-    });
+    const MAX_PORT_RETRIES = 10;
+    let currentPort = port;
 
-    server.listen(port, () => {
-      console.log('');
-      console.log(chalk.green('  Hawkeye Dashboard'));
-      console.log(chalk.dim('  ─'.repeat(25)));
-      console.log(`  ${chalk.dim('Local:')}   ${chalk.cyan(`http://localhost:${port}`)}`);
-      console.log(`  ${chalk.dim('WS:')}      ${chalk.cyan(`ws://localhost:${port}/ws`)}`);
-      console.log(`  ${chalk.dim('DB:')}      ${chalk.dim(dbPath)}`);
-      console.log('');
-      console.log(chalk.dim('  Press Ctrl+C to stop'));
-      console.log('');
-    });
+    function tryListen() {
+      server.listen(currentPort, () => {
+        console.log('');
+        console.log(chalk.green('  Hawkeye Dashboard'));
+        console.log(chalk.dim('  ─'.repeat(25)));
+        if (currentPort !== port) {
+          console.log(`  ${chalk.yellow('⚠')} Port ${port} was in use, using ${currentPort} instead`);
+        }
+        console.log(`  ${chalk.dim('Local:')}   ${chalk.cyan(`http://localhost:${currentPort}`)}`);
+        console.log(`  ${chalk.dim('WS:')}      ${chalk.cyan(`ws://localhost:${currentPort}/ws`)}`);
+        console.log(`  ${chalk.dim('DB:')}      ${chalk.dim(dbPath)}`);
+        console.log('');
+        console.log(chalk.dim('  Press Ctrl+C to stop'));
+        console.log('');
+
+        // Auto-open browser if configured
+        const cfg = loadConfig(cwd);
+        if (cfg.dashboard?.openBrowser !== false) {
+          const url = `http://localhost:${currentPort}`;
+          const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+          exec(`${cmd} ${url}`, () => {});
+        }
+      });
+
+      server.once('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          if (currentPort - port < MAX_PORT_RETRIES) {
+            currentPort++;
+            console.log(chalk.dim(`  Port ${currentPort - 1} in use, trying ${currentPort}...`));
+            server.close(() => {
+              server.listen(currentPort);
+            });
+          } else {
+            console.error(chalk.red(`\n  Could not find an available port (tried ${port}-${currentPort}).`));
+            storage.close();
+            process.exit(1);
+          }
+          return;
+        }
+        throw err;
+      });
+    }
+
+    tryListen();
 
     process.on('SIGINT', () => {
       clearInterval(pollInterval);
@@ -164,10 +192,17 @@ export const serveCommand = new Command('serve')
     });
   });
 
-function handleApi(url: string, storage: Storage, res: ServerResponse): void {
+function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: string, cwd?: string): void {
   res.setHeader('Content-Type', 'application/json');
 
   try {
+    // GET /api/info — returns which project this dashboard serves
+    if (url === '/api/info') {
+      res.writeHead(200);
+      res.end(JSON.stringify({ dbPath: dbPath || '', cwd: cwd || '' }));
+      return;
+    }
+
     // GET /api/sessions?limit=N
     const sessionsMatch = url.match(/^\/api\/sessions(?:\?(.*))?$/);
     if (sessionsMatch && !url.includes('/api/sessions/')) {
@@ -246,12 +281,23 @@ function handleApi(url: string, storage: Storage, res: ServerResponse): void {
       return;
     }
 
+    // GET /api/sessions/:id/cost-by-file
+    const costFileMatch = url.match(/^\/api\/sessions\/([^/]+)\/cost-by-file$/);
+    if (costFileMatch) {
+      const result = storage.getCostByFile(costFileMatch[1]);
+      if (result.ok) {
+        res.writeHead(200);
+        res.end(JSON.stringify(result.value));
+      } else {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: result.error.message }));
+      }
+      return;
+    }
+
     // GET /api/settings
     if (url === '/api/settings') {
-      const configPath = join(process.cwd(), '.hawkeye', 'config.json');
-      const config = existsSync(configPath)
-        ? JSON.parse(readFileSync(configPath, 'utf-8'))
-        : getDefaultConfig();
+      const config = loadConfig(process.cwd());
       res.writeHead(200);
       res.end(JSON.stringify(config));
       return;
@@ -261,6 +307,27 @@ function handleApi(url: string, storage: Storage, res: ServerResponse): void {
     if (url === '/api/providers') {
       res.writeHead(200);
       res.end(JSON.stringify(PROVIDER_MODELS));
+      return;
+    }
+
+    // GET /api/compare?ids=id1,id2,id3
+    const compareMatch = url.match(/^\/api\/compare\?(.*)$/);
+    if (compareMatch) {
+      const params = new URLSearchParams(compareMatch[1]);
+      const ids = (params.get('ids') || '').split(',').filter(Boolean);
+      if (ids.length < 2) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Need at least 2 session IDs (ids=id1,id2)' }));
+        return;
+      }
+      const result = storage.compareSessions(ids);
+      if (result.ok) {
+        res.writeHead(200);
+        res.end(JSON.stringify(result.value));
+      } else {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: result.error.message }));
+      }
       return;
     }
 
@@ -325,6 +392,9 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
               model: payload.model,
               workingDir: payload.working_dir || process.cwd(),
             },
+            totalCostUsd: 0,
+            totalTokens: 0,
+            totalActions: 0,
           });
           if (!sessionResult.ok) {
             res.writeHead(500);
@@ -376,11 +446,92 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         const status = payload.status || 'completed';
         const result = storage.endSession(endMatch[1], status);
         if (result.ok) {
+          broadcast({ type: 'session_end', session: { id: endMatch[1], status } });
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true }));
         } else {
           res.writeHead(500);
           res.end(JSON.stringify({ error: 'Failed to end session' }));
+        }
+        return;
+      }
+
+      // POST /api/sessions/:id/pause
+      const pauseMatch = url.match(/^\/api\/sessions\/([^/]+)\/pause$/);
+      if (pauseMatch) {
+        const result = storage.pauseSession(pauseMatch[1]);
+        if (result.ok) {
+          broadcast({ type: 'session_pause', sessionId: pauseMatch[1] });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } else {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: 'Failed to pause session' }));
+        }
+        return;
+      }
+
+      // POST /api/sessions/:id/resume
+      const resumeMatch = url.match(/^\/api\/sessions\/([^/]+)\/resume$/);
+      if (resumeMatch) {
+        const result = storage.resumeSession(resumeMatch[1]);
+        if (result.ok) {
+          broadcast({ type: 'session_resume', sessionId: resumeMatch[1] });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } else {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: 'Failed to resume session' }));
+        }
+        return;
+      }
+
+      // POST /api/revert — Revert a file to its previous content
+      if (url === '/api/revert') {
+        const payload = JSON.parse(body);
+        const eventId = payload.event_id;
+        if (!eventId) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'event_id required' }));
+          return;
+        }
+        // Find the event
+        const allSessions = storage.listSessions({ limit: 1000 });
+        let found: Record<string, unknown> | null = null;
+        if (allSessions.ok) {
+          for (const sess of allSessions.value) {
+            const evts = storage.getEvents(sess.id);
+            if (evts.ok) {
+              const ev = evts.value.find((e) => e.id === eventId);
+              if (ev) { found = ev as unknown as Record<string, unknown>; break; }
+            }
+          }
+        }
+        if (!found) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: 'Event not found' }));
+          return;
+        }
+        const data = JSON.parse(String(found.data || '{}'));
+        const filePath = data.path;
+        const contentBefore = data.contentBefore;
+        if (!filePath) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Event has no file path' }));
+          return;
+        }
+        if (contentBefore === undefined || contentBefore === null) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'No previous content available (file was newly created)' }));
+          return;
+        }
+        try {
+          writeFileSync(filePath, contentBefore, 'utf-8');
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, path: filePath }));
+        } catch (err) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: `Failed to revert: ${String(err)}` }));
         }
         return;
       }
@@ -424,65 +575,4 @@ function serveStatic(url: string, distDir: string, res: ServerResponse): void {
   res.setHeader('Content-Type', contentType);
   res.writeHead(200);
   res.end(readFileSync(filePath));
-}
-
-// Provider → recommended models mapping (updated 2026-03)
-const PROVIDER_MODELS: Record<string, string[]> = {
-  ollama: ['llama4', 'llama3.2', 'mistral', 'codellama', 'deepseek-coder', 'phi3'],
-  anthropic: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'],
-  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-5', 'gpt-5-mini', 'o3', 'o3-mini', 'o4-mini'],
-  deepseek: ['deepseek-chat', 'deepseek-reasoner'],
-  mistral: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'devstral-latest'],
-  google: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'],
-};
-
-function getDefaultConfig() {
-  return {
-    drift: {
-      enabled: true,
-      checkEvery: 5,
-      provider: 'ollama',
-      model: 'llama3.2',
-      thresholds: { warning: 60, critical: 30 },
-      contextWindow: 10,
-      autoPause: false,
-    },
-    guardrails: [
-      {
-        name: 'protected_files',
-        type: 'file_protect',
-        enabled: true,
-        action: 'block',
-        config: { paths: ['.env', '.env.*', '*.pem', '*.key'] },
-      },
-      {
-        name: 'dangerous_commands',
-        type: 'command_block',
-        enabled: true,
-        action: 'block',
-        config: { patterns: ['rm -rf /', 'rm -rf ~', 'sudo rm', 'DROP TABLE', 'curl * | bash'] },
-      },
-      {
-        name: 'cost_limit',
-        type: 'cost_limit',
-        enabled: true,
-        action: 'block',
-        config: { maxUsdPerSession: 5.0, maxUsdPerHour: 2.0 },
-      },
-      {
-        name: 'token_limit',
-        type: 'token_limit',
-        enabled: false,
-        action: 'warn',
-        config: { maxTokensPerSession: 500000 },
-      },
-      {
-        name: 'project_scope',
-        type: 'directory_scope',
-        enabled: false,
-        action: 'block',
-        config: { blockedDirs: ['/etc', '/usr', '~/.ssh'] },
-      },
-    ],
-  };
 }

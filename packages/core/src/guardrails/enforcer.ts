@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import type { TraceEvent, CommandEvent, FileEvent } from '../types.js';
+import type { TraceEvent, CommandEvent, FileEvent, ApiEvent } from '../types.js';
 import type { GuardrailRuleConfig, GuardrailViolation } from './rules.js';
 import { Logger } from '../logger.js';
 
@@ -45,7 +45,7 @@ export function createGuardrailEnforcer(
     event: TraceEvent,
     rule: GuardrailRuleConfig & { type: 'file_protect' },
   ): GuardrailViolation | null {
-    if (event.type !== 'file_write' && event.type !== 'file_delete') return null;
+    if (event.type !== 'file_read' && event.type !== 'file_write' && event.type !== 'file_delete') return null;
 
     const data = event.data as FileEvent;
     const filePath = data.path;
@@ -53,10 +53,11 @@ export function createGuardrailEnforcer(
 
     for (const pattern of rule.paths) {
       if (matchesGlob(relativePath, pattern) || matchesGlob(filePath, pattern)) {
+        const verb = event.type === 'file_read' ? 'read' : event.type === 'file_write' ? 'write' : 'delete';
         return {
           ruleName: rule.name,
           severity: rule.action,
-          description: `Protected file ${rule.action === 'block' ? 'blocked' : 'warning'}: ${relativePath} matches pattern "${pattern}"`,
+          description: `Protected file ${verb} ${rule.action === 'block' ? 'blocked' : 'warning'}: ${relativePath} matches pattern "${pattern}"`,
           actionTaken: rule.action === 'block' ? 'blocked' : 'logged',
         };
       }
@@ -92,7 +93,7 @@ export function createGuardrailEnforcer(
     event: TraceEvent,
     rule: GuardrailRuleConfig & { type: 'directory_scope' },
   ): GuardrailViolation | null {
-    if (event.type !== 'file_write' && event.type !== 'file_delete') return null;
+    if (event.type !== 'file_read' && event.type !== 'file_write' && event.type !== 'file_delete') return null;
 
     const data = event.data as FileEvent;
     const filePath = data.path;
@@ -130,6 +131,73 @@ export function createGuardrailEnforcer(
     return null;
   }
 
+  function evaluateNetworkLock(
+    event: TraceEvent,
+    rule: GuardrailRuleConfig & { type: 'network_lock' },
+  ): GuardrailViolation | null {
+    if (event.type !== 'api_call') return null;
+
+    const data = event.data as ApiEvent;
+    let hostname: string;
+    try {
+      hostname = new URL(data.url).hostname;
+    } catch {
+      hostname = data.url;
+    }
+
+    // Check blocked hosts
+    for (const pattern of rule.blockedHosts) {
+      if (hostname === pattern || hostname.endsWith('.' + pattern)) {
+        return {
+          ruleName: rule.name,
+          severity: rule.action,
+          description: `Network call to blocked host: ${hostname} (blocked: ${pattern})`,
+          actionTaken: rule.action === 'block' ? 'blocked' : 'logged',
+        };
+      }
+    }
+
+    // Check if within allowed hosts (if specified)
+    if (rule.allowedHosts.length > 0) {
+      const isAllowed = rule.allowedHosts.some(
+        (pattern) => hostname === pattern || hostname.endsWith('.' + pattern),
+      );
+      if (!isAllowed) {
+        return {
+          ruleName: rule.name,
+          severity: rule.action,
+          description: `Network call to unauthorized host: ${hostname} (not in allowlist)`,
+          actionTaken: rule.action === 'block' ? 'blocked' : 'logged',
+        };
+      }
+    }
+
+    return null;
+  }
+
+  function evaluateReviewGate(
+    event: TraceEvent,
+    rule: GuardrailRuleConfig & { type: 'review_gate' },
+  ): GuardrailViolation | null {
+    if (event.type !== 'command') return null;
+
+    const data = event.data as CommandEvent;
+    const fullCommand = `${data.command} ${data.args.join(' ')}`;
+
+    for (const pattern of rule.patterns) {
+      if (matchesCommandPattern(fullCommand, pattern)) {
+        return {
+          ruleName: rule.name,
+          severity: 'block',
+          description: `Review gate: "${fullCommand}" requires human approval (matches: "${pattern}")`,
+          actionTaken: 'blocked',
+        };
+      }
+    }
+
+    return null;
+  }
+
   return {
     evaluate(event: TraceEvent): GuardrailViolation[] {
       const violations: GuardrailViolation[] = [];
@@ -146,6 +214,12 @@ export function createGuardrailEnforcer(
             break;
           case 'directory_scope':
             violation = evaluateDirectoryScope(event, rule);
+            break;
+          case 'network_lock':
+            violation = evaluateNetworkLock(event, rule);
+            break;
+          case 'review_gate':
+            violation = evaluateReviewGate(event, rule);
             break;
           // cost_limit and token_limit are checked separately
         }

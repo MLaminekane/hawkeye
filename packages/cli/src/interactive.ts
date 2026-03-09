@@ -1,12 +1,14 @@
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import chalk from 'chalk';
 import { Storage, type SessionRow } from '@hawkeye/core';
 import {
   loadConfig,
   saveConfig,
+  getDefaultConfig,
   PROVIDER_MODELS,
   type HawkeyeConfig,
   type GuardrailRuleSetting,
@@ -47,9 +49,13 @@ interface Key {
 // ─── Constants ───────────────────────────────────────────────
 
 const COMMANDS: SlashCommand[] = [
+  { name: 'new', desc: 'New session (pick agent + objective)' },
+  { name: 'attach', desc: 'Launch agent on active session' },
   { name: 'sessions', desc: 'List & manage sessions' },
   { name: 'active', desc: 'Current recording' },
   { name: 'stats', desc: 'Session or global statistics' },
+  { name: 'inspect', desc: 'Detailed session inspection' },
+  { name: 'compare', desc: 'Compare sessions side by side' },
   { name: 'replay', desc: 'Replay a session (interactive)' },
   { name: 'export', desc: 'Export session as JSON' },
   { name: 'end', desc: 'End active sessions' },
@@ -57,12 +63,12 @@ const COMMANDS: SlashCommand[] = [
   { name: 'delete', desc: 'Delete a session' },
   { name: 'settings', desc: 'Configure Hawkeye' },
   { name: 'serve', desc: 'Open dashboard :4242' },
-  { name: 'init', desc: 'Initialize Hawkeye' },
+  { name: 'init', desc: 'Initialize Hawkeye (auto-runs on /new)' },
   { name: 'clear', desc: 'Clear screen' },
   { name: 'quit', desc: 'Exit' },
 ];
 
-const o = chalk.hex('#FF6B2B');
+const o = chalk.hex('#ff5f1f');
 
 // Line queue for piped mode (serializes async sub-prompts)
 const lineQueue: string[] = [];
@@ -88,6 +94,22 @@ function getStorage(dbPath: string): Storage | null {
     return null;
   }
   return new Storage(dbPath);
+}
+
+/** Build a refreshed PATH that includes common tool directories */
+function getShellEnv(): Record<string, string> {
+  const home = homedir();
+  const extraPaths = [
+    join(home, '.cargo', 'bin'),
+    join(home, '.local', 'bin'),
+    join(home, '.local', 'pipx', 'venvs'),
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+  ].filter((p) => existsSync(p));
+  const currentPath = process.env.PATH || '';
+  const newPath = [...extraPaths, ...currentPath.split(':')].filter((v, i, a) => a.indexOf(v) === i).join(':');
+  return { ...process.env as Record<string, string>, PATH: newPath };
 }
 
 function dur(startedAt: string, endedAt: string | null): string {
@@ -164,7 +186,7 @@ function printActiveBar(dbPath: string): void {
 
 function printSession(i: number, s: SessionRow): void {
   console.log(
-    `  ${o.bold(`${i})`)} ${badge(s.status)}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.white(s.objective.slice(0, 35).padEnd(35))}  ${chalk.dim(dur(s.started_at, s.ended_at).padEnd(7))}  ${chalk.dim(String(s.total_actions).padStart(4))}a  ${chalk.dim(timeAgo(s.started_at))}`,
+    `  ${o.bold(`${i})`)} ${badge(s.status)}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.white(s.objective.slice(0, 35).padEnd(35))}  ${chalk.dim(dur(s.started_at, s.ended_at).padEnd(7))}  ${chalk.dim(String(s.total_actions).padStart(4))}a  ${s.total_cost_usd > 0 ? chalk.hex('#FFB443')('$' + s.total_cost_usd.toFixed(2)) + '  ' : ''}${chalk.dim(timeAgo(s.started_at))}`,
   );
 }
 
@@ -439,6 +461,10 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
 
   if (c === 'sessions') {
     cmdSessions(dbPath);
+  } else if (c === 'new') {
+    await cmdNew(cwd);
+  } else if (c === 'attach') {
+    await cmdAttach(dbPath, cwd);
   } else if (c === 'active') {
     cmdActive(dbPath);
   } else if (c === 'stats') {
@@ -448,11 +474,15 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
   } else if (c === 'export') {
     await cmdExport(dbPath, args);
   } else if (c === 'end') {
-    cmdEnd(dbPath, args);
+    await cmdEnd(dbPath, args);
   } else if (c === 'restart') {
     await cmdRestart(dbPath, cwd, args);
   } else if (c === 'delete') {
     await cmdDelete(dbPath, args);
+  } else if (c === 'inspect') {
+    await cmdInspect(dbPath, args);
+  } else if (c === 'compare') {
+    await cmdCompare(dbPath, args);
   } else if (c === 'settings') {
     await cmdSettings(cwd);
   } else if (c === 'serve') {
@@ -468,7 +498,8 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
   } else if (c === 'help') {
     printCommands();
   } else {
-    console.log(chalk.dim(`  Unknown command: ${c}. Type / for help.`));
+    // Run as shell command
+    await runShellCommand(cmd);
   }
 
   return false;
@@ -575,8 +606,10 @@ async function cmdStats(dbPath: string, sid: string): Promise<void> {
   console.log(
     `  ${badge(sr.value.status)}  ${chalk.dim(sr.value.id.slice(0, 8))}  ${chalk.white(sr.value.objective)}`,
   );
+  const costStr = sr.value.total_cost_usd > 0 ? ` · $${sr.value.total_cost_usd.toFixed(4)}` : '';
+  const tokStr = sr.value.total_tokens > 0 ? ` · ${sr.value.total_tokens.toLocaleString()} tok` : '';
   console.log(
-    `  ${chalk.dim(`${dur(sr.value.started_at, sr.value.ended_at)} · ${sr.value.total_actions} actions`)}`,
+    `  ${chalk.dim(`${dur(sr.value.started_at, sr.value.ended_at)} · ${sr.value.total_actions} actions${tokStr}${costStr}`)}`,
   );
   if (Object.keys(counts).length > 0) {
     console.log('');
@@ -586,9 +619,11 @@ async function cmdStats(dbPath: string, sid: string): Promise<void> {
   }
 }
 
-function cmdEnd(dbPath: string, args: string): void {
+async function cmdEnd(dbPath: string, args: string): Promise<void> {
   const db = getStorage(dbPath);
   if (!db) return;
+
+  // Direct end by ID
   if (args) {
     const r = db.getSession(args);
     if (r.ok && r.value && (r.value.status === 'recording' || r.value.status === 'paused')) {
@@ -597,25 +632,449 @@ function cmdEnd(dbPath: string, args: string): void {
     } else {
       console.log(chalk.dim('  Nothing to end.'));
     }
-  } else {
+    db.close();
+    return;
+  }
+
+  // List active sessions (recording + paused)
+  const rec = db.listSessions({ status: 'recording' });
+  const paused = db.listSessions({ status: 'paused' as 'recording' });
+  const active = [...(rec.ok ? rec.value : []), ...(paused.ok ? paused.value : [])];
+
+  if (active.length === 0) {
+    console.log(chalk.dim('  No active sessions.'));
+    db.close();
+    return;
+  }
+
+  console.log('');
+  console.log(chalk.bold.white('  Active Sessions'));
+  console.log(chalk.dim('  ─'.repeat(25)));
+  for (let i = 0; i < active.length; i++) {
+    const s = active[i];
+    const st = s.status === 'paused' ? chalk.blue('⏸') : o('●');
+    console.log(
+      `  ${o.bold(`${i + 1})`)} ${st}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.white(s.objective.slice(0, 35))}  ${chalk.dim(dur(s.started_at, null))}  ${chalk.dim(`${s.total_actions}a`)}`,
+    );
+  }
+  if (active.length > 1) {
+    console.log(`  ${o.bold(`${active.length + 1})`)} ${chalk.white('End all')}`);
+  }
+  console.log('');
+
+  const pick = await ask(`  ${o('›')} `);
+  const idx = parseInt(pick, 10);
+
+  if (active.length > 1 && (idx === active.length + 1 || pick.toLowerCase() === 'all')) {
+    for (const s of active) {
+      db.endSession(s.id, 'completed');
+      console.log(chalk.green(`  ✓ Ended ${s.id.slice(0, 8)} — ${s.objective.slice(0, 40)}`));
+    }
+  } else if (idx >= 1 && idx <= active.length) {
+    const s = active[idx - 1];
+    db.endSession(s.id, 'completed');
+    console.log(chalk.green(`  ✓ Ended ${s.id.slice(0, 8)} — ${s.objective.slice(0, 40)}`));
+  } else if (pick) {
+    console.log(chalk.dim('  Invalid selection.'));
+  }
+
+  db.close();
+}
+
+// ─── Agent definitions for /new ──────────────────────────────
+
+interface AgentDef {
+  name: string;
+  command: string;
+  description: string;
+  needsInstall?: string;
+  usesHooks?: boolean;
+}
+
+const AGENTS: AgentDef[] = [
+  { name: 'Claude Code', command: 'claude', description: 'Anthropic Claude Code CLI', usesHooks: true },
+  { name: 'Aider', command: 'aider', description: 'AI pair programming (supports DeepSeek, OpenAI, etc.)', needsInstall: 'brew install aider' },
+  { name: 'Cursor', command: 'cursor', description: 'Cursor AI editor', needsInstall: 'Download from https://cursor.com' },
+  { name: 'Open Interpreter', command: 'interpreter', description: 'Natural language → code execution', needsInstall: 'pipx install open-interpreter' },
+  { name: 'Custom command', command: '', description: 'Enter any command manually' },
+];
+
+async function cmdNew(cwd: string): Promise<void> {
+  console.log('');
+  console.log(chalk.bold.white('  New Session'));
+  console.log(chalk.dim('  ─'.repeat(25)));
+  console.log('');
+
+  // 1. Pick agent
+  console.log(chalk.dim('  Choose an AI agent:'));
+  console.log('');
+  for (let i = 0; i < AGENTS.length; i++) {
+    const a = AGENTS[i];
+    console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(a.name)}  ${chalk.dim(a.description)}`);
+  }
+  console.log('');
+  const pick = await ask(`  ${o('›')} `);
+  const idx = parseInt(pick, 10);
+  if (isNaN(idx) || idx < 1 || idx > AGENTS.length) return;
+  const agent = AGENTS[idx - 1];
+
+  // 2. Check if command is available (except custom)
+  let cmd = agent.command;
+  if (agent.name === 'Custom command') {
+    cmd = await ask(`  ${chalk.dim('Command to run:')} `);
+    if (!cmd) return;
+  } else if (agent.usesHooks) {
+    // Claude Code uses hooks, not record
+    const obj = await ask(`  ${chalk.dim('Objective:')} `);
+    if (!obj) return;
+
+    console.log('');
+    console.log(chalk.dim('  Claude Code uses hooks for full event capture.'));
+
+    // Check if hooks are installed
+    const { existsSync: ex, readFileSync: rf } = await import('node:fs');
+    const settingsPath = join(cwd, '.claude', 'settings.json');
+    let hooksInstalled = false;
+    if (ex(settingsPath)) {
+      try {
+        const s = JSON.parse(rf(settingsPath, 'utf-8'));
+        hooksInstalled = !!(s.hooks?.PreToolUse || s.hooks?.PostToolUse);
+      } catch {}
+    }
+
+    if (!hooksInstalled) {
+      console.log(chalk.yellow('  ⚠ Hooks not installed. Installing...'));
+      const { spawn: sp } = await import('node:child_process');
+      const child = sp(process.execPath, [process.argv[1], 'hooks', 'install'], { stdio: 'inherit' });
+      await new Promise<void>((res) => child.on('close', () => res()));
+    } else {
+      console.log(chalk.green('  ✓ Hooks already installed'));
+    }
+
+    // Ensure .hawkeye directory exists (auto-init)
+    const hawkDir = join(cwd, '.hawkeye');
+    if (!ex(hawkDir)) {
+      const { mkdirSync: mk, writeFileSync: wf } = await import('node:fs');
+      mk(hawkDir, { recursive: true });
+      wf(join(hawkDir, 'config.json'), JSON.stringify(getDefaultConfig(), null, 2), 'utf-8');
+    }
+    const dbPath = join(hawkDir, 'traces.db');
+    const db = new Storage(dbPath);
+    // End any active sessions
     const rec = db.listSessions({ status: 'recording' });
     const active = rec.ok ? rec.value : [];
-    if (active.length === 0) {
-      console.log(chalk.dim('  No active sessions.'));
+    for (const s of active) db.endSession(s.id, 'completed');
+
+    // Pre-create session in DB so it's immediately visible in dashboard
+    const sessionId = randomUUID();
+    db.createSession({
+      id: sessionId,
+      objective: obj,
+      startedAt: new Date(),
+      status: 'recording',
+      metadata: { agent: 'claude-code', workingDir: cwd },
+      totalCostUsd: 0,
+      totalTokens: 0,
+      totalActions: 0,
+    });
+    db.close();
+
+    // Write pending session so hook-handler links Claude's session_id to ours
+    const { writeFileSync: wfs } = await import('node:fs');
+    wfs(join(hawkDir, 'pending-session.json'), JSON.stringify({ sessionId, objective: obj }), 'utf-8');
+
+    console.log('');
+    console.log(chalk.green('  ✓ Ready!'));
+    console.log(chalk.dim(`    Objective: ${obj}`));
+    console.log('');
+    console.log(`  Now run ${o('claude')} in your terminal.`);
+    console.log(chalk.dim('  Hawkeye hooks will automatically record all actions.'));
+    console.log('');
+    return;
+  }
+
+  // 3. For non-hooks agents: ask objective, then launch
+  const obj = await ask(`  ${chalk.dim('Objective:')} `);
+  if (!obj) return;
+
+  // Check if agent command exists
+  const { execSync } = await import('node:child_process');
+  const { existsSync: exs } = await import('node:fs');
+  const shellEnv = getShellEnv();
+  let cmdExists = false;
+  try {
+    execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: shellEnv });
+    cmdExists = true;
+  } catch {}
+
+  // Fallback: Cursor macOS app path
+  if (!cmdExists && agent.name === 'Cursor') {
+    const cursorAppCli = '/Applications/Cursor.app/Contents/Resources/app/bin/cursor';
+    if (exs(cursorAppCli)) {
+      cmd = cursorAppCli;
+      cmdExists = true;
+    }
+  }
+
+  if (!cmdExists) {
+    console.log('');
+    console.log(chalk.red(`  ✗ "${cmd.split(' ')[0]}" not found in PATH`));
+    if (agent.needsInstall && !agent.needsInstall.startsWith('Download')) {
+      console.log(chalk.dim(`  Install: ${o(agent.needsInstall)}`));
+      const yn = await ask(`  ${chalk.dim('Install now? (Y/n)')} `);
+      if (!yn || yn.toLowerCase() === 'y' || yn.toLowerCase() === 'yes') {
+        console.log('');
+        console.log(chalk.dim(`  Running: ${agent.needsInstall}`));
+        console.log('');
+        const { spawnSync } = await import('node:child_process');
+        const result = spawnSync(agent.needsInstall, { stdio: 'inherit', shell: true, env: shellEnv });
+        if (result.status === 0) {
+          console.log('');
+          console.log(chalk.green(`  ✓ Installed! Continuing...`));
+          console.log('');
+          // Re-check with refreshed env
+          const freshEnv = getShellEnv();
+          try { execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: freshEnv }); cmdExists = true; } catch {}
+          if (!cmdExists) {
+            console.log(chalk.red(`  ✗ Still not found after install. Check your PATH.`));
+            console.log('');
+            return;
+          }
+        } else {
+          console.log('');
+          console.log(chalk.red(`  ✗ Installation failed`));
+          console.log('');
+          return;
+        }
+      } else {
+        console.log('');
+        return;
+      }
     } else {
-      for (const s of active) {
-        db.endSession(s.id, 'completed');
-        console.log(chalk.green(`  ✓ Ended ${s.id.slice(0, 8)} — ${s.objective.slice(0, 40)}`));
+      if (agent.needsInstall) {
+        console.log(chalk.dim(`  ${o(agent.needsInstall)}`));
+      }
+      console.log('');
+      return;
+    }
+  }
+
+  // 4. For Aider: ask which model to use
+  let fullCmd = cmd;
+  if (agent.name === 'Aider') {
+    console.log('');
+    console.log(chalk.dim('  Pick a model for Aider:'));
+    console.log('');
+    const models = [
+      { label: 'DeepSeek Chat', value: 'deepseek/deepseek-chat' },
+      { label: 'DeepSeek Reasoner', value: 'deepseek/deepseek-reasoner' },
+      { label: 'Claude Sonnet', value: 'anthropic/claude-sonnet-4-6' },
+      { label: 'Claude Opus', value: 'anthropic/claude-opus-4-6' },
+      { label: 'GPT-4o', value: 'openai/gpt-4o' },
+      { label: 'GPT-4.1', value: 'openai/gpt-4.1' },
+      { label: 'Ollama (local)', value: 'ollama/llama3.2' },
+      { label: 'Custom', value: '' },
+    ];
+    for (let i = 0; i < models.length; i++) {
+      console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(models[i].label)}`);
+    }
+    console.log('');
+    const mPick = await ask(`  ${o('›')} `);
+    const mIdx = parseInt(mPick, 10);
+    if (mIdx >= 1 && mIdx <= models.length) {
+      let model = models[mIdx - 1].value;
+      if (!model) {
+        model = await ask(`  ${chalk.dim('Model name:')} `);
+      }
+      if (model) {
+        fullCmd = `aider --model ${model}`;
       }
     }
   }
+
+  // 5. Launch hawkeye record
+  // Extract model from command (e.g. "aider --model deepseek/deepseek-chat" → "deepseek/deepseek-chat")
+  const modelMatch = fullCmd.match(/--model\s+(\S+)/);
+  const modelArg = modelMatch ? modelMatch[1] : null;
+  console.log('');
+  console.log(chalk.dim(`  Launching: hawkeye record -o "${obj}"${modelArg ? ` -m ${modelArg}` : ''} -- ${fullCmd}`));
+  console.log('');
+
+  const { spawn: sp } = await import('node:child_process');
+  const args = ['record', '-o', obj, ...(modelArg ? ['-m', modelArg] : []), '--', ...fullCmd.split(' ')];
+  const child = sp(process.execPath, [process.argv[1], ...args], {
+    stdio: 'inherit',
+    cwd,
+  });
+  await new Promise<void>((res) => child.on('close', () => res()));
+}
+
+async function cmdAttach(dbPath: string, cwd: string): Promise<void> {
+  const db = getStorage(dbPath);
+  if (!db) return;
+
+  // Find active (recording) sessions
+  const rec = db.listSessions({ status: 'recording' });
+  const active = rec.ok ? rec.value : [];
+  if (active.length === 0) {
+    console.log(chalk.dim('  No active sessions to attach to.'));
+    db.close();
+    return;
+  }
+
+  // Pick session
+  let session = active[0];
+  if (active.length > 1) {
+    console.log('');
+    console.log(chalk.bold.white('  Active Sessions'));
+    console.log(chalk.dim('  ─'.repeat(25)));
+    for (let i = 0; i < active.length; i++) {
+      console.log(
+        `  ${o.bold(`${i + 1})`)} ${chalk.dim(active[i].id.slice(0, 8))}  ${chalk.white(active[i].objective.slice(0, 40))}  ${chalk.dim(dur(active[i].started_at, null))}`,
+      );
+    }
+    console.log('');
+    const pick = await ask(`  ${o('›')} `);
+    const idx = parseInt(pick, 10);
+    if (idx >= 1 && idx <= active.length) {
+      session = active[idx - 1];
+    } else {
+      db.close();
+      return;
+    }
+  }
   db.close();
+
+  console.log('');
+  console.log(chalk.bold.white('  Attach Agent'));
+  console.log(chalk.dim('  ─'.repeat(25)));
+  console.log(`  ${chalk.dim('Session:')} ${o(session.id.slice(0, 8))} — ${chalk.white(session.objective)}`);
+  console.log('');
+
+  // Pick agent (full list including Claude Code)
+  console.log(chalk.dim('  Choose an AI agent:'));
+  console.log('');
+  for (let i = 0; i < AGENTS.length; i++) {
+    console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(AGENTS[i].name)}  ${chalk.dim(AGENTS[i].description)}`);
+  }
+  console.log(`  ${chalk.dim('0)')} ${chalk.dim('Back')}`);
+  console.log('');
+  const aPick = await ask(`  ${o('›')} `);
+  const aIdx = parseInt(aPick, 10);
+  if (isNaN(aIdx) || aIdx === 0 || aIdx < 0 || aIdx > AGENTS.length) return;
+  const agent = AGENTS[aIdx - 1];
+
+  // Claude Code uses hooks — write pending-session so hooks link to this session
+  if (agent.usesHooks) {
+    const hawkDir = join(cwd, '.hawkeye');
+    const { writeFileSync: wfs } = await import('node:fs');
+    wfs(join(hawkDir, 'pending-session.json'), JSON.stringify({ sessionId: session.id, objective: session.objective }), 'utf-8');
+    console.log(chalk.dim(`  Hooks will attach to session ${o(session.id.slice(0, 8))}`));
+    console.log(chalk.dim(`  Launch Claude Code manually, then start working.`));
+    console.log('');
+    return;
+  }
+
+  let cmd = agent.command;
+
+  // Custom command
+  if (!cmd) {
+    cmd = await ask(`  ${chalk.dim('Command:')} `);
+    if (!cmd) return;
+  }
+
+  // Check if command exists
+  const { execSync } = await import('node:child_process');
+  const shellEnv = getShellEnv();
+  let cmdExists = false;
+  try {
+    execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: shellEnv });
+    cmdExists = true;
+  } catch {}
+
+  if (!cmdExists && agent.needsInstall) {
+    console.log(chalk.yellow(`  ⚠ ${agent.name} not found.`));
+    const installAns = await ask(`  Install now? ${chalk.dim('(Y/n)')} `);
+    if (!installAns || installAns.toLowerCase() !== 'n') {
+      console.log(chalk.dim(`  Running: ${agent.needsInstall}`));
+      const { spawn: sp } = await import('node:child_process');
+      const inst = sp(agent.needsInstall, { stdio: 'inherit', shell: true, env: shellEnv });
+      await new Promise<void>((r) => inst.on('close', () => r()));
+      const freshEnv = getShellEnv();
+      try {
+        execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: freshEnv });
+        cmdExists = true;
+      } catch {}
+    }
+    if (!cmdExists) {
+      console.log(chalk.red('  Agent not available. Cancelled.'));
+      return;
+    }
+  } else if (!cmdExists) {
+    console.log(chalk.red(`  Command not found: ${cmd}`));
+    return;
+  }
+
+  let fullCmd = cmd;
+
+  // Aider model picker
+  if (agent.name === 'Aider') {
+    const models = [
+      { label: 'DeepSeek V3 (deepseek/deepseek-chat)', value: 'deepseek/deepseek-chat' },
+      { label: 'DeepSeek R1 (deepseek/deepseek-reasoner)', value: 'deepseek/deepseek-reasoner' },
+      { label: 'GPT-4o (openai/gpt-4o)', value: 'openai/gpt-4o' },
+      { label: 'Claude Sonnet (anthropic/claude-sonnet-4-6)', value: 'anthropic/claude-sonnet-4-6' },
+      { label: 'Custom model', value: '' },
+    ];
+    console.log('');
+    console.log(chalk.dim('  Choose a model:'));
+    for (let i = 0; i < models.length; i++) {
+      console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(models[i].label)}`);
+    }
+    console.log('');
+    const mPick = await ask(`  ${o('›')} `);
+    const mIdx = parseInt(mPick, 10);
+    if (mIdx >= 1 && mIdx <= models.length) {
+      let model = models[mIdx - 1].value;
+      if (!model) {
+        model = await ask(`  ${chalk.dim('Model name:')} `);
+      }
+      if (model) {
+        fullCmd = `aider --model ${model}`;
+      }
+    }
+  }
+
+  // Launch hawkeye record with --session to attach to existing session
+  // Extract model from command (e.g. "aider --model deepseek/deepseek-chat" → "deepseek/deepseek-chat")
+  const modelMatch = fullCmd.match(/--model\s+(\S+)/);
+  const modelArg = modelMatch ? modelMatch[1] : null;
+  console.log('');
+  console.log(chalk.dim(`  Attaching to session ${session.id.slice(0, 8)}...`));
+  console.log(chalk.dim(`  Launching: hawkeye record -s ${session.id}${modelArg ? ` -m ${modelArg}` : ''} -o "${session.objective}" -- ${fullCmd}`));
+  console.log('');
+
+  const { spawn: sp } = await import('node:child_process');
+  const args = ['record', '-s', session.id, ...(modelArg ? ['-m', modelArg] : []), '-o', session.objective, '--', ...fullCmd.split(' ')];
+  const child = sp(process.execPath, [process.argv[1], ...args], {
+    stdio: 'inherit',
+    cwd,
+  });
+  await new Promise<void>((res) => child.on('close', () => res()));
+}
+
+async function runShellCommand(line: string): Promise<void> {
+  const { spawn: sp } = await import('node:child_process');
+  console.log('');
+  const child = sp(line, { stdio: 'inherit', shell: true, env: getShellEnv() });
+  await new Promise<void>((res) => child.on('close', () => { console.log(''); res(); }));
 }
 
 async function cmdRestart(dbPath: string, cwd: string, args: string): Promise<void> {
   const db = getStorage(dbPath);
   if (!db) return;
 
+  let sessionId = '';
   let obj = '';
   let agent = 'claude-code';
   let model = 'claude-sonnet-4-6';
@@ -624,6 +1083,7 @@ async function cmdRestart(dbPath: string, cwd: string, args: string): Promise<vo
     // Direct session ID provided
     const r = db.getSession(args);
     if (r.ok && r.value) {
+      sessionId = r.value.id;
       obj = r.value.objective;
       agent = r.value.agent || agent;
       model = r.value.model || model;
@@ -649,37 +1109,129 @@ async function cmdRestart(dbPath: string, cwd: string, args: string): Promise<vo
     }
     if (idx > 0) {
       const s = sessions[idx - 1];
+      sessionId = s.id;
       obj = s.objective;
       agent = s.agent || agent;
       model = s.model || model;
     }
   }
 
-  // If new session or no objective, ask for a name
-  if (!obj) {
-    obj = await ask(`  ${chalk.dim('Session name:')} `);
-    if (!obj) obj = 'New Session';
-  }
-
-  // End any active sessions
+  // End any OTHER active sessions
   const rec = db.listSessions({ status: 'recording' });
   const active = rec.ok ? rec.value : [];
-  for (const s of active) db.endSession(s.id, 'completed');
+  for (const s of active) {
+    if (s.id !== sessionId) db.endSession(s.id, 'completed');
+  }
 
-  const id = randomUUID();
-  db.createSession({
-    id,
-    objective: obj,
-    startedAt: new Date(),
-    status: 'recording',
-    metadata: { agent, model, workingDir: cwd },
-  });
+  if (sessionId) {
+    // Reopen existing session (keep same ID and all events)
+    db.reopenSession(sessionId);
+  } else {
+    // New session: ask for name, create fresh
+    obj = await ask(`  ${chalk.dim('Session name:')} `);
+    if (!obj) obj = 'New Session';
+    sessionId = randomUUID();
+    db.createSession({
+      id: sessionId,
+      objective: obj,
+      startedAt: new Date(),
+      status: 'recording',
+      metadata: { agent, model, workingDir: cwd },
+      totalCostUsd: 0,
+      totalTokens: 0,
+      totalActions: 0,
+    });
+  }
+
   db.close();
-  console.log(chalk.green(`  ✓ New session ${id.slice(0, 8)}`));
-  console.log(chalk.dim(`    ${obj}`));
+
+  // Write pending-session so Claude Code hooks attach to this session
+  const hawkDir = join(cwd, '.hawkeye');
+  const { writeFileSync: wfs } = await import('node:fs');
+  wfs(join(hawkDir, 'pending-session.json'), JSON.stringify({ sessionId, objective: obj }), 'utf-8');
+
+  console.log(chalk.green(`  ✓ Session ${sessionId.slice(0, 8)} — ${obj}`));
+  console.log(chalk.dim(`    Launch Claude Code to start recording.`));
 }
 
 async function cmdDelete(dbPath: string, args: string): Promise<void> {
+  const db = getStorage(dbPath);
+  if (!db) return;
+
+  // If args provided, delete that specific session
+  if (args) {
+    const r = db.getSession(args);
+    if (!r.ok || !r.value) {
+      console.log(chalk.red(`  Not found: ${args}`));
+      db.close();
+      return;
+    }
+    const y = await ask(chalk.red(`  Delete ${r.value.id.slice(0, 8)}? (y/N) `));
+    if (y.toLowerCase() === 'y') {
+      const del = db.deleteSession(r.value.id);
+      if (del.ok) console.log(chalk.green(`  ✓ Deleted ${r.value.id.slice(0, 8)}`));
+      else console.log(chalk.red(`  ✗ Failed to delete: ${del.error.message}`));
+    }
+    db.close();
+    return;
+  }
+
+  // Show session picker with multi-select support
+  const r = db.listSessions({ limit: 15 });
+  if (!r.ok || r.value.length === 0) {
+    console.log(chalk.dim('  No sessions.'));
+    db.close();
+    return;
+  }
+  lastSessions = r.value;
+  console.log('');
+  for (let i = 0; i < r.value.length; i++) printSession(i + 1, r.value[i]);
+  console.log('');
+  console.log(chalk.dim('  Enter numbers to delete (e.g. 1 2 3 or 1-5 or all)'));
+  const pick = await ask(chalk.dim('  # ') + o('› '));
+  if (!pick) { db.close(); return; }
+
+  // Parse selection: support "1 2 3", "1-5", "all"
+  let indices: number[] = [];
+  if (pick.toLowerCase() === 'all') {
+    indices = r.value.map((_, i) => i);
+  } else {
+    for (const part of pick.split(/[\s,]+/)) {
+      const rangeMatch = part.match(/^(\d+)-(\d+)$/);
+      if (rangeMatch) {
+        const start = parseInt(rangeMatch[1], 10);
+        const end = parseInt(rangeMatch[2], 10);
+        for (let n = start; n <= end; n++) indices.push(n - 1);
+      } else {
+        const n = parseInt(part, 10);
+        if (!isNaN(n)) indices.push(n - 1);
+      }
+    }
+  }
+
+  // Filter valid indices
+  const sessions = indices
+    .filter((i) => i >= 0 && i < r.value.length)
+    .map((i) => r.value[i]);
+
+  if (sessions.length === 0) { db.close(); return; }
+
+  const label = sessions.length === 1
+    ? `Delete ${sessions[0].id.slice(0, 8)}?`
+    : `Delete ${sessions.length} sessions?`;
+  const y = await ask(chalk.red(`  ${label} (y/N) `));
+  if (y.toLowerCase() !== 'y') { db.close(); return; }
+
+  let deleted = 0;
+  for (const s of sessions) {
+    const del = db.deleteSession(s.id);
+    if (del.ok) deleted++;
+  }
+  console.log(chalk.green(`  ✓ Deleted ${deleted} session${deleted > 1 ? 's' : ''}`));
+  db.close();
+}
+
+async function cmdInspect(dbPath: string, args: string): Promise<void> {
   let sid = args;
   if (!sid) {
     sid = await pickSession(dbPath);
@@ -687,18 +1239,328 @@ async function cmdDelete(dbPath: string, args: string): Promise<void> {
   }
   const db = getStorage(dbPath);
   if (!db) return;
-  const r = db.getSession(sid);
-  if (!r.ok || !r.value) {
-    console.log(chalk.red(`  Not found: ${sid}`));
+
+  // Resolve short ID
+  let sessionId = sid;
+  const exact = db.getSession(sid);
+  if (!exact.ok || !exact.value) {
+    const all = db.listSessions({ limit: 1000 });
+    const rows = all.ok ? all.value : [];
+    const matches = rows.filter((s) => s.id.startsWith(sid));
+    if (matches.length === 1) {
+      sessionId = matches[0].id;
+    } else if (matches.length > 1) {
+      console.log(chalk.yellow(`  Ambiguous ID: ${matches.map((s) => s.id.slice(0, 8)).join(', ')}`));
+      db.close();
+      return;
+    } else {
+      console.log(chalk.red(`  Not found: ${sid}`));
+      db.close();
+      return;
+    }
+  }
+
+  const sr = db.getSession(sessionId);
+  if (!sr.ok || !sr.value) {
+    console.log(chalk.red(`  Not found: ${sessionId}`));
     db.close();
     return;
   }
-  const y = await ask(chalk.red(`  Delete ${r.value.id.slice(0, 8)}? (y/N) `));
-  if (y.toLowerCase() === 'y') {
-    db.deleteSession(r.value.id);
-    console.log(chalk.green(`  ✓ Deleted`));
-  }
+
+  const s = sr.value;
+  const ev = db.getEvents(sessionId);
+  const dr = db.getDriftSnapshots(sessionId);
   db.close();
+
+  const events = ev.ok ? ev.value : [];
+  const drifts = dr.ok ? dr.value : [];
+
+  // Parsed events
+  const parsed = events.map((e) => ({
+    ...e,
+    parsed: JSON.parse(e.data) as Record<string, unknown>,
+  }));
+
+  // ─── Header ───
+  const startDate = new Date(s.started_at);
+  const endDate = s.ended_at ? new Date(s.ended_at) : new Date();
+  const durationMs = endDate.getTime() - startDate.getTime();
+  const statusIcon =
+    s.status === 'completed' ? chalk.green('✓') :
+    s.status === 'recording' ? chalk.yellow('●') :
+    s.status === 'paused' ? chalk.blue('⏸') :
+    chalk.red('✗');
+
+  console.log('');
+  console.log(o('  ┌─ Session Inspect ───────────────────────────────'));
+  console.log(o('  │'));
+  console.log(o('  │ ') + chalk.bold(s.objective));
+  console.log(o('  │'));
+  console.log(o('  │ ') + `${statusIcon} ${s.id.slice(0, 8)}  ${s.agent || chalk.dim('unknown')}  ${dur(s.started_at, s.ended_at)}`);
+  console.log(o('  │'));
+
+  // ─── Quick Stats ───
+  const typeCounts: Record<string, number> = {};
+  for (const e of events) typeCounts[e.type] = (typeCounts[e.type] || 0) + 1;
+  const totalCost = events.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
+
+  console.log(o('  │ ') + chalk.bold('Stats'));
+  console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+  const driftStr = s.final_drift_score != null
+    ? (s.final_drift_score >= 70 ? chalk.green : s.final_drift_score >= 40 ? chalk.yellow : chalk.red)(`${s.final_drift_score.toFixed(0)}/100`)
+    : chalk.dim('—');
+  console.log(o('  │ ') + `Actions: ${chalk.white(String(events.length))}  Cost: ${chalk.yellow('$' + totalCost.toFixed(4))}  Tokens: ${s.total_tokens.toLocaleString()}  Drift: ${driftStr}`);
+  const typeStr = Object.entries(typeCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, c]) => `${t}(${c})`)
+    .join('  ');
+  console.log(o('  │ ') + chalk.dim(typeStr));
+  console.log(o('  │'));
+
+  // ─── Files Changed ───
+  const fileEvents = parsed.filter((e) => e.type === 'file_write' || e.type === 'file_delete' || e.type === 'file_rename');
+  const fileMap: Record<string, { action: string; cost: number; count: number }> = {};
+  for (const e of fileEvents) {
+    const path = String(e.parsed.path || '');
+    const action = e.type === 'file_delete' ? 'deleted' : e.type === 'file_rename' ? 'renamed' : 'modified';
+    if (!fileMap[path]) fileMap[path] = { action, cost: 0, count: 0 };
+    fileMap[path].count++;
+    fileMap[path].cost += e.cost_usd || 0;
+    fileMap[path].action = action;
+  }
+  const sortedFiles = Object.entries(fileMap).sort((a, b) => b[1].cost - a[1].cost);
+  console.log(o('  │ ') + chalk.bold(`Files (${sortedFiles.length})`));
+  console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+  if (sortedFiles.length === 0) {
+    console.log(o('  │ ') + chalk.dim('  No file changes'));
+  } else {
+    for (const [path, info] of sortedFiles.slice(0, 20)) {
+      const icon = info.action === 'deleted' ? chalk.red('−') : info.action === 'renamed' ? chalk.blue('→') : chalk.green('+');
+      const edits = info.count > 1 ? chalk.dim(` (${info.count}x)`) : '';
+      const cost = info.cost > 0 ? chalk.yellow(` $${info.cost.toFixed(4)}`) : '';
+      console.log(o('  │ ') + `  ${icon} ${path}${cost}${edits}`);
+    }
+    if (sortedFiles.length > 20) console.log(o('  │ ') + chalk.dim(`  ... +${sortedFiles.length - 20} more`));
+  }
+  console.log(o('  │'));
+
+  // ─── LLM Calls ───
+  const llmEvents = parsed.filter((e) => e.type === 'llm_call');
+  if (llmEvents.length > 0) {
+    const byModel: Record<string, { cost: number; tokens: number; calls: number }> = {};
+    for (const e of llmEvents) {
+      const key = `${e.parsed.provider || '?'}/${e.parsed.model || '?'}`;
+      if (!byModel[key]) byModel[key] = { cost: 0, tokens: 0, calls: 0 };
+      byModel[key].cost += e.cost_usd || 0;
+      byModel[key].tokens += (e.parsed.totalTokens as number) || 0;
+      byModel[key].calls++;
+    }
+    console.log(o('  │ ') + chalk.bold(`LLM Calls (${llmEvents.length})`));
+    console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+    for (const [model, data] of Object.entries(byModel)) {
+      console.log(o('  │ ') + `  ${chalk.magenta('⚡')} ${model}  ${data.calls} calls  ${data.tokens.toLocaleString()} tok  ${chalk.yellow('$' + data.cost.toFixed(4))}`);
+    }
+    console.log(o('  │'));
+  }
+
+  // ─── Drift History ───
+  if (drifts.length > 0) {
+    console.log(o('  │ ') + chalk.bold(`Drift (${drifts.length} checks)`));
+    console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+    for (const snap of drifts.slice(-10)) {
+      const time = new Date(snap.created_at).toLocaleTimeString();
+      const score = snap.score;
+      const color = score >= 70 ? chalk.green : score >= 40 ? chalk.yellow : chalk.red;
+      const bar = color('█'.repeat(Math.round(score / 5))) + chalk.dim('░'.repeat(20 - Math.round(score / 5)));
+      console.log(o('  │ ') + `  ${chalk.dim(time)} ${bar} ${color(score.toFixed(0).padStart(3) + '/100')} ${chalk.dim(snap.reason || '')}`);
+    }
+    if (drifts.length > 10) console.log(o('  │ ') + chalk.dim(`  ... ${drifts.length - 10} earlier checks`));
+    console.log(o('  │'));
+  }
+
+  // ─── Recent Events ───
+  console.log(o('  │ ') + chalk.bold(`Timeline (last 15)`));
+  console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+  const typeIcons: Record<string, string> = {
+    command: chalk.blue('$'), file_write: chalk.green('✎'), file_delete: chalk.red('✗'),
+    file_read: chalk.dim('◉'), llm_call: chalk.magenta('⚡'), api_call: chalk.cyan('→'),
+    git_commit: chalk.green('●'), git_push: chalk.cyan('↑'), guardrail_trigger: chalk.red('⛔'),
+    guardrail_block: chalk.red('⛔'), drift_alert: chalk.yellow('⚠'), error: chalk.red('!'),
+  };
+  for (const e of parsed.slice(-15)) {
+    const time = new Date(e.timestamp).toLocaleTimeString();
+    const icon = typeIcons[e.type] || chalk.dim('·');
+    let summary = e.type;
+    if (e.type === 'command') summary = `${e.parsed.command} ${((e.parsed.args as string[]) || []).join(' ')}`.trim();
+    else if (e.type.startsWith('file_')) summary = String(e.parsed.path || '');
+    else if (e.type === 'llm_call') summary = `${e.parsed.provider}/${e.parsed.model}`;
+    else if (e.type === 'error') summary = String(e.parsed.message || e.parsed.error || 'error');
+    const cost = e.cost_usd > 0 ? chalk.yellow(` $${e.cost_usd.toFixed(4)}`) : '';
+    console.log(o('  │ ') + `  ${chalk.dim(time)} ${icon} ${summary.slice(0, 50)}${cost}`);
+  }
+  if (events.length > 15) console.log(o('  │ ') + chalk.dim(`  ... ${events.length - 15} earlier events`));
+
+  console.log(o('  │'));
+  console.log(o('  └──────────────────────────────────────────────────'));
+  console.log('');
+}
+
+async function cmdCompare(dbPath: string, args: string): Promise<void> {
+  const db = getStorage(dbPath);
+  if (!db) return;
+
+  const r = db.listSessions({ limit: 15 });
+  if (!r.ok || r.value.length < 2) {
+    console.log(chalk.dim('  Need at least 2 sessions to compare.'));
+    db.close();
+    return;
+  }
+
+  let resolvedIds: string[] = [];
+
+  if (args) {
+    // Parse IDs from args
+    const ids = args.split(/[\s,]+/);
+    const allRows = r.value;
+    for (const input of ids) {
+      const exact = allRows.find((s) => s.id === input);
+      if (exact) { resolvedIds.push(exact.id); continue; }
+      const matches = allRows.filter((s) => s.id.startsWith(input));
+      if (matches.length === 1) resolvedIds.push(matches[0].id);
+      else if (matches.length > 1) {
+        console.log(chalk.yellow(`  Ambiguous ID "${input}": ${matches.map((s) => s.id.slice(0, 8)).join(', ')}`));
+        db.close();
+        return;
+      } else {
+        console.log(chalk.red(`  Not found: ${input}`));
+        db.close();
+        return;
+      }
+    }
+  } else {
+    // Interactive picker: select 2+ sessions
+    console.log('');
+    for (let i = 0; i < r.value.length; i++) printSession(i + 1, r.value[i]);
+    console.log('');
+    console.log(chalk.dim('  Pick 2+ sessions (e.g. 1 3 or 1-3)'));
+    const pick = await ask(chalk.dim('  # ') + o('› '));
+    if (!pick) { db.close(); return; }
+
+    const indices: number[] = [];
+    for (const part of pick.split(/[\s,]+/)) {
+      const rangeMatch = part.match(/^(\d+)-(\d+)$/);
+      if (rangeMatch) {
+        const start = parseInt(rangeMatch[1], 10);
+        const end = parseInt(rangeMatch[2], 10);
+        for (let n = start; n <= end; n++) indices.push(n - 1);
+      } else {
+        const n = parseInt(part, 10);
+        if (!isNaN(n)) indices.push(n - 1);
+      }
+    }
+
+    resolvedIds = indices
+      .filter((i) => i >= 0 && i < r.value.length)
+      .map((i) => r.value[i].id);
+  }
+
+  if (resolvedIds.length < 2) {
+    console.log(chalk.dim('  Need at least 2 sessions.'));
+    db.close();
+    return;
+  }
+
+  const result = db.compareSessions(resolvedIds);
+  db.close();
+
+  if (!result.ok || result.value.length < 2) {
+    console.log(chalk.red('  Could not load sessions for comparison.'));
+    return;
+  }
+
+  const comparisons = result.value;
+  const colWidth = 22;
+  const labelWidth = 18;
+
+  console.log('');
+  console.log(o.bold('  Session Comparison'));
+  console.log(chalk.dim('  ─'.repeat(30)));
+  console.log('');
+
+  // Header
+  console.log(
+    ''.padEnd(labelWidth) +
+    comparisons.map((c) => chalk.cyan(c.session.id.slice(0, 8).padEnd(colWidth))).join(''),
+  );
+  console.log(chalk.dim('  ' + '─'.repeat(labelWidth + colWidth * comparisons.length)));
+
+  // Rows
+  const rows: Array<{ label: string; values: string[]; winner?: 'low' | 'high' }> = [
+    { label: 'Agent', values: comparisons.map((c) => c.session.agent || 'unknown') },
+    { label: 'Objective', values: comparisons.map((c) => c.session.objective.slice(0, colWidth - 2)) },
+    { label: 'Status', values: comparisons.map((c) => c.session.status) },
+    { label: 'Duration', values: comparisons.map((c) => dur(c.session.started_at, c.session.ended_at)), winner: 'low' },
+    { label: 'Actions', values: comparisons.map((c) => String(c.session.total_actions)), winner: 'low' },
+    { label: 'Cost', values: comparisons.map((c) => '$' + c.session.total_cost_usd.toFixed(4)), winner: 'low' },
+    { label: 'Tokens', values: comparisons.map((c) => c.session.total_tokens.toLocaleString()), winner: 'low' },
+    { label: 'LLM Calls', values: comparisons.map((c) => String(c.stats.llm_count)), winner: 'low' },
+    { label: 'Commands', values: comparisons.map((c) => String(c.stats.command_count)) },
+    { label: 'Files', values: comparisons.map((c) => String(c.filesChanged.length)) },
+    { label: 'Errors', values: comparisons.map((c) => String(c.stats.error_count)), winner: 'low' },
+    { label: 'Guardrails', values: comparisons.map((c) => String(c.stats.guardrail_count)), winner: 'low' },
+    {
+      label: 'Drift',
+      values: comparisons.map((c) =>
+        c.session.final_drift_score != null ? c.session.final_drift_score.toFixed(0) + '/100' : 'n/a',
+      ),
+      winner: 'high',
+    },
+  ];
+
+  for (const row of rows) {
+    let winnerIdx = -1;
+    if (row.winner) {
+      const nums = row.values.map((v) => {
+        const n = parseFloat(v.replace(/[^0-9.-]/g, ''));
+        return isNaN(n) ? null : n;
+      });
+      const valid = nums.filter((n) => n !== null) as number[];
+      if (valid.length >= 2) {
+        const best = row.winner === 'low' ? Math.min(...valid) : Math.max(...valid);
+        winnerIdx = nums.indexOf(best);
+      }
+    }
+    const formatted = row.values
+      .map((v, i) => {
+        const padded = v.slice(0, colWidth - 2).padEnd(colWidth);
+        return i === winnerIdx ? chalk.green(padded) : padded;
+      })
+      .join('');
+    console.log(`  ${chalk.dim(row.label.padEnd(labelWidth))}${formatted}`);
+  }
+
+  // Efficiency
+  console.log('');
+  console.log(chalk.dim('  ' + '─'.repeat(labelWidth + colWidth * comparisons.length)));
+  const effs = comparisons.map((c) => ({
+    cpa: c.session.total_actions > 0 ? c.session.total_cost_usd / c.session.total_actions : 0,
+    tpa: c.session.total_actions > 0 ? c.session.total_tokens / c.session.total_actions : 0,
+  }));
+  const bestCpa = effs.reduce((b, e, i) => (e.cpa > 0 && e.cpa < effs[b].cpa ? i : b), 0);
+  console.log(
+    `  ${chalk.dim('$/action'.padEnd(labelWidth))}${effs
+      .map((e, i) => {
+        const v = ('$' + e.cpa.toFixed(4)).padEnd(colWidth);
+        return i === bestCpa ? chalk.green(v) : v;
+      })
+      .join('')}`,
+  );
+  console.log(
+    `  ${chalk.dim('tok/action'.padEnd(labelWidth))}${effs
+      .map((e) => String(Math.round(e.tpa)).padEnd(colWidth))
+      .join('')}`,
+  );
+  console.log('');
 }
 
 async function cmdReplay(dbPath: string, args: string): Promise<void> {
@@ -1109,28 +1971,55 @@ async function settingsApiKeys(config: HawkeyeConfig, cwd: string): Promise<void
 }
 
 async function cmdServe(): Promise<void> {
-  // Check if port is already in use before spawning
   const net = await import('node:net');
-  const portFree = await new Promise<boolean>((resolve) => {
-    const tester = net.createServer()
-      .once('error', () => resolve(false))
-      .once('listening', () => { tester.close(); resolve(true); })
-      .listen(4242);
-  });
-  if (!portFree) {
-    console.log(chalk.yellow('  Dashboard already running on :4242'));
-    console.log(chalk.dim('  http://localhost:4242'));
-    return;
+  const http = await import('node:http');
+  const cwd = process.cwd();
+
+  // Check ports 4242-4252 for an existing dashboard serving THIS project
+  for (let p = 4242; p <= 4252; p++) {
+    const info = await new Promise<{ cwd?: string } | null>((resolve) => {
+      const req = http.get(`http://localhost:${p}/api/info`, { timeout: 500 }, (res) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); } catch { resolve(null); }
+        });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+
+    if (info?.cwd === cwd) {
+      console.log(chalk.green(`  ✓ Dashboard already running for this project`));
+      console.log(chalk.dim(`  http://localhost:${p}`));
+      return;
+    }
   }
-  console.log(chalk.dim('  Starting dashboard on :4242...'));
-  const { spawn } = await import('node:child_process');
-  const child = spawn(process.execPath, [process.argv[1], 'serve'], {
-    stdio: 'ignore',
-    detached: true,
-  });
-  child.unref();
-  console.log(chalk.green('  ✓ Dashboard running'));
-  console.log(chalk.dim('  http://localhost:4242'));
+
+  // Find first free port
+  for (let p = 4242; p <= 4252; p++) {
+    const portFree = await new Promise<boolean>((resolve) => {
+      const tester = net.createServer()
+        .once('error', () => resolve(false))
+        .once('listening', () => { tester.close(); resolve(true); })
+        .listen(p);
+    });
+
+    if (portFree) {
+      console.log(chalk.dim(`  Starting dashboard on :${p}...`));
+      const { spawn } = await import('node:child_process');
+      const child = spawn(process.execPath, [process.argv[1], 'serve', '-p', String(p)], {
+        stdio: 'ignore',
+        detached: true,
+      });
+      child.unref();
+      console.log(chalk.green('  ✓ Dashboard running'));
+      console.log(chalk.dim(`  http://localhost:${p}`));
+      return;
+    }
+  }
+
+  console.log(chalk.red('  No available port found (tried 4242-4252).'));
 }
 
 async function cmdInit(): Promise<void> {
@@ -1179,6 +2068,9 @@ async function sessionMenu(s: SessionRow, dbPath: string, cwd: string): Promise<
         model: s.model || 'claude-sonnet-4-6',
         workingDir: cwd,
       },
+      totalCostUsd: 0,
+      totalTokens: 0,
+      totalActions: 0,
     });
     db.close();
     console.log(chalk.green(`  ✓ New session ${id.slice(0, 8)}`));
@@ -1233,7 +2125,19 @@ async function pickSession(dbPath: string): Promise<string> {
 
 export async function startInteractive(): Promise<void> {
   const cwd = process.cwd();
-  const dbPath = join(cwd, '.hawkeye', 'traces.db');
+  const hawkDir = join(cwd, '.hawkeye');
+  const dbPath = join(hawkDir, 'traces.db');
+
+  // Auto-init if .hawkeye doesn't exist (zero-config)
+  if (!existsSync(hawkDir)) {
+    mkdirSync(hawkDir, { recursive: true });
+    const cfgPath = join(hawkDir, 'config.json');
+    writeFileSync(cfgPath, JSON.stringify(getDefaultConfig(), null, 2), 'utf-8');
+    // Trigger DB creation via Storage constructor
+    const { Storage } = await import('@hawkeye/core');
+    const s = new Storage(dbPath);
+    s.close();
+  }
 
   printBanner();
   printActiveBar(dbPath);

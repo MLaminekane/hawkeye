@@ -117,11 +117,11 @@ function generateHtmlReport(
   .stats span { color: #9898A8; }
   .stats strong { color: #E0E0EA; }
   .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; }
-  .status.completed { background: #2ECC7120; color: #2ECC71; }
-  .status.aborted { background: #FF475720; color: #FF4757; }
-  .status.recording { background: #FF6B2B20; color: #FF6B2B; }
-  table { width: 100%; border-collapse: collapse; background: #16161D; border: 1px solid #2A2A3A; border-radius: 8px; overflow: hidden; }
-  th { text-align: left; padding: 0.5rem 0.75rem; background: #1E1E2A; font-size: 0.65rem; text-transform: uppercase; color: #5A5A6E; letter-spacing: 0.05em; }
+  .status.completed { background: #22c55e20; color: #22c55e; }
+  .status.aborted { background: #ef444420; color: #ef4444; }
+  .status.recording { background: #ff5f1f20; color: #ff5f1f; }
+  table { width: 100%; border-collapse: collapse; background: #111117; border: 1px solid #242430; border-radius: 8px; overflow: hidden; }
+  th { text-align: left; padding: 0.5rem 0.75rem; background: #18181f; font-size: 0.65rem; text-transform: uppercase; color: #555568; letter-spacing: 0.05em; }
   td { padding: 0.4rem 0.75rem; border-top: 1px solid #1E1E2A; font-size: 0.75rem; }
   .time { color: #5A5A6E; white-space: nowrap; }
   .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -167,9 +167,16 @@ function getTypeStyle(type: string): { label: string; color: string } {
     command:           { label: 'CMD',   color: '#3B82F6' },
     file_write:        { label: 'FILE',  color: '#2ECC71' },
     file_delete:       { label: 'DEL',   color: '#FF4757' },
+    file_read:         { label: 'READ',  color: '#6B7280' },
     llm_call:          { label: 'LLM',   color: '#A78BFA' },
     api_call:          { label: 'API',   color: '#06B6D4' },
+    git_commit:        { label: 'GIT',   color: '#22c55e' },
+    git_checkout:      { label: 'GIT',   color: '#3B82F6' },
+    git_push:          { label: 'GIT',   color: '#06B6D4' },
+    git_pull:          { label: 'GIT',   color: '#06B6D4' },
+    git_merge:         { label: 'GIT',   color: '#A78BFA' },
     guardrail_trigger: { label: 'BLOCK', color: '#FF4757' },
+    guardrail_block:   { label: 'BLOCK', color: '#FF4757' },
     error:             { label: 'ERR',   color: '#FF4757' },
   };
   return map[type] || { label: type.toUpperCase(), color: '#5A5A6E' };
@@ -180,7 +187,14 @@ function getEventSummary(type: string, data: Record<string, unknown>, event: Rec
     case 'command': return `${data.command || ''} ${((data.args as string[]) || []).join(' ')}`.trim();
     case 'file_write': return `Modified ${data.path || ''}`;
     case 'file_delete': return `Deleted ${data.path || ''}`;
+    case 'file_read': return `Read ${data.path || ''}`;
     case 'llm_call': return `${data.provider}/${data.model} → ${data.totalTokens} tokens`;
+    case 'git_commit': return `commit ${data.commitHash || ''} ${data.message || ''}`.trim();
+    case 'git_checkout': return `checkout ${data.branch || ''}`;
+    case 'git_push': return `push ${data.branch || ''}`;
+    case 'git_pull': return `pull`;
+    case 'git_merge': return `merge ${data.targetBranch || ''}`;
+    case 'error': return String(data.message || 'Error');
     case 'guardrail_trigger': return `${data.ruleName ? '[' + data.ruleName + '] ' : ''}${data.description || ''}`;
     default: return type;
   }

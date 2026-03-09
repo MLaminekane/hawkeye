@@ -21,13 +21,15 @@ export function SessionsPage() {
 
   useEffect(() => {
     const load = () => {
-      Promise.all([api.listSessions(200), api.getStats()])
-        .then(([data, s]) => {
+      api.listSessions(200)
+        .then((data) => {
           setSessions(data);
-          setStats(s);
           setLoading(false);
         })
         .catch(() => setLoading(false));
+      api.getStats()
+        .then((s) => setStats(s))
+        .catch(() => {});
     };
     load();
 
@@ -244,7 +246,7 @@ export function SessionsPage() {
 
 function StatCard({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
-    <div className="rounded-lg border border-hawk-border bg-hawk-surface p-4">
+    <div className="rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/70 p-4 shadow-sm transition-transform duration-200 hover:-translate-y-0.5">
       <div className="font-mono text-[10px] text-hawk-text3 uppercase mb-1">{label}</div>
       <div className={`font-display text-xl font-bold ${color}`}>{value}</div>
       <div className="font-mono text-[10px] text-hawk-text3 mt-0.5">{sub}</div>
@@ -260,10 +262,10 @@ function SessionCard({ session: s }: { session: SessionData }) {
   return (
     <Link
       to={`/session/${s.id}`}
-      className="group block rounded-lg border border-hawk-border bg-hawk-surface overflow-hidden transition-all hover:border-hawk-orange/30"
+      className="group block overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/45 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-hawk-orange/35 hover:shadow-[0_10px_30px_rgba(0,0,0,0.18)]"
     >
       {/* Top status line */}
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-hawk-border/50 bg-hawk-surface2/50">
+      <div className="flex items-center gap-3 border-b border-hawk-border-subtle bg-hawk-surface2/55 px-4 py-2">
         <div className="flex items-center gap-2">
           {isRecording ? (
             <>
@@ -299,7 +301,7 @@ function SessionCard({ session: s }: { session: SessionData }) {
 
       {/* Main content */}
       <div className="px-4 py-3">
-        <h3 className="text-sm font-medium text-hawk-text mb-3 group-hover:text-hawk-orange transition-colors">
+        <h3 className="mb-3 text-sm font-semibold text-hawk-text transition-colors group-hover:text-hawk-orange">
           {s.objective}
         </h3>
 

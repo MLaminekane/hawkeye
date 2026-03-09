@@ -163,8 +163,22 @@ export const otelExportCommand = new Command('otel-export')
       } else if (event.type === 'api_call') {
         spanAttrs.push(attr('http.url', String(eventData.url || '')));
         spanAttrs.push(attr('http.method', String(eventData.method || '')));
-      } else if (event.type === 'guardrail_trigger') {
+      } else if (event.type === 'guardrail_trigger' || event.type === 'guardrail_block') {
         spanAttrs.push(attr('hawkeye.guardrail.triggered', 'true'));
+        if (eventData.ruleName) spanAttrs.push(attr('hawkeye.guardrail.rule', String(eventData.ruleName)));
+      } else if (event.type.startsWith('git_')) {
+        spanAttrs.push(attr('vcs.operation', String(eventData.operation || event.type.replace('git_', ''))));
+        if (eventData.branch) spanAttrs.push(attr('vcs.branch', String(eventData.branch)));
+        if (eventData.targetBranch) spanAttrs.push(attr('vcs.target_branch', String(eventData.targetBranch)));
+        if (eventData.commitHash) spanAttrs.push(attr('vcs.commit.id', String(eventData.commitHash)));
+        if (eventData.message) spanAttrs.push(attr('vcs.commit.message', String(eventData.message)));
+        if (eventData.filesChanged) spanAttrs.push(attr('vcs.files_changed', Number(eventData.filesChanged)));
+        if (eventData.linesAdded) spanAttrs.push(attr('vcs.lines_added', Number(eventData.linesAdded)));
+        if (eventData.linesRemoved) spanAttrs.push(attr('vcs.lines_removed', Number(eventData.linesRemoved)));
+      } else if (event.type === 'error') {
+        spanAttrs.push(attr('exception.message', String(eventData.message || '')));
+        if (eventData.code) spanAttrs.push(attr('exception.type', String(eventData.code)));
+        if (eventData.source) spanAttrs.push(attr('hawkeye.error.source', String(eventData.source)));
       }
 
       return {
@@ -177,7 +191,7 @@ export const otelExportCommand = new Command('otel-export')
         endTimeUnixNano: endNano,
         attributes: spanAttrs,
         status: {
-          code: event.type === 'guardrail_trigger' ? 2 : 1,
+          code: event.type === 'guardrail_trigger' || event.type === 'guardrail_block' || event.type === 'error' ? 2 : 1,
         },
       };
     });
@@ -276,8 +290,21 @@ function getSpanName(type: string, data: Record<string, unknown>): string {
       return `llm: ${data.provider}/${data.model}`;
     case 'api_call':
       return `${data.method} ${data.url}`;
+    case 'git_commit':
+      return `git commit: ${String(data.message || data.commitHash || '').slice(0, 60)}`;
+    case 'git_checkout':
+      return `git checkout: ${data.branch || ''}`;
+    case 'git_push':
+      return `git push${data.branch ? ': ' + data.branch : ''}`;
+    case 'git_pull':
+      return `git pull`;
+    case 'git_merge':
+      return `git merge: ${data.targetBranch || ''}`;
+    case 'error':
+      return `error: ${String(data.message || '').slice(0, 80)}`;
     case 'guardrail_trigger':
-      return `guardrail: blocked`;
+    case 'guardrail_block':
+      return `guardrail: ${data.ruleName || 'blocked'}`;
     default:
       return type;
   }

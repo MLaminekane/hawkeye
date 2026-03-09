@@ -22,28 +22,36 @@ export function Layout() {
   const navLinks = [
     { to: '/', label: 'Sessions' },
     { to: '/live', label: 'Live' },
+    { to: '/compare', label: 'Compare' },
     { to: '/settings', label: 'Settings' },
   ];
 
   return (
-    <div className="min-h-screen bg-hawk-bg">
-      <nav className="sticky top-0 z-50 border-b border-hawk-border bg-hawk-bg/80 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
+    <div className="relative min-h-screen bg-hawk-bg">
+      <div className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
+        <div className="absolute -left-24 top-12 h-64 w-64 rounded-full bg-hawk-orange/10 blur-3xl" />
+        <div className="absolute right-[-70px] top-32 h-72 w-72 rounded-full bg-hawk-green/10 blur-3xl" />
+      </div>
+
+      <nav className="sticky top-0 z-50 border-b border-hawk-border-subtle bg-hawk-bg/75 backdrop-blur-2xl">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3.5">
           <Link to="/" className="flex items-center gap-2.5">
-            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-hawk-orange text-xs font-bold text-black">
+            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-hawk-orange text-xs font-bold text-black shadow-[0_0_0_3px_rgba(255,107,43,0.18)]">
               H
             </div>
-            <span className="font-mono text-sm font-semibold text-hawk-text">
+            <span className="font-display text-base font-semibold tracking-wide text-hawk-text">
               Hawkeye
             </span>
           </Link>
-          <div className="flex items-center gap-6 font-mono text-xs text-hawk-text3">
+          <div className="flex items-center gap-2 rounded-xl border border-hawk-border-subtle bg-hawk-surface/65 p-1 font-mono text-xs text-hawk-text3 shadow-sm">
             {navLinks.map((link) => (
               <Link
                 key={link.to}
                 to={link.to}
-                className={`transition-colors hover:text-hawk-text ${
-                  location.pathname === link.to ? 'text-hawk-orange' : ''
+                className={`rounded-lg px-3 py-1.5 transition-all hover:text-hawk-text ${
+                  location.pathname === link.to
+                    ? 'bg-hawk-surface2 text-hawk-orange shadow-sm'
+                    : ''
                 }`}
               >
                 {link.label}
@@ -51,7 +59,7 @@ export function Layout() {
             ))}
             <button
               onClick={toggle}
-              className="ml-2 rounded-lg p-1.5 text-hawk-text3 transition-colors hover:text-hawk-text hover:bg-hawk-surface2"
+              className="ml-1 rounded-lg p-1.5 text-hawk-text3 transition-colors hover:bg-hawk-surface2 hover:text-hawk-text"
               title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
             >
               {isDark ? (
@@ -63,7 +71,7 @@ export function Layout() {
           </div>
         </div>
       </nav>
-      <main className="mx-auto max-w-6xl px-6 py-8">
+      <main className="mx-auto max-w-6xl px-6 py-10">
         <Outlet />
       </main>
     </div>

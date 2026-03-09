@@ -26,10 +26,11 @@ interface LlmProvider {
   complete(prompt: string): Promise<string>;
 }
 
-function createOllamaProvider(model: string): LlmProvider {
+function createOllamaProvider(model: string, ollamaUrl?: string): LlmProvider {
+  const baseUrl = ollamaUrl || 'http://localhost:11434';
   return {
     async complete(prompt: string): Promise<string> {
-      const response = await fetch('http://localhost:11434/api/generate', {
+      const response = await fetch(`${baseUrl}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -256,7 +257,7 @@ export function createDriftEngine(
     try {
       switch (config.provider) {
         case 'ollama':
-          llmProvider = createOllamaProvider(config.model);
+          llmProvider = createOllamaProvider(config.model, config.ollamaUrl);
           logger.info(`DriftDetect: using Ollama (${config.model})`);
           break;
         case 'anthropic':

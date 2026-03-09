@@ -58,6 +58,32 @@ describe('GuardrailEnforcer', () => {
     expect(violations[0].actionTaken).toBe('blocked');
   });
 
+  it('blocks reads of .env files', () => {
+    const enforcer = createGuardrailEnforcer(rules, workingDir);
+    const event = makeEvent({
+      type: 'file_read',
+      data: { path: '/home/user/project/.env', action: 'read', sizeBytes: 50 },
+    });
+    const violations = enforcer.evaluate(event);
+    expect(violations.length).toBeGreaterThan(0);
+    expect(violations[0].ruleName).toBe('protected_files');
+    expect(violations[0].description).toContain('read');
+  });
+
+  it('blocks reads of .pem and .key files', () => {
+    const enforcer = createGuardrailEnforcer(rules, workingDir);
+    const pemEvent = makeEvent({
+      type: 'file_read',
+      data: { path: '/home/user/project/server.pem', action: 'read', sizeBytes: 200 },
+    });
+    const keyEvent = makeEvent({
+      type: 'file_read',
+      data: { path: '/home/user/project/private.key', action: 'read', sizeBytes: 100 },
+    });
+    expect(enforcer.evaluate(pemEvent).some((v) => v.ruleName === 'protected_files')).toBe(true);
+    expect(enforcer.evaluate(keyEvent).some((v) => v.ruleName === 'protected_files')).toBe(true);
+  });
+
   it('blocks writes to .pem files', () => {
     const enforcer = createGuardrailEnforcer(rules, workingDir);
     const event = makeEvent({
