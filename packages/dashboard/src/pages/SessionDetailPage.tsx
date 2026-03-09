@@ -492,7 +492,7 @@ function EventRow({ event, expanded, onToggle }: {
   const { summary, detail } = getEventInfo(event.type, parsed, event);
   const hasDiff = (event.type === 'file_write' || event.type === 'guardrail_trigger') && (parsed.contentBefore != null || parsed.contentAfter != null || parsed.diff != null);
   const isGuardrail = event.type === 'guardrail_trigger' || event.type === 'guardrail_block';
-  const canRevert = event.type === 'file_write' && parsed.contentBefore != null;
+  const canRevert = event.type === 'file_write' && parsed.path != null;
 
   const driftFlag = event.drift_flag;
   const rowBg =

@@ -63,7 +63,7 @@ export const serveCommand = new Command('serve')
       // API routes
       if (url.startsWith('/api/')) {
         if (req.method === 'POST') {
-          handlePostApi(url, req, storage, res, broadcast);
+          handlePostApi(url, req, storage, res, broadcast, cwd);
         } else {
           handleApi(url, storage, res, dbPath, cwd);
         }
@@ -362,7 +362,7 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
  * POST /api/sessions/:id/end — End a session
  *   Body: { status: "completed" | "aborted" }
  */
-function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res: ServerResponse, broadcast: (msg: Record<string, unknown>) => void): void {
+function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res: ServerResponse, broadcast: (msg: Record<string, unknown>) => void, cwd: string): void {
   res.setHeader('Content-Type', 'application/json');
 
   let body = '';
@@ -486,7 +486,7 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         return;
       }
 
-      // POST /api/revert — Revert a file to its previous content
+      // POST /api/revert — Revert a file change
       if (url === '/api/revert') {
         const payload = JSON.parse(body);
         const eventId = payload.event_id;
@@ -514,25 +514,42 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         }
         const data = JSON.parse(String(found.data || '{}'));
         const filePath = data.path;
-        const contentBefore = data.contentBefore;
         if (!filePath) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: 'Event has no file path' }));
           return;
         }
-        if (contentBefore === undefined || contentBefore === null) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: 'No previous content available (file was newly created)' }));
-          return;
+
+        // Strategy 1: For Edit events with contentBefore/contentAfter (old_string/new_string),
+        // do a reverse string replacement in the current file
+        const contentBefore = data.contentBefore;
+        const contentAfter = data.contentAfter;
+        if (contentBefore != null && contentAfter != null && existsSync(filePath)) {
+          try {
+            const current = readFileSync(filePath, 'utf-8');
+            if (current.includes(contentAfter)) {
+              writeFileSync(filePath, current.replace(contentAfter, contentBefore), 'utf-8');
+              res.writeHead(200);
+              res.end(JSON.stringify({ ok: true, path: filePath, method: 'reverse-edit' }));
+              return;
+            }
+          } catch { /* fall through to git */ }
         }
-        try {
-          writeFileSync(filePath, contentBefore, 'utf-8');
-          res.writeHead(200);
-          res.end(JSON.stringify({ ok: true, path: filePath }));
-        } catch (err) {
-          res.writeHead(500);
-          res.end(JSON.stringify({ error: `Failed to revert: ${String(err)}` }));
-        }
+
+        // Strategy 2: Use git checkout to restore the file
+        exec(
+          `git checkout HEAD -- "${filePath}"`,
+          { cwd },
+          (err) => {
+            if (err) {
+              res.writeHead(500);
+              res.end(JSON.stringify({ error: `Failed to revert: ${err.message}` }));
+            } else {
+              res.writeHead(200);
+              res.end(JSON.stringify({ ok: true, path: filePath, method: 'git-checkout' }));
+            }
+          },
+        );
         return;
       }
 
