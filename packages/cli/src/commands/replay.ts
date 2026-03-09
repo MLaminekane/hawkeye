@@ -118,7 +118,27 @@ function printEvent(event: EventRow, index: number, total: number): void {
       break;
     case 'error':
       icon = chalk.red('!');
-      summary = data.description || 'Error';
+      summary = data.message || data.description || 'Error';
+      break;
+    case 'git_commit':
+      icon = chalk.green('●');
+      summary = `git commit ${data.commitHash || ''} ${data.message || ''}`.trim();
+      break;
+    case 'git_checkout':
+      icon = chalk.blue('⎇');
+      summary = `git checkout ${data.branch || ''}`;
+      break;
+    case 'git_push':
+      icon = chalk.cyan('↑');
+      summary = `git push ${data.branch || ''}`;
+      break;
+    case 'git_pull':
+      icon = chalk.cyan('↓');
+      summary = `git pull`;
+      break;
+    case 'git_merge':
+      icon = chalk.magenta('⑂');
+      summary = `git merge ${data.targetBranch || ''}`;
       break;
     case 'guardrail_trigger':
       icon = chalk.red('⛔');
@@ -188,7 +208,7 @@ async function interactiveReplay(events: EventRow[], session: { objective: strin
     for (let i = start; i < end; i++) {
       const isCurrent = i === cursor;
       const event = events[i];
-      const prefix = isCurrent ? chalk.hex('#FF6B2B')('▸ ') : '  ';
+      const prefix = isCurrent ? chalk.hex('#ff5f1f')('▸ ') : '  ';
       const line = formatEventLine(event, i + 1, events.length);
       console.log(prefix + (isCurrent ? chalk.white.bold(line) : chalk.dim(line)));
     }
@@ -292,6 +312,12 @@ async function interactiveReplay(events: EventRow[], session: { objective: strin
           console.log(chalk.bold(`  Diff — ${data.path}`));
           console.log(chalk.dim('─'.repeat(60)));
           printColoredDiff(data.diff);
+          console.log('');
+          console.log(chalk.dim('  Press any key to go back...'));
+        } else if (data.path) {
+          process.stdout.write('\x1B[2J\x1B[H');
+          console.log(chalk.dim(`  No diff data for ${data.path}`));
+          console.log(chalk.dim('  (recorded before diff capture was enabled)'));
           console.log('');
           console.log(chalk.dim('  Press any key to go back...'));
         }

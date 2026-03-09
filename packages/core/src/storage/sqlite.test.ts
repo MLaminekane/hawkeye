@@ -33,6 +33,9 @@ describe('Storage', () => {
         model: 'claude-sonnet-4-20250514',
         workingDir: '/tmp/project',
       },
+      totalCostUsd: 0,
+      totalTokens: 0,
+      totalActions: 0,
       ...overrides,
     };
   }

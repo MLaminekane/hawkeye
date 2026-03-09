@@ -35,12 +35,29 @@ export interface DirectoryScopeRule {
   action: 'warn' | 'block';
 }
 
+export interface NetworkLockRule {
+  name: string;
+  type: 'network_lock';
+  allowedHosts: string[];
+  blockedHosts: string[];
+  action: 'warn' | 'block';
+}
+
+export interface ReviewGateRule {
+  name: string;
+  type: 'review_gate';
+  patterns: string[];
+  action: 'block';
+}
+
 export type GuardrailRuleConfig =
   | FileProtectRule
   | CommandBlockRule
   | CostLimitRule
   | TokenLimitRule
-  | DirectoryScopeRule;
+  | DirectoryScopeRule
+  | NetworkLockRule
+  | ReviewGateRule;
 
 export interface GuardrailViolation {
   ruleName: string;

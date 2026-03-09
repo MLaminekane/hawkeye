@@ -13,6 +13,8 @@ import { hookHandlerCommand } from './commands/hook-handler.js';
 import { otelExportCommand } from './commands/otel-export.js';
 import { endCommand } from './commands/end.js';
 import { restartCommand } from './commands/restart.js';
+import { inspectCommand } from './commands/inspect.js';
+import { compareCommand } from './commands/compare.js';
 import { startInteractive } from './interactive.js';
 
 const program = new Command();
@@ -34,9 +36,11 @@ program.addCommand(hookHandlerCommand);
 program.addCommand(otelExportCommand);
 program.addCommand(endCommand);
 program.addCommand(restartCommand);
+program.addCommand(inspectCommand);
+program.addCommand(compareCommand);
 
 // If no subcommand is given, launch interactive mode
-const knownCommands = program.commands.map((c) => c.name());
+const knownCommands = program.commands.flatMap((c) => [c.name(), ...c.aliases()]);
 const userArgs = process.argv.slice(2);
 const hasSubcommand =
   userArgs.length > 0 &&

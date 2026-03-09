@@ -1,16 +1,20 @@
 import { Command } from 'commander';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, openSync } from 'node:fs';
+import { ReadStream } from 'node:tty';
 import chalk from 'chalk';
-import { createRecorder, type DriftCheckResult, type GuardrailViolation } from '@hawkeye/core';
+import { createRecorder, type DriftCheckResult, type GuardrailViolation, type GuardrailRuleConfig } from '@hawkeye/core';
 import { RecordOverlay } from './record-overlay.js';
+import { loadConfig, getDefaultConfig } from '../config.js';
 
 export const recordCommand = new Command('record')
+  .alias('watch')
   .description('Record an AI agent session')
   .requiredOption('-o, --objective <text>', 'The objective for this session')
   .option('-a, --agent <name>', 'Agent name (auto-detected from command)', 'unknown')
   .option('-m, --model <name>', 'Model name')
+  .option('-s, --session <id>', 'Attach to an existing session instead of creating a new one')
   .option('--no-drift', 'Disable drift detection')
   .option('--no-guardrails', 'Disable guardrails')
   .argument('[command...]', 'The command to run (after --)')
@@ -27,9 +31,13 @@ export const recordCommand = new Command('record')
     const hawkDir = join(cwd, '.hawkeye');
     const dbPath = join(hawkDir, 'traces.db');
 
-    // Auto-create .hawkeye if it doesn't exist
+    // Auto-create .hawkeye + config + DB if they don't exist (zero-config)
     if (!existsSync(hawkDir)) {
       mkdirSync(hawkDir, { recursive: true });
+    }
+    const cfgPath = join(hawkDir, 'config.json');
+    if (!existsSync(cfgPath)) {
+      writeFileSync(cfgPath, JSON.stringify(getDefaultConfig(), null, 2), 'utf-8');
     }
 
     // Detect agent from command
@@ -48,47 +56,75 @@ export const recordCommand = new Command('record')
       console.log('');
     }
 
+    const config = loadConfig(cwd);
+
+    // Inject saved API keys into current process env (for drift engine)
+    // and they will also be inherited by the child process via ...process.env
+    const keyMap: Record<string, string> = {
+      anthropic: 'ANTHROPIC_API_KEY',
+      openai: 'OPENAI_API_KEY',
+      deepseek: 'DEEPSEEK_API_KEY',
+      mistral: 'MISTRAL_API_KEY',
+      google: 'GOOGLE_API_KEY',
+    };
+    if (config.apiKeys) {
+      for (const [provider, envVar] of Object.entries(keyMap)) {
+        const key = config.apiKeys[provider as keyof typeof config.apiKeys];
+        if (key && !process.env[envVar]) {
+          process.env[envVar] = key;
+        }
+      }
+    }
+
+    // Auto-detect drift provider from model (e.g. "deepseek/deepseek-chat" → deepseek)
+    let driftProvider = config.drift.provider as 'ollama' | 'anthropic' | 'openai' | 'deepseek' | 'mistral' | 'google';
+    let driftModel = config.drift.model;
+    if (options.model && options.model.includes('/')) {
+      const detectedProvider = options.model.split('/')[0].toLowerCase();
+      const validProviders = ['ollama', 'anthropic', 'openai', 'deepseek', 'mistral', 'google'];
+      if (validProviders.includes(detectedProvider)) {
+        driftProvider = detectedProvider as typeof driftProvider;
+        // Use a sensible default drift model for the detected provider
+        const driftModelMap: Record<string, string> = {
+          deepseek: 'deepseek-chat',
+          openai: 'gpt-4o',
+          anthropic: 'claude-sonnet-4-6',
+          mistral: 'mistral-large-latest',
+          google: 'gemini-2.0-flash',
+          ollama: 'llama3.2',
+        };
+        driftModel = driftModelMap[detectedProvider] || driftModel;
+      }
+    }
+
     const recorder = createRecorder({
       objective: options.objective,
       agent,
       model: options.model,
       workingDir: cwd,
       dbPath,
+      sessionId: options.session,
+      ignoredPaths: config.recording?.ignorePatterns,
+      maxStdoutBytes: config.recording?.maxStdoutBytes,
+      capturePrompts: config.recording?.captureLlmContent,
       drift: options.drift !== false
         ? {
-            enabled: true,
-            checkEvery: 5,
-            provider: 'ollama',
-            model: 'llama3.2',
-            thresholds: { warning: 60, critical: 30 },
-            contextWindow: 10,
-            autoPause: false,
+            enabled: config.drift.enabled,
+            checkEvery: config.drift.checkEvery,
+            provider: driftProvider,
+            model: driftModel,
+            thresholds: { warning: config.drift.warningThreshold, critical: config.drift.criticalThreshold },
+            contextWindow: config.drift.contextWindow,
+            autoPause: config.drift.autoPause ?? false,
+            ollamaUrl: config.drift.ollamaUrl,
           }
-        : { enabled: false, checkEvery: 5, provider: 'ollama', model: '', thresholds: { warning: 60, critical: 30 }, contextWindow: 10, autoPause: false },
+        : { enabled: false, checkEvery: 5, provider: 'ollama' as const, model: '', thresholds: { warning: 60, critical: 30 }, contextWindow: 10, autoPause: false },
       guardrails: options.guardrails !== false
         ? {
             enabled: true,
-            rules: [
-              {
-                name: 'protected_files',
-                type: 'file_protect',
-                paths: ['.env', '.env.*', '*.pem', '*.key'],
-                action: 'block',
-              },
-              {
-                name: 'dangerous_commands',
-                type: 'command_block',
-                patterns: ['rm -rf /', 'rm -rf ~', 'sudo rm', 'DROP TABLE'],
-                action: 'block',
-              },
-              {
-                name: 'cost_limit',
-                type: 'cost_limit',
-                maxUsdPerSession: 5.0,
-                maxUsdPerHour: 2.0,
-                action: 'block',
-              },
-            ],
+            rules: config.guardrails
+              .filter((r) => r.enabled)
+              .map((r) => ({ name: r.name, type: r.type, action: r.action, ...r.config }) as GuardrailRuleConfig),
           }
         : { enabled: false, rules: [] },
     });
@@ -102,26 +138,96 @@ export const recordCommand = new Command('record')
 
     let eventCount = 0;
     let totalCostUsd = 0;
+    let childProcess: ChildProcess | null = null;
+    let promptingDrift = false;
+    let cleaned = false;
 
-    // Wire up drift alerts to overlay + CLI output
+    const cleanup = (status: 'completed' | 'aborted') => {
+      if (cleaned) return;
+      cleaned = true;
+      overlay.stop();
+      recorder.stop(status);
+      console.log('');
+      console.log(
+        chalk.green(`● Session ${status}: ${chalk.bold(recorder.sessionId)}`),
+      );
+      console.log(
+        chalk.dim(`  View: hawkeye stats ${recorder.sessionId}`),
+      );
+    };
+
+    // Read a single keypress from /dev/tty (works even when stdin is inherited by child)
+    function promptDriftAction(): Promise<'continue' | 'pause' | 'abort'> {
+      return new Promise((resolve) => {
+        try {
+          const fd = openSync('/dev/tty', 'r');
+          const ttyIn = new ReadStream(fd);
+          ttyIn.setRawMode(true);
+          ttyIn.resume();
+          ttyIn.once('data', (data: Buffer) => {
+            const key = data.toString().toLowerCase();
+            ttyIn.setRawMode(false);
+            ttyIn.destroy();
+            if (key === 'a') resolve('abort');
+            else if (key === 'p') resolve('pause');
+            else resolve('continue');
+          });
+        } catch {
+          // /dev/tty not available (CI, piped mode) — auto-continue
+          resolve('continue');
+        }
+      });
+    }
+
+    // Wire up drift alerts with interactive prompt for critical
     recorder.onDriftAlert((result: DriftCheckResult) => {
       overlay.update({ driftScore: result.score, driftFlag: result.flag });
-      if (result.flag === 'critical') {
-        overlay.update({ paused: true });
-      }
-      overlay.stop();
-      console.error('');
-      if (result.flag === 'critical') {
-        console.error(chalk.red(`  ⚠ DRIFT CRITICAL — Score: ${result.score}/100`));
-      } else {
+
+      if (result.flag === 'critical' && !promptingDrift) {
+        promptingDrift = true;
+        recorder.pause();
+        overlay.stop();
+
+        console.error('');
+        console.error(chalk.red('  ┌─ DRIFT CRITICAL ──────────────────────────────────────────┐'));
+        console.error(chalk.red(`  │  Score: ${result.score}/100`));
+        console.error(chalk.dim(`  │  ${result.reason}`));
+        if (result.suggestion) {
+          console.error(chalk.dim(`  │  Suggestion: ${result.suggestion}`));
+        }
+        console.error('  │');
+        console.error(`  │  ${chalk.green('[C]')}ontinue   ${chalk.yellow('[P]')}ause   ${chalk.red('[A]')}bort`);
+        console.error(chalk.red('  └────────────────────────────────────────────────────────────┘'));
+
+        promptDriftAction().then((action) => {
+          promptingDrift = false;
+          if (action === 'abort') {
+            console.error(chalk.red('  Aborting session...'));
+            if (childProcess) childProcess.kill('SIGTERM');
+            cleanup('aborted');
+            process.exit(1);
+          } else if (action === 'pause') {
+            console.error(chalk.yellow('  Session paused. Recording suspended.'));
+            overlay.update({ paused: true });
+            overlay.start();
+          } else {
+            recorder.resume();
+            console.error(chalk.green('  Continuing...'));
+            overlay.update({ paused: false });
+            overlay.start();
+          }
+        });
+      } else if (result.flag === 'warning') {
+        overlay.stop();
+        console.error('');
         console.error(chalk.yellow(`  ⚠ DRIFT WARNING — Score: ${result.score}/100`));
+        console.error(chalk.dim(`    ${result.reason}`));
+        if (result.suggestion) {
+          console.error(chalk.dim(`    Suggestion: ${result.suggestion}`));
+        }
+        console.error('');
+        overlay.start();
       }
-      console.error(chalk.dim(`    ${result.reason}`));
-      if (result.suggestion) {
-        console.error(chalk.dim(`    Suggestion: ${result.suggestion}`));
-      }
-      console.error('');
-      overlay.start();
     });
 
     // Wire up guardrail violations
@@ -142,7 +248,8 @@ export const recordCommand = new Command('record')
     recorder.onEvent((event) => {
       eventCount++;
       if (event.costUsd) totalCostUsd += event.costUsd;
-      overlay.update({ eventCount, costUsd: totalCostUsd, lastEventType: event.type });
+      const summary = getEventSummary(event);
+      overlay.update({ eventCount, costUsd: totalCostUsd, lastEventType: event.type, lastEventSummary: summary });
     });
 
     recorder.start();
@@ -166,7 +273,7 @@ export const recordCommand = new Command('record')
     // Spawn the wrapped command with IPC channel + network preload
     const [cmd, ...args] = commandArgs;
     const existingNodeOpts = process.env.NODE_OPTIONS || '';
-    const child = spawn(cmd, args, {
+    childProcess = spawn(cmd, args, {
       cwd,
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       env: {
@@ -176,7 +283,7 @@ export const recordCommand = new Command('record')
     });
 
     // Listen for LLM events from child process via IPC
-    child.on('message', (msg: unknown) => {
+    childProcess.on('message', (msg: unknown) => {
       const m = msg as { type?: string; event?: Record<string, unknown> };
       if (m?.type === 'hawkeye:llm' && m.event) {
         recorder.recordLlmEvent(m.event as unknown as import('@hawkeye/core').LlmEvent);
@@ -184,37 +291,40 @@ export const recordCommand = new Command('record')
     });
 
     // Ignore IPC disconnect errors (child may not be Node.js)
-    child.on('error', () => {});
+    childProcess.on('error', () => {});
 
-    const cleanup = (status: 'completed' | 'aborted') => {
-      overlay.stop();
-      recorder.stop(status);
-      console.log('');
-      console.log(
-        chalk.green(`● Session ${status}: ${chalk.bold(recorder.sessionId)}`),
-      );
-      console.log(
-        chalk.dim(`  View: hawkeye stats ${recorder.sessionId}`),
-      );
-    };
-
-    child.on('close', (code) => {
+    childProcess.on('close', (code) => {
       cleanup(code === 0 ? 'completed' : 'aborted');
       process.exit(code ?? 1);
     });
 
     process.on('SIGINT', () => {
       cleanup('aborted');
-      child.kill('SIGINT');
+      try { childProcess?.kill('SIGINT'); } catch {}
       process.exit(130);
     });
 
     process.on('SIGTERM', () => {
       cleanup('aborted');
-      child.kill('SIGTERM');
+      try { childProcess?.kill('SIGTERM'); } catch {}
       process.exit(143);
     });
   });
+
+function getEventSummary(event: import('@hawkeye/core').TraceEvent): string {
+  const d = event.data as unknown as Record<string, unknown>;
+  switch (event.type) {
+    case 'command': return `${d.command || ''} ${((d.args as string[]) || []).join(' ')}`.trim();
+    case 'file_write': return `Modified ${d.path || ''}`;
+    case 'file_delete': return `Deleted ${d.path || ''}`;
+    case 'file_read': return `Read ${d.path || ''}`;
+    case 'llm_call': return `${d.provider}/${d.model} (${d.totalTokens || 0} tokens)`;
+    case 'api_call': return `${d.method || 'GET'} ${d.url || ''}`;
+    case 'guardrail_trigger': return String(d.description || d.ruleName || '');
+    case 'error': return String(d.message || d.error || 'Error');
+    default: return event.type;
+  }
+}
 
 function detectAgent(command: string): string {
   const lower = command.toLowerCase();

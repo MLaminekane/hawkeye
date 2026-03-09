@@ -24,6 +24,7 @@ import {
 } from './guardrails/enforcer.js';
 import type { GuardrailRuleConfig, GuardrailViolation } from './guardrails/rules.js';
 import { Logger } from './logger.js';
+import type { SessionRow, EventRow } from './storage/sqlite.js';
 import type {
   AgentSession,
   TraceEvent,
@@ -44,9 +45,11 @@ export interface RecorderOptions {
   model?: string;
   workingDir: string;
   dbPath: string;
+  sessionId?: string;
   ignoredPaths?: string[];
   captureNetwork?: boolean;
   capturePrompts?: boolean;
+  maxStdoutBytes?: number;
   drift?: DriftConfig;
   guardrails?: {
     enabled: boolean;
@@ -70,6 +73,9 @@ export interface Recorder {
   onEvent(handler: EventHandler): () => void;
   onDriftAlert(handler: DriftAlertHandler): void;
   onGuardrailViolation(handler: GuardrailViolationHandler): void;
+  getSession(id: string): Result<SessionRow | null>;
+  getEvents(sessionId: string, options?: { type?: EventType; limit?: number }): Result<EventRow[]>;
+  getSessions(options?: { limit?: number; status?: string }): Result<SessionRow[]>;
 }
 
 function getGitInfo(cwd: string): { branch?: string; commit?: string } {
@@ -98,11 +104,13 @@ const DEFAULT_DRIFT_CONFIG: DriftConfig = {
   thresholds: { warning: 60, critical: 30 },
   contextWindow: 10,
   autoPause: false,
+  ollamaUrl: 'http://localhost:11434',
 };
 
 export function createRecorder(options: RecorderOptions): Recorder {
   const storage = new Storage(options.dbPath);
-  const sessionId = uuid();
+  const resuming = !!options.sessionId;
+  const sessionId = options.sessionId || uuid();
   const gitInfo = getGitInfo(options.workingDir);
 
   const session: AgentSession = {
@@ -117,6 +125,9 @@ export function createRecorder(options: RecorderOptions): Recorder {
       gitBranch: gitInfo.branch,
       gitCommitBefore: gitInfo.commit,
     },
+    totalCostUsd: 0,
+    totalTokens: 0,
+    totalActions: 0,
   };
 
   const recentEvents: TraceEvent[] = [];
@@ -156,6 +167,17 @@ export function createRecorder(options: RecorderOptions): Recorder {
       costUsd,
     };
 
+    // Update session aggregates
+    session.totalActions++;
+    if (costUsd) {
+      totalCostUsd += costUsd;
+      session.totalCostUsd = totalCostUsd;
+    }
+    if (type === 'llm_call' && 'totalTokens' in data) {
+      totalTokens += (data as LlmEvent).totalTokens;
+      session.totalTokens = totalTokens;
+    }
+
     // Guardrails check (synchronous, before persisting)
     if (guardrailEnforcer) {
       const violations = guardrailEnforcer.evaluate(event);
@@ -170,11 +192,19 @@ export function createRecorder(options: RecorderOptions): Recorder {
         if (v.actionTaken === 'blocked') {
           logger.warn(`Event blocked by guardrail: ${v.description}`);
           event.type = 'guardrail_trigger';
+          // Enrich data with violation details for dashboard display
+          event.data = {
+            ...(event.data as unknown as Record<string, unknown>),
+            ruleName: v.ruleName,
+            severity: v.severity,
+            description: v.description,
+            blockedAction: type,
+            originalType: type,
+          } as typeof event.data;
         }
       }
 
       // Cost limit check
-      totalCostUsd += costUsd;
       const costViolation = guardrailEnforcer.checkCostLimit(totalCostUsd, session.startedAt);
       if (costViolation) {
         storage.insertGuardrailViolation(sessionId, event.id, costViolation);
@@ -185,7 +215,6 @@ export function createRecorder(options: RecorderOptions): Recorder {
 
       // Token limit check
       if (type === 'llm_call' && 'totalTokens' in data) {
-        totalTokens += (data as LlmEvent).totalTokens;
         const tokenViolation = guardrailEnforcer.checkTokenLimit(totalTokens);
         if (tokenViolation) {
           storage.insertGuardrailViolation(sessionId, event.id, tokenViolation);
@@ -270,10 +299,16 @@ export function createRecorder(options: RecorderOptions): Recorder {
       logger.info(`Starting session ${sessionId}`);
       logger.info(`Objective: ${options.objective}`);
 
-      const createResult = storage.createSession(session);
-      if (!createResult.ok) {
-        logger.error(`Failed to create session: ${createResult.error.message}`);
-        return;
+      if (resuming) {
+        // Resume existing session — set status back to recording
+        storage.updateSessionStatus(sessionId, 'recording');
+        logger.info(`Resuming existing session ${sessionId}`);
+      } else {
+        const createResult = storage.createSession(session);
+        if (!createResult.ok) {
+          logger.error(`Failed to create session: ${createResult.error.message}`);
+          return;
+        }
       }
 
       // Initialize DriftDetect
@@ -326,7 +361,7 @@ export function createRecorder(options: RecorderOptions): Recorder {
       // Terminal interceptor
       terminalInterceptor = createTerminalInterceptor((cmdEvent: CommandEvent) => {
         recordEvent('command', cmdEvent);
-      });
+      }, { maxStdoutBytes: options.maxStdoutBytes });
 
       // Network interceptor (captures LLM calls and API calls)
       if (options.captureNetwork !== false) {
@@ -356,6 +391,7 @@ export function createRecorder(options: RecorderOptions): Recorder {
       // Save final drift score
       if (driftEngine) {
         const finalScore = driftEngine.getSlidingScore();
+        session.finalDriftScore = finalScore;
         storage.updateFinalDriftScore(sessionId, finalScore);
         logger.info(`Final drift score: ${finalScore}`);
       }
@@ -377,6 +413,18 @@ export function createRecorder(options: RecorderOptions): Recorder {
         throw new Error('Recorder not started. Call start() first.');
       }
       return terminalInterceptor;
+    },
+
+    getSession(id: string): Result<SessionRow | null> {
+      return storage.getSession(id);
+    },
+
+    getEvents(sid: string, opts?: { type?: EventType; limit?: number }): Result<EventRow[]> {
+      return storage.getEvents(sid, opts);
+    },
+
+    getSessions(opts?: { limit?: number; status?: string }): Result<SessionRow[]> {
+      return storage.listSessions(opts);
     },
   };
 }

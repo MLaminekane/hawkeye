@@ -5,6 +5,10 @@ export interface AgentSession {
   endedAt?: Date;
   status: 'recording' | 'paused' | 'completed' | 'aborted';
   metadata: SessionMetadata;
+  totalCostUsd: number;
+  totalTokens: number;
+  totalActions: number;
+  finalDriftScore?: number;
 }
 
 export interface SessionMetadata {
@@ -28,6 +32,11 @@ export type EventType =
   | 'llm_call'
   | 'decision'
   | 'error'
+  | 'git_commit'
+  | 'git_checkout'
+  | 'git_push'
+  | 'git_pull'
+  | 'git_merge'
   | 'guardrail_trigger'
   | 'guardrail_block'
   | 'drift_alert';
@@ -40,7 +49,7 @@ export interface TraceEvent {
   timestamp: Date;
   sequence: number;
   type: EventType;
-  data: CommandEvent | FileEvent | ApiEvent | LlmEvent | DecisionEvent | GuardrailEventData | DriftAlertEventData;
+  data: CommandEvent | FileEvent | ApiEvent | LlmEvent | DecisionEvent | GitEvent | ErrorEvent | GuardrailEventData | DriftAlertEventData;
   driftScore?: number;
   driftFlag?: DriftFlag;
   costUsd?: number;
@@ -97,6 +106,25 @@ export interface DecisionEvent {
   alternatives?: string[];
 }
 
+export interface GitEvent {
+  operation: 'commit' | 'checkout' | 'push' | 'pull' | 'merge';
+  branch?: string;
+  targetBranch?: string;
+  message?: string;
+  commitHash?: string;
+  filesChanged?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+}
+
+export interface ErrorEvent {
+  message: string;
+  code?: string | number;
+  stderr?: string;
+  source: 'command' | 'agent' | 'system';
+  relatedEventId?: string;
+}
+
 export interface GuardrailEventData {
   ruleName: string;
   severity: 'warn' | 'block';
@@ -118,7 +146,7 @@ export type Result<T, E = Error> =
 
 export interface GuardrailRule {
   name: string;
-  type: 'file_protect' | 'command_block' | 'cost_limit' | 'token_limit' | 'directory_scope';
+  type: 'file_protect' | 'command_block' | 'cost_limit' | 'token_limit' | 'directory_scope' | 'network_lock' | 'review_gate';
   action: 'warn' | 'block';
 }
 
@@ -133,6 +161,7 @@ export interface DriftConfig {
   };
   contextWindow: number;
   autoPause: boolean;
+  ollamaUrl?: string;
 }
 
 export interface AppConfig {

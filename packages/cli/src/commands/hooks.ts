@@ -138,7 +138,7 @@ const installCommand = new Command('install')
       console.log(`  ${chalk.green('●')} ${chalk.bold('Stop')}         — Closes session with drift score`);
     }
     console.log('');
-    console.log(chalk.dim('  Captures: commands, file ops, LLM costs, drift detection'));
+    console.log(chalk.dim('  Captures: commands, file ops, git operations, errors, LLM costs, drift detection'));
     console.log(chalk.dim('  Guards:   .env, *.pem, *.key | rm -rf, sudo rm, DROP TABLE'));
     console.log('');
     console.log(chalk.dim('  Sessions auto-created per Claude Code session.'));

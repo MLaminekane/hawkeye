@@ -87,6 +87,7 @@ export const statsCommand = new Command('stats')
     console.log(chalk.dim('─'.repeat(50)));
     console.log(`  Duration:  ${durationStr}`);
     console.log(`  Actions:   ${s.total_actions}`);
+    console.log(`  Tokens:    ${s.total_tokens.toLocaleString()}`);
     console.log(`  Cost:      $${s.total_cost_usd.toFixed(4)}`);
 
     if (s.final_drift_score != null) {
@@ -119,6 +120,31 @@ export const statsCommand = new Command('stats')
       console.log(chalk.dim('─'.repeat(50)));
       for (const [type, count] of Object.entries(typeCounts).sort((a, b) => b[1] - a[1])) {
         console.log(`  ${type.padEnd(20)} ${count}`);
+      }
+    }
+
+    // Files changed summary with cost per file
+    const fileEvents = events.filter((e) => e.type === 'file_write' || e.type === 'file_delete' || e.type === 'file_rename');
+    if (fileEvents.length > 0) {
+      const fileMap: Record<string, { cost: number; edits: number; deleted: boolean }> = {};
+      for (const e of fileEvents) {
+        const data = JSON.parse(e.data);
+        if (!data.path) continue;
+        if (!fileMap[data.path]) fileMap[data.path] = { cost: 0, edits: 0, deleted: false };
+        fileMap[data.path].cost += e.cost_usd || 0;
+        fileMap[data.path].edits++;
+        if (e.type === 'file_delete') fileMap[data.path].deleted = true;
+      }
+
+      const sorted = Object.entries(fileMap).sort((a, b) => b[1].cost - a[1].cost);
+      console.log('');
+      console.log(chalk.bold(`Files Changed (${sorted.length})`));
+      console.log(chalk.dim('─'.repeat(50)));
+      for (const [p, info] of sorted) {
+        const icon = info.deleted ? chalk.red('−') : chalk.green('+');
+        const cost = info.cost > 0 ? chalk.yellow(` $${info.cost.toFixed(4)}`) : '';
+        const edits = info.edits > 1 ? chalk.dim(` (${info.edits} edits)`) : '';
+        console.log(`  ${icon} ${p}${cost}${edits}`);
       }
     }
 

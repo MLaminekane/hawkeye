@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   LineChart,
@@ -22,6 +22,11 @@ const EVENT_TYPE_CONFIG: Record<string, { label: string; bg: string; text: strin
   llm_call:          { label: 'LLM',   bg: 'bg-purple-500/15', text: 'text-purple-400' },
   api_call:          { label: 'API',   bg: 'bg-cyan-500/15',   text: 'text-cyan-400' },
   decision:          { label: 'DEC',   bg: 'bg-indigo-500/15', text: 'text-indigo-400' },
+  git_commit:        { label: 'GIT',   bg: 'bg-hawk-green/15', text: 'text-hawk-green' },
+  git_checkout:      { label: 'GIT',   bg: 'bg-blue-500/15',   text: 'text-blue-400' },
+  git_push:          { label: 'GIT',   bg: 'bg-cyan-500/15',   text: 'text-cyan-400' },
+  git_pull:          { label: 'GIT',   bg: 'bg-cyan-500/15',   text: 'text-cyan-400' },
+  git_merge:         { label: 'GIT',   bg: 'bg-purple-500/15', text: 'text-purple-400' },
   guardrail_trigger: { label: 'GUARD', bg: 'bg-hawk-red/15',   text: 'text-hawk-red' },
   guardrail_block:   { label: 'BLOCK', bg: 'bg-hawk-red/15',   text: 'text-hawk-red' },
   drift_alert:       { label: 'DRIFT', bg: 'bg-hawk-amber/15', text: 'text-hawk-amber' },
@@ -39,6 +44,11 @@ export function SessionDetailPage() {
   const [expandedEvent, setExpandedEvent] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
+  const [replayMode, setReplayMode] = useState(false);
+  const [replayIndex, setReplayIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const playTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -73,9 +83,52 @@ export function SessionDetailPage() {
     return () => { unsub(); };
   }, [id]);
 
+  // Replay: auto-advance when playing
+  useEffect(() => {
+    if (!isPlaying || !replayMode) return;
+    if (replayIndex >= events.length) {
+      setIsPlaying(false);
+      return;
+    }
+
+    // Compute delay from actual event timestamps for realistic pacing
+    let delayMs = 500;
+    if (replayIndex + 1 < events.length) {
+      const curr = new Date(events[replayIndex].timestamp).getTime();
+      const next = new Date(events[replayIndex + 1].timestamp).getTime();
+      delayMs = Math.min(Math.max((next - curr) / playbackSpeed, 100), 2000);
+    }
+
+    playTimerRef.current = setTimeout(() => {
+      setReplayIndex((i) => Math.min(i + 1, events.length));
+    }, delayMs);
+
+    return () => {
+      if (playTimerRef.current) clearTimeout(playTimerRef.current);
+    };
+  }, [isPlaying, replayIndex, replayMode, events, playbackSpeed]);
+
+  const toggleReplay = useCallback(() => {
+    if (replayMode) {
+      setReplayMode(false);
+      setIsPlaying(false);
+      setReplayIndex(0);
+    } else {
+      setReplayMode(true);
+      setReplayIndex(0);
+      setIsPlaying(false);
+    }
+  }, [replayMode]);
+
+  // Events visible in replay mode (up to replayIndex)
+  const visibleEvents = useMemo(() => {
+    if (!replayMode) return events;
+    return events.slice(0, replayIndex);
+  }, [events, replayMode, replayIndex]);
+
   // Filtered events
   const filteredEvents = useMemo(() => {
-    let result = events;
+    let result = visibleEvents;
     if (typeFilter) {
       result = result.filter((e) => e.type === typeFilter);
     }
@@ -87,7 +140,7 @@ export function SessionDetailPage() {
       });
     }
     return result;
-  }, [events, typeFilter, search]);
+  }, [visibleEvents, typeFilter, search]);
 
   if (loading) return <div className="text-hawk-text3 font-mono text-sm p-8">Loading...</div>;
   if (!session) return <div className="text-hawk-red font-mono text-sm p-8">Session not found</div>;
@@ -95,12 +148,12 @@ export function SessionDetailPage() {
   const duration = getDuration(session.started_at, session.ended_at);
   const isRecording = session.status === 'recording';
 
-  // Compute event type counts
+  // Compute event type counts (from visible events in replay mode)
   const typeCounts: Record<string, number> = {};
-  events.forEach((e) => { typeCounts[e.type] = (typeCounts[e.type] || 0) + 1; });
+  visibleEvents.forEach((e) => { typeCounts[e.type] = (typeCounts[e.type] || 0) + 1; });
 
-  // Compute total cost from events
-  const totalCost = events.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
+  // Compute total cost from visible events
+  const totalCost = visibleEvents.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
 
   // Find critical drift alerts
   const criticalDrifts = driftSnapshots.filter((d) => d.flag === 'critical');
@@ -201,6 +254,84 @@ export function SessionDetailPage() {
         </div>
       </div>
 
+      {/* ─── Replay Controls ─── */}
+      {events.length > 1 && !isRecording && (
+        <div className="mb-6 rounded-lg border border-hawk-border bg-hawk-surface overflow-hidden">
+          <div className="flex items-center gap-3 px-5 py-3">
+            {/* Toggle replay mode */}
+            <button
+              onClick={toggleReplay}
+              className={`rounded-lg px-3 py-1.5 font-mono text-xs font-semibold transition-all ${
+                replayMode
+                  ? 'bg-hawk-orange/20 text-hawk-orange border border-hawk-orange/30'
+                  : 'bg-hawk-surface2 text-hawk-text3 hover:text-hawk-text border border-hawk-border'
+              }`}
+            >
+              {replayMode ? 'Exit Replay' : 'Replay Session'}
+            </button>
+
+            {replayMode && (
+              <>
+                {/* Play/Pause */}
+                <button
+                  onClick={() => {
+                    if (replayIndex >= events.length) setReplayIndex(0);
+                    setIsPlaying(!isPlaying);
+                  }}
+                  className="rounded-lg bg-hawk-surface2 px-3 py-1.5 font-mono text-xs text-hawk-text hover:bg-hawk-surface3 transition-colors border border-hawk-border"
+                >
+                  {isPlaying ? '⏸ Pause' : '▶ Play'}
+                </button>
+
+                {/* Speed control */}
+                <div className="flex items-center gap-1 font-mono text-[10px] text-hawk-text3">
+                  {[1, 2, 5, 10].map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setPlaybackSpeed(s)}
+                      className={`rounded px-1.5 py-0.5 transition-colors ${
+                        playbackSpeed === s ? 'bg-hawk-orange/20 text-hawk-orange' : 'hover:bg-hawk-surface3'
+                      }`}
+                    >
+                      {s}x
+                    </button>
+                  ))}
+                </div>
+
+                {/* Timeline slider */}
+                <div className="flex-1 flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={events.length}
+                    value={replayIndex}
+                    onChange={(e) => {
+                      setReplayIndex(parseInt(e.target.value));
+                      setIsPlaying(false);
+                    }}
+                    className="flex-1 h-1.5 rounded-full appearance-none bg-hawk-surface3 cursor-pointer accent-hawk-orange
+                      [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-hawk-orange [&::-webkit-slider-thumb]:shadow-sm [&::-webkit-slider-thumb]:cursor-pointer
+                      [&::-moz-range-thumb]:h-3.5 [&::-moz-range-thumb]:w-3.5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-hawk-orange [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer"
+                  />
+                </div>
+
+                {/* Position indicator */}
+                <span className="font-mono text-xs text-hawk-text3 shrink-0 w-20 text-right">
+                  {replayIndex} / {events.length}
+                </span>
+
+                {/* Current time */}
+                {replayIndex > 0 && replayIndex <= events.length && (
+                  <span className="font-mono text-[10px] text-hawk-text3 shrink-0">
+                    {new Date(events[Math.min(replayIndex - 1, events.length - 1)].timestamp).toLocaleTimeString()}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ─── Drift Alert Banner ─── */}
       {criticalDrifts.length > 0 && (
         <div className="mb-6 rounded-lg border border-hawk-red/30 bg-hawk-red/5 p-4">
@@ -226,25 +357,25 @@ export function SessionDetailPage() {
               <XAxis dataKey="idx" tick={{ fontSize: 10, fill: '#5A5A6E' }} />
               <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#5A5A6E' }} />
               <Tooltip
-                contentStyle={{ background: '#16161D', border: '1px solid #2A2A3A', borderRadius: 8, fontSize: 12, fontFamily: 'monospace' }}
+                contentStyle={{ background: '#111117', border: '1px solid #242430', borderRadius: 8, fontSize: 12, fontFamily: 'monospace' }}
                 formatter={(value: number) => [`${value}/100`, 'Score']}
               />
-              <ReferenceArea y1={0} y2={40} fill="#FF4757" fillOpacity={0.06} />
-              <ReferenceArea y1={40} y2={70} fill="#FFB443" fillOpacity={0.06} />
-              <ReferenceArea y1={70} y2={100} fill="#2ECC71" fillOpacity={0.06} />
-              <Line type="monotone" dataKey="score" stroke="#FF6B2B" strokeWidth={2} dot={{ fill: '#FF6B2B', r: 3 }} activeDot={{ r: 5 }} />
+              <ReferenceArea y1={0} y2={40} fill="#ef4444" fillOpacity={0.06} />
+              <ReferenceArea y1={40} y2={70} fill="#f0a830" fillOpacity={0.06} />
+              <ReferenceArea y1={70} y2={100} fill="#22c55e" fillOpacity={0.06} />
+              <Line type="monotone" dataKey="score" stroke="#ff5f1f" strokeWidth={2} dot={{ fill: '#ff5f1f', r: 3 }} activeDot={{ r: 5 }} />
             </LineChart>
           </ResponsiveContainer>
         </div>
       )}
 
       {/* ─── Cost Breakdown + Files Changed ─── */}
-      {events.length > 0 && (
+      {visibleEvents.length > 0 && (
         <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Cost Breakdown */}
-          <CostBreakdown events={events} />
+          <CostBreakdown events={visibleEvents} />
           {/* Files Changed */}
-          <FilesChanged events={events} onToggle={(id) => setExpandedEvent(expandedEvent === id ? null : id)} expandedEvent={expandedEvent} />
+          <FilesChanged events={visibleEvents} onToggle={(id) => setExpandedEvent(expandedEvent === id ? null : id)} expandedEvent={expandedEvent} />
         </div>
       )}
 
@@ -255,9 +386,11 @@ export function SessionDetailPage() {
           <div className="flex items-center justify-between mb-2">
             <h2 className="font-display text-base font-semibold text-hawk-text">Timeline</h2>
             <span className="font-mono text-[10px] text-hawk-text3">
-              {filteredEvents.length === events.length
-                ? `${events.length} events`
-                : `${filteredEvents.length} / ${events.length} events`}
+              {replayMode
+                ? `${filteredEvents.length} / ${events.length} events (replay)`
+                : filteredEvents.length === events.length
+                  ? `${events.length} events`
+                  : `${filteredEvents.length} / ${events.length} events`}
             </span>
           </div>
 
@@ -357,7 +490,9 @@ function EventRow({ event, expanded, onToggle }: {
   try { parsed = JSON.parse(event.data); } catch {}
 
   const { summary, detail } = getEventInfo(event.type, parsed, event);
-  const hasDiff = event.type === 'file_write' && (parsed.contentBefore != null || parsed.contentAfter != null);
+  const hasDiff = (event.type === 'file_write' || event.type === 'guardrail_trigger') && (parsed.contentBefore != null || parsed.contentAfter != null || parsed.diff != null);
+  const isGuardrail = event.type === 'guardrail_trigger' || event.type === 'guardrail_block';
+  const canRevert = event.type === 'file_write' && parsed.contentBefore != null;
 
   const driftFlag = event.drift_flag;
   const rowBg =
@@ -380,22 +515,29 @@ function EventRow({ event, expanded, onToggle }: {
       {/* Expanded detail */}
       {expanded && (
         <div className="px-4 pb-3 ml-[5.5rem]">
+          {/* Guardrail details */}
+          {isGuardrail && (
+            <GuardrailDetail parsed={parsed} />
+          )}
           {/* File diff viewer */}
           {hasDiff ? (
-            <FileDiff
+            <FileDiffSideBySide
               before={parsed.contentBefore as string | undefined}
               after={parsed.contentAfter as string | undefined}
+              diffText={parsed.diff as string | undefined}
               path={String(parsed.path || '')}
+              eventId={event.id}
+              canRevert={canRevert}
             />
           ) : detail ? (
             <div className="rounded bg-hawk-surface3/50 border border-hawk-border/50 px-3 py-2 font-mono text-xs text-hawk-text2 whitespace-pre-wrap break-all max-h-80 overflow-auto">
               {detail}
             </div>
-          ) : (
+          ) : !isGuardrail ? (
             <div className="rounded bg-hawk-surface3/50 border border-hawk-border/50 px-3 py-2 font-mono text-xs text-hawk-text3">
               No additional details
             </div>
-          )}
+          ) : null}
         </div>
       )}
     </div>
@@ -426,7 +568,7 @@ function CostBreakdown({ events }: { events: EventData[] }) {
   });
 
   const totalCost = Object.values(byModel).reduce((s, v) => s + v.cost, 0);
-  const colors = ['#A78BFA', '#FF6B2B', '#2ECC71', '#3B82F6', '#FFB443', '#06B6D4'];
+  const colors = ['#a78bfa', '#ff5f1f', '#22c55e', '#3B82F6', '#f0a830', '#06b6d4'];
 
   return (
     <div className="rounded-lg border border-hawk-border bg-hawk-surface p-5">
@@ -513,55 +655,249 @@ function FilesChanged({ events, onToggle, expandedEvent }: { events: EventData[]
   );
 }
 
-// ─── Visual Diff Viewer ───
-function FileDiff({ before, after, path }: { before?: string; after?: string; path: string }) {
+// ─── Guardrail Details ───
+function GuardrailDetail({ parsed }: { parsed: Record<string, unknown> }) {
+  const ruleName = String(parsed.ruleName || 'unknown');
+  const severity = String(parsed.severity || parsed.actionTaken || 'block');
+  const description = String(parsed.description || 'Guardrail triggered');
+  const blockedAction = String(parsed.blockedAction || parsed.originalType || '');
+  const filePath = parsed.path ? String(parsed.path) : null;
+
+  return (
+    <div className="rounded border border-hawk-red/30 bg-hawk-red/5 p-3 mb-2">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-hawk-red font-bold text-sm">⛔</span>
+        <span className="font-mono text-xs font-bold text-hawk-red uppercase">{severity === 'block' ? 'BLOCKED' : 'WARNING'}</span>
+        <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-hawk-red/10 text-hawk-red">{ruleName}</span>
+      </div>
+      <p className="font-mono text-xs text-hawk-text2 mb-1">{description}</p>
+      {blockedAction && (
+        <div className="flex items-center gap-2 mt-2">
+          <span className="font-mono text-[10px] text-hawk-text3">Original action:</span>
+          <span className="font-mono text-[10px] text-hawk-amber">{blockedAction}</span>
+        </div>
+      )}
+      {filePath && (
+        <div className="flex items-center gap-2 mt-1">
+          <span className="font-mono text-[10px] text-hawk-text3">File:</span>
+          <span className="font-mono text-[10px] text-hawk-text2">{shortenPath(filePath)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Side-by-Side Diff Viewer ───
+function FileDiffSideBySide({ before, after, diffText, path, eventId, canRevert }: { before?: string; after?: string; diffText?: string; path: string; eventId: string; canRevert: boolean }) {
+  const [viewMode, setViewMode] = useState<'unified' | 'split'>('unified');
+  const [revertStatus, setRevertStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [revertMsg, setRevertMsg] = useState('');
+
+  // If we have before/after, compute a real diff; otherwise parse the diff text
+  const hasSideBySide = before != null || after != null;
   const beforeLines = (before || '').split('\n');
   const afterLines = (after || '').split('\n');
-
-  // Simple line diff: find added/removed/unchanged
-  const diff = computeSimpleDiff(beforeLines, afterLines);
+  const diff = hasSideBySide ? computeSimpleDiff(beforeLines, afterLines) : parseDiffText(diffText || '');
   const added = diff.filter((d) => d.type === 'add').length;
   const removed = diff.filter((d) => d.type === 'remove').length;
 
+  const handleRevert = async () => {
+    setRevertStatus('loading');
+    try {
+      const result = await api.revertFile(eventId);
+      if (result.ok) {
+        setRevertStatus('done');
+        setRevertMsg(`Reverted ${shortenPath(path)}`);
+      } else {
+        setRevertStatus('error');
+        setRevertMsg(result.error || 'Revert failed');
+      }
+    } catch (err) {
+      setRevertStatus('error');
+      const msg = String(err);
+      if (msg.includes('404') || msg.includes('Failed to fetch')) {
+        setRevertMsg('Server not running — start hawkeye serve first');
+      } else {
+        setRevertMsg(msg);
+      }
+    }
+  };
+
   return (
     <div className="rounded border border-hawk-border/50 overflow-hidden">
+      {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-hawk-surface3/80 border-b border-hawk-border/50">
         <span className="font-mono text-[10px] text-hawk-text2">{shortenPath(path)}</span>
-        <div className="flex items-center gap-2 font-mono text-[10px]">
-          {added > 0 && <span className="text-hawk-green">+{added}</span>}
-          {removed > 0 && <span className="text-hawk-red">-{removed}</span>}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 font-mono text-[10px]">
+            {added > 0 && <span className="text-hawk-green">+{added}</span>}
+            {removed > 0 && <span className="text-hawk-red">-{removed}</span>}
+          </div>
+          {/* View mode toggle (only when side-by-side data is available) */}
+          {hasSideBySide && (
+          <div className="flex rounded overflow-hidden border border-hawk-border/50">
+            <button
+              onClick={() => setViewMode('split')}
+              className={`px-2 py-0.5 font-mono text-[9px] transition-colors ${viewMode === 'split' ? 'bg-hawk-orange/20 text-hawk-orange' : 'text-hawk-text3 hover:text-hawk-text2'}`}
+            >
+              Split
+            </button>
+            <button
+              onClick={() => setViewMode('unified')}
+              className={`px-2 py-0.5 font-mono text-[9px] transition-colors ${viewMode === 'unified' ? 'bg-hawk-orange/20 text-hawk-orange' : 'text-hawk-text3 hover:text-hawk-text2'}`}
+            >
+              Unified
+            </button>
+          </div>
+          )}
+          {/* Revert button */}
+          {canRevert && revertStatus === 'idle' && (
+            <button
+              onClick={handleRevert}
+              className="flex items-center gap-1 px-2 py-0.5 rounded border border-hawk-amber/30 font-mono text-[9px] text-hawk-amber hover:bg-hawk-amber/10 transition-colors"
+            >
+              ↩ Revert
+            </button>
+          )}
+          {revertStatus === 'loading' && (
+            <span className="font-mono text-[9px] text-hawk-text3">Reverting...</span>
+          )}
+          {revertStatus === 'done' && (
+            <span className="font-mono text-[9px] text-hawk-green">✓ {revertMsg}</span>
+          )}
+          {revertStatus === 'error' && (
+            <span className="font-mono text-[9px] text-hawk-red">✗ {revertMsg}</span>
+          )}
         </div>
       </div>
-      <div className="max-h-80 overflow-auto">
-        {diff.slice(0, 200).map((line, i) => (
-          <div
-            key={i}
-            className={`flex font-mono text-[11px] leading-5 ${
-              line.type === 'add' ? 'bg-hawk-green/8 text-hawk-green' :
-              line.type === 'remove' ? 'bg-hawk-red/8 text-hawk-red' :
-              'text-hawk-text3'
-            }`}
-          >
-            <span className="w-8 text-right pr-2 select-none opacity-40 shrink-0">
-              {line.lineNum || ''}
-            </span>
-            <span className="w-4 text-center select-none opacity-60 shrink-0">
-              {line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '}
-            </span>
-            <span className="flex-1 whitespace-pre-wrap break-all pr-2">{line.content}</span>
+
+      {/* Content */}
+      {viewMode === 'unified' || !hasSideBySide ? (
+        <UnifiedDiffView diff={diff} />
+      ) : (
+        <SplitDiffView beforeLines={beforeLines} afterLines={afterLines} />
+      )}
+    </div>
+  );
+}
+
+function UnifiedDiffView({ diff }: { diff: Array<{ type: 'add' | 'remove' | 'same'; content: string; lineNum?: number }> }) {
+  return (
+    <div className="max-h-96 overflow-auto">
+      {diff.slice(0, 300).map((line, i) => (
+        <div
+          key={i}
+          className={`flex font-mono text-[11px] leading-5 ${
+            line.type === 'add' ? 'bg-hawk-green/8 text-hawk-green' :
+            line.type === 'remove' ? 'bg-hawk-red/8 text-hawk-red' :
+            'text-hawk-text3'
+          }`}
+        >
+          <span className="w-8 text-right pr-2 select-none opacity-40 shrink-0">
+            {line.lineNum || ''}
+          </span>
+          <span className="w-4 text-center select-none opacity-60 shrink-0">
+            {line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '}
+          </span>
+          <span className="flex-1 whitespace-pre-wrap break-all pr-2">{line.content}</span>
+        </div>
+      ))}
+      {diff.length > 300 && (
+        <div className="px-3 py-1 font-mono text-[10px] text-hawk-text3 bg-hawk-surface3/50">
+          ... {diff.length - 300} more lines
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SplitDiffView({ beforeLines, afterLines }: { beforeLines: string[]; afterLines: string[] }) {
+  const maxLines = Math.max(beforeLines.length, afterLines.length);
+  const limit = Math.min(maxLines, 300);
+
+  // Build matching: identify changed lines using sets for highlighting
+  const beforeSet = new Set(beforeLines);
+  const afterSet = new Set(afterLines);
+
+  return (
+    <div className="max-h-96 overflow-auto">
+      <div className="flex">
+        {/* Before (left) */}
+        <div className="flex-1 border-r border-hawk-border/30 min-w-0">
+          <div className="px-2 py-1 text-[9px] font-mono text-hawk-text3 bg-hawk-red/5 border-b border-hawk-border/30 font-bold">
+            Before
           </div>
-        ))}
-        {diff.length > 200 && (
-          <div className="px-3 py-1 font-mono text-[10px] text-hawk-text3 bg-hawk-surface3/50">
-            ... {diff.length - 200} more lines
+          {beforeLines.slice(0, limit).map((line, i) => {
+            const isRemoved = !afterSet.has(line);
+            return (
+              <div
+                key={i}
+                className={`flex font-mono text-[11px] leading-5 ${isRemoved ? 'bg-hawk-red/8' : ''}`}
+              >
+                <span className="w-8 text-right pr-2 select-none opacity-40 shrink-0 text-hawk-text3">
+                  {i + 1}
+                </span>
+                <span className={`flex-1 whitespace-pre-wrap break-all pr-2 ${isRemoved ? 'text-hawk-red' : 'text-hawk-text3'}`}>
+                  {line}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        {/* After (right) */}
+        <div className="flex-1 min-w-0">
+          <div className="px-2 py-1 text-[9px] font-mono text-hawk-text3 bg-hawk-green/5 border-b border-hawk-border/30 font-bold">
+            After
           </div>
-        )}
+          {afterLines.slice(0, limit).map((line, i) => {
+            const isAdded = !beforeSet.has(line);
+            return (
+              <div
+                key={i}
+                className={`flex font-mono text-[11px] leading-5 ${isAdded ? 'bg-hawk-green/8' : ''}`}
+              >
+                <span className="w-8 text-right pr-2 select-none opacity-40 shrink-0 text-hawk-text3">
+                  {i + 1}
+                </span>
+                <span className={`flex-1 whitespace-pre-wrap break-all pr-2 ${isAdded ? 'text-hawk-green' : 'text-hawk-text3'}`}>
+                  {line}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
+      {maxLines > limit && (
+        <div className="px-3 py-1 font-mono text-[10px] text-hawk-text3 bg-hawk-surface3/50">
+          ... {maxLines - limit} more lines
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── Helpers ───
+
+/** Parse a pre-built diff text (lines prefixed with +/-) into structured diff entries */
+function parseDiffText(text: string): Array<{ type: 'add' | 'remove' | 'same'; content: string; lineNum?: number }> {
+  if (!text) return [];
+  let lineNum = 0;
+  return text.split('\n').map((line) => {
+    if (line.startsWith('+ ') || line.startsWith('+\t')) {
+      lineNum++;
+      return { type: 'add' as const, content: line.slice(2), lineNum };
+    }
+    if (line.startsWith('- ') || line.startsWith('-\t')) {
+      return { type: 'remove' as const, content: line.slice(2) };
+    }
+    if (line === '+' || line === '-') {
+      if (line === '+') { lineNum++; return { type: 'add' as const, content: '', lineNum }; }
+      return { type: 'remove' as const, content: '' };
+    }
+    lineNum++;
+    return { type: 'same' as const, content: line, lineNum };
+  });
+}
 
 function computeSimpleDiff(before: string[], after: string[]): Array<{ type: 'add' | 'remove' | 'same'; content: string; lineNum?: number }> {
   const result: Array<{ type: 'add' | 'remove' | 'same'; content: string; lineNum?: number }> = [];
@@ -623,7 +959,11 @@ function getEventInfo(type: string, parsed: Record<string, unknown>, event: Even
     case 'file_write': {
       const path = String(parsed.path || '');
       const size = parsed.sizeAfter ? ` (${formatBytes(parsed.sizeAfter as number)})` : '';
-      return { summary: `Modified ${shortenPath(path)}${size}` };
+      let detail: string | undefined;
+      if (parsed.linesAdded || parsed.linesRemoved) {
+        detail = `+${parsed.linesAdded || 0} / -${parsed.linesRemoved || 0} lines`;
+      }
+      return { summary: `Modified ${shortenPath(path)}${size}`, detail };
     }
     case 'file_delete':
       return { summary: `Deleted ${shortenPath(String(parsed.path || ''))}` };
@@ -669,8 +1009,28 @@ function getEventInfo(type: string, parsed: Record<string, unknown>, event: Even
     }
     case 'file_rename':
       return { summary: `Renamed ${shortenPath(String(parsed.oldPath || ''))} → ${shortenPath(String(parsed.path || ''))}` };
-    case 'error':
-      return { summary: String(parsed.description || parsed.message || 'Error') };
+    case 'git_commit': {
+      const hash = parsed.commitHash ? String(parsed.commitHash).slice(0, 7) : '';
+      const msg = String(parsed.message || '');
+      const stats = parsed.filesChanged ? ` (${parsed.filesChanged} files, +${parsed.linesAdded || 0} -${parsed.linesRemoved || 0})` : '';
+      return { summary: `commit ${hash} ${msg}`.trim(), detail: stats || undefined };
+    }
+    case 'git_checkout':
+      return { summary: `checkout ${String(parsed.branch || '')}` };
+    case 'git_push':
+      return { summary: `push ${String(parsed.branch || '')}`.trim() };
+    case 'git_pull': {
+      const files = parsed.filesChanged ? ` (${parsed.filesChanged} files changed)` : '';
+      return { summary: `pull${files}` };
+    }
+    case 'git_merge':
+      return { summary: `merge ${String(parsed.targetBranch || '')}` };
+    case 'error': {
+      const msg = String(parsed.message || parsed.description || 'Error');
+      const code = parsed.code ? ` (code: ${parsed.code})` : '';
+      const detail = parsed.stderr ? String(parsed.stderr).slice(0, 1000) : undefined;
+      return { summary: `${msg}${code}`, detail };
+    }
     default:
       return { summary: type };
   }
