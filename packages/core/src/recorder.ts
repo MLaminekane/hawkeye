@@ -12,6 +12,7 @@ import {
 import {
   createNetworkInterceptor,
   type NetworkInterceptor,
+  type NetworkLockConfig,
 } from './interceptors/network.js';
 import {
   createDriftEngine,
@@ -365,6 +366,22 @@ export function createRecorder(options: RecorderOptions): Recorder {
 
       // Network interceptor (captures LLM calls and API calls)
       if (options.captureNetwork !== false) {
+        // Extract network_lock config from guardrails if present
+        let networkLockConfig: NetworkLockConfig | undefined;
+        if (options.guardrails?.enabled) {
+          const networkLockRule = options.guardrails.rules.find(
+            (r) => r.type === 'network_lock',
+          ) as (import('./guardrails/rules.js').NetworkLockRule) | undefined;
+          if (networkLockRule) {
+            networkLockConfig = {
+              enabled: true,
+              action: networkLockRule.action,
+              allowedHosts: networkLockRule.allowedHosts,
+              blockedHosts: networkLockRule.blockedHosts,
+            };
+          }
+        }
+
         networkInterceptor = createNetworkInterceptor(
           (llmEvent: LlmEvent) => {
             recordEvent('llm_call', llmEvent, llmEvent.latencyMs, llmEvent.costUsd);
@@ -372,10 +389,42 @@ export function createRecorder(options: RecorderOptions): Recorder {
           (apiEvent: ApiEvent) => {
             recordEvent('api_call', apiEvent, apiEvent.latencyMs);
           },
-          { capturePrompts: options.capturePrompts },
+          {
+            capturePrompts: options.capturePrompts,
+            networkLockRules: networkLockConfig,
+            onNetworkBlock: (hostname: string, url: string, reason: string) => {
+              // Record a guardrail_trigger event for the blocked request
+              recordEvent('guardrail_trigger', {
+                ruleName: 'network_lock',
+                severity: 'block',
+                description: reason,
+                blockedAction: `api_call: ${url}`,
+                originalType: 'api_call',
+              } as unknown as TraceEvent['data']);
+
+              // Persist guardrail violation
+              if (guardrailEnforcer) {
+                const violation = {
+                  ruleName: 'network_lock',
+                  severity: 'block' as const,
+                  description: reason,
+                  actionTaken: 'blocked' as const,
+                };
+                storage.insertGuardrailViolation(sessionId, uuid(), violation);
+                for (const handler of guardrailViolationHandlers) {
+                  handler(violation);
+                }
+              }
+            },
+          },
         );
         networkInterceptor.install();
         logger.info('Network interceptor enabled');
+        if (networkLockConfig?.enabled) {
+          logger.info(
+            `Network lock active: ${networkLockConfig.allowedHosts.length} allowed, ${networkLockConfig.blockedHosts.length} blocked`,
+          );
+        }
       }
 
       logger.info('Recording started');
