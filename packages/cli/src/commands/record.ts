@@ -366,6 +366,30 @@ export const recordCommand = new Command('record')
       });
     }
 
+    // Build guardrails env var for proactive file/command blocking in the preload script
+    const guardrailEnv: Record<string, string> = {};
+    if (options.guardrails !== false) {
+      const activeRules = config.guardrails.filter((r) => r.enabled);
+      const fileProtect = activeRules.find((r) => r.type === 'file_protect');
+      const commandBlock = activeRules.find((r) => r.type === 'command_block');
+      const directoryScope = activeRules.find((r) => r.type === 'directory_scope');
+
+      if (fileProtect || commandBlock || directoryScope) {
+        guardrailEnv.HAWKEYE_GUARDRAILS = JSON.stringify({
+          fileProtect: fileProtect
+            ? { paths: (fileProtect.config as Record<string, unknown>).paths, action: fileProtect.action }
+            : null,
+          commandBlock: commandBlock
+            ? { patterns: (commandBlock.config as Record<string, unknown>).patterns, action: commandBlock.action }
+            : null,
+          directoryScope: directoryScope
+            ? { blockedDirs: (directoryScope.config as Record<string, unknown>).blockedDirs, action: directoryScope.action }
+            : null,
+          workingDir: cwd,
+        });
+      }
+    }
+
     // Spawn the wrapped command with IPC channel + network preload
     const [cmd, ...args] = commandArgs;
     const existingNodeOpts = process.env.NODE_OPTIONS || '';
@@ -375,13 +399,14 @@ export const recordCommand = new Command('record')
       env: {
         ...process.env,
         ...networkLockEnv,
+        ...guardrailEnv,
         NODE_OPTIONS: `${existingNodeOpts} --import file://${preloadPath}`.trim(),
       },
     });
 
-    // Listen for LLM events and network block events from child process via IPC
+    // Listen for LLM events, network block events, and guardrail block events from child process via IPC
     childProcess.on('message', (msg: unknown) => {
-      const m = msg as { type?: string; event?: Record<string, unknown>; hostname?: string; url?: string; reason?: string };
+      const m = msg as { type?: string; event?: Record<string, unknown>; hostname?: string; url?: string; reason?: string; guardType?: string; detail?: string };
       if (m?.type === 'hawkeye:llm' && m.event) {
         recorder.recordLlmEvent(m.event as unknown as import('@hawkeye/core').LlmEvent);
       } else if (m?.type === 'hawkeye:network_block' && m.hostname && m.reason) {
@@ -390,6 +415,15 @@ export const recordCommand = new Command('record')
         console.error('');
         console.error(chalk.red(`  ⛔ NETWORK BLOCKED [network_lock]`));
         console.error(chalk.dim(`    ${m.reason}`));
+        console.error('');
+        overlay.start();
+      } else if (m?.type === 'hawkeye:guardrail_block' && m.reason) {
+        // Proactive guardrail block happened in child process (fs/command interception)
+        overlay.stop();
+        console.error('');
+        console.error(chalk.red(`  ⛔ GUARDRAIL BLOCKED [${m.guardType || 'unknown'}]`));
+        console.error(chalk.dim(`    ${m.reason}`));
+        if (m.detail) console.error(chalk.dim(`    Target: ${m.detail}`));
         console.error('');
         overlay.start();
       }
@@ -454,6 +488,9 @@ function generatePreloadScript(): string {
   return `
 import http from 'node:http';
 import https from 'node:https';
+import fs from 'node:fs';
+import childProc from 'node:child_process';
+import { EventEmitter } from 'node:events';
 
 const LLM_HOSTS = new Set([
   'api.anthropic.com', 'api.openai.com',
@@ -507,6 +544,321 @@ function sendBlockEvent(hostname, url, reason) {
       process.send({ type: 'hawkeye:network_block', hostname, url, reason });
     }
   } catch {}
+}
+
+// ── Guardrails (proactive file + command blocking) ──
+let _guardrails = null;
+try {
+  const rawG = process.env.HAWKEYE_GUARDRAILS;
+  if (rawG) _guardrails = JSON.parse(rawG);
+} catch {}
+
+function sendGuardrailBlock(type, detail, reason) {
+  try {
+    if (typeof process.send === 'function') {
+      process.send({ type: 'hawkeye:guardrail_block', guardType: type, detail, reason });
+    }
+  } catch {}
+}
+
+function matchesSimpleGlob(str, pattern) {
+  // Simple glob: *.ext, .env.*, .env, **/*.key
+  const regex = pattern
+    .replace(/\\./g, '\\\\.')
+    .replace(/\\*\\*/g, '{{GLOBSTAR}}')
+    .replace(/\\*/g, '[^/]*')
+    .replace(/\\{\\{GLOBSTAR\\}\\}/g, '.*');
+  return new RegExp('(^|/)' + regex + '$').test(str);
+}
+
+function isFileBlocked(filePath) {
+  if (!_guardrails) return null;
+  const resolved = typeof filePath === 'string' ? filePath : String(filePath);
+
+  // Check directory scope
+  if (_guardrails.directoryScope && _guardrails.directoryScope.action === 'block') {
+    const home = process.env.HOME || '/root';
+    for (const dir of _guardrails.directoryScope.blockedDirs) {
+      const expanded = dir.replace('~', home);
+      if (resolved.startsWith(expanded + '/') || resolved === expanded) {
+        return 'Hawkeye guardrail: file operation in blocked directory "' + dir + '"';
+      }
+    }
+  }
+
+  // Check file protect
+  if (_guardrails.fileProtect && _guardrails.fileProtect.action === 'block') {
+    const relativePath = _guardrails.workingDir ? resolved.replace(_guardrails.workingDir + '/', '') : resolved;
+    const basename = resolved.split('/').pop() || '';
+    for (const pattern of _guardrails.fileProtect.paths) {
+      if (matchesSimpleGlob(relativePath, pattern) || matchesSimpleGlob(basename, pattern)) {
+        return 'Hawkeye guardrail: protected file blocked "' + basename + '" (matches "' + pattern + '")';
+      }
+    }
+  }
+
+  return null;
+}
+
+function isCommandBlocked(command) {
+  if (!_guardrails || !_guardrails.commandBlock || _guardrails.commandBlock.action !== 'block') return null;
+
+  for (const pattern of _guardrails.commandBlock.patterns) {
+    if (pattern.includes('*')) {
+      // Split on *, escape each part for regex, join with .*
+      const parts = pattern.split('*');
+      // Escape regex special chars in each literal part
+      const escaped = parts.map(function(p) {
+        var result = '';
+        for (var i = 0; i < p.length; i++) {
+          var c = p.charAt(i);
+          var specials = '.+^' + String.fromCharCode(36) + '{}()|/';
+          if (specials.indexOf(c) !== -1 || c === String.fromCharCode(92) || c === String.fromCharCode(91) || c === String.fromCharCode(93)) {
+            result += String.fromCharCode(92) + c;
+          } else {
+            result += c;
+          }
+        }
+        return result;
+      });
+      if (new RegExp(escaped.join('.*'), 'i').test(command)) {
+        return 'Hawkeye guardrail: dangerous command blocked (matches "' + pattern + '")';
+      }
+    } else if (command.toLowerCase().includes(pattern.toLowerCase())) {
+      return 'Hawkeye guardrail: dangerous command blocked (matches "' + pattern + '")';
+    }
+  }
+  return null;
+}
+
+// ── Proactive fs + child_process patching ──
+if (_guardrails) {
+  // -- fs.writeFileSync --
+  const origWriteFileSync = fs.writeFileSync;
+  fs.writeFileSync = function(path, ...args) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      throw new Error(reason);
+    }
+    return origWriteFileSync.call(this, path, ...args);
+  };
+
+  // -- fs.writeFile (callback) --
+  const origWriteFile = fs.writeFile;
+  fs.writeFile = function(path, data, ...args) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      const cb = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (cb) cb(new Error(reason));
+      return;
+    }
+    return origWriteFile.call(this, path, data, ...args);
+  };
+
+  // -- fs.unlinkSync --
+  const origUnlinkSync = fs.unlinkSync;
+  fs.unlinkSync = function(path) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      throw new Error(reason);
+    }
+    return origUnlinkSync.call(this, path);
+  };
+
+  // -- fs.unlink (callback) --
+  const origUnlink = fs.unlink;
+  fs.unlink = function(path, ...args) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      const cb = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (cb) cb(new Error(reason));
+      return;
+    }
+    return origUnlink.call(this, path, ...args);
+  };
+
+  // -- fs.renameSync --
+  const origRenameSync = fs.renameSync;
+  fs.renameSync = function(oldPath, newPath) {
+    const reason = isFileBlocked(String(newPath)) || isFileBlocked(String(oldPath));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(newPath || oldPath), reason);
+      throw new Error(reason);
+    }
+    return origRenameSync.call(this, oldPath, newPath);
+  };
+
+  // -- fs.rename (callback) --
+  const origRename = fs.rename;
+  fs.rename = function(oldPath, newPath, ...args) {
+    const reason = isFileBlocked(String(newPath)) || isFileBlocked(String(oldPath));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(newPath || oldPath), reason);
+      const cb = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (cb) cb(new Error(reason));
+      return;
+    }
+    return origRename.call(this, oldPath, newPath, ...args);
+  };
+
+  // -- fs.appendFileSync --
+  const origAppendFileSync = fs.appendFileSync;
+  fs.appendFileSync = function(path, ...args) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      throw new Error(reason);
+    }
+    return origAppendFileSync.call(this, path, ...args);
+  };
+
+  // -- fs.appendFile (callback) --
+  const origAppendFile = fs.appendFile;
+  fs.appendFile = function(path, data, ...args) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      const cb = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (cb) cb(new Error(reason));
+      return;
+    }
+    return origAppendFile.call(this, path, data, ...args);
+  };
+
+  // -- fs.promises.writeFile --
+  const origPromisesWriteFile = fs.promises.writeFile;
+  fs.promises.writeFile = async function(path, ...args) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      throw new Error(reason);
+    }
+    return origPromisesWriteFile.call(this, path, ...args);
+  };
+
+  // -- fs.promises.unlink --
+  const origPromisesUnlink = fs.promises.unlink;
+  fs.promises.unlink = async function(path) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      throw new Error(reason);
+    }
+    return origPromisesUnlink.call(this, path);
+  };
+
+  // -- fs.promises.rename --
+  const origPromisesRename = fs.promises.rename;
+  fs.promises.rename = async function(oldPath, newPath) {
+    const reason = isFileBlocked(String(newPath)) || isFileBlocked(String(oldPath));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(newPath || oldPath), reason);
+      throw new Error(reason);
+    }
+    return origPromisesRename.call(this, oldPath, newPath);
+  };
+
+  // -- fs.promises.appendFile --
+  const origPromisesAppendFile = fs.promises.appendFile;
+  fs.promises.appendFile = async function(path, ...args) {
+    const reason = isFileBlocked(String(path));
+    if (reason) {
+      sendGuardrailBlock('file_protect', String(path), reason);
+      throw new Error(reason);
+    }
+    return origPromisesAppendFile.call(this, path, ...args);
+  };
+
+  // -- child_process.execSync --
+  const origExecSync = childProc.execSync;
+  childProc.execSync = function(command, ...args) {
+    const reason = isCommandBlocked(String(command));
+    if (reason) {
+      sendGuardrailBlock('command_block', String(command), reason);
+      throw new Error(reason);
+    }
+    return origExecSync.call(this, command, ...args);
+  };
+
+  // -- child_process.exec --
+  const origExec = childProc.exec;
+  childProc.exec = function(command, ...args) {
+    const reason = isCommandBlocked(String(command));
+    if (reason) {
+      sendGuardrailBlock('command_block', String(command), reason);
+      const cb = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (cb) cb(new Error(reason));
+      return;
+    }
+    return origExec.call(this, command, ...args);
+  };
+
+  // -- child_process.execFileSync --
+  const origExecFileSync = childProc.execFileSync;
+  childProc.execFileSync = function(file, execArgs, ...rest) {
+    const fullCmd = execArgs ? file + ' ' + (Array.isArray(execArgs) ? execArgs.join(' ') : '') : String(file);
+    const reason = isCommandBlocked(fullCmd);
+    if (reason) {
+      sendGuardrailBlock('command_block', fullCmd, reason);
+      throw new Error(reason);
+    }
+    return origExecFileSync.call(this, file, execArgs, ...rest);
+  };
+
+  // -- child_process.execFile --
+  const origExecFile = childProc.execFile;
+  childProc.execFile = function(file, execArgs, ...rest) {
+    const fullCmd = execArgs ? file + ' ' + (Array.isArray(execArgs) ? execArgs.join(' ') : '') : String(file);
+    const reason = isCommandBlocked(fullCmd);
+    if (reason) {
+      sendGuardrailBlock('command_block', fullCmd, reason);
+      const cb = typeof rest[rest.length - 1] === 'function' ? rest[rest.length - 1] : null;
+      if (cb) cb(new Error(reason));
+      return;
+    }
+    return origExecFile.call(this, file, execArgs, ...rest);
+  };
+
+  // -- child_process.spawn --
+  const origSpawn = childProc.spawn;
+  childProc.spawn = function(command, spawnArgs, ...rest) {
+    const fullCmd = spawnArgs && Array.isArray(spawnArgs) ? command + ' ' + spawnArgs.join(' ') : String(command);
+    const reason = isCommandBlocked(fullCmd);
+    if (reason) {
+      sendGuardrailBlock('command_block', fullCmd, reason);
+      // Return a fake child process that immediately errors
+      const fake = new EventEmitter();
+      fake.pid = -1;
+      fake.stdin = null;
+      fake.stdout = null;
+      fake.stderr = null;
+      fake.kill = () => {};
+      fake.ref = () => fake;
+      fake.unref = () => fake;
+      process.nextTick(() => {
+        fake.emit('error', new Error(reason));
+        fake.emit('close', 1);
+      });
+      return fake;
+    }
+    return origSpawn.call(this, command, spawnArgs, ...rest);
+  };
+
+  // -- child_process.spawnSync --
+  const origSpawnSync = childProc.spawnSync;
+  childProc.spawnSync = function(command, spawnArgs, ...rest) {
+    const fullCmd = spawnArgs && Array.isArray(spawnArgs) ? command + ' ' + spawnArgs.join(' ') : String(command);
+    const reason = isCommandBlocked(fullCmd);
+    if (reason) {
+      sendGuardrailBlock('command_block', fullCmd, reason);
+      return { pid: -1, output: [null, null, Buffer.from(reason)], stdout: Buffer.alloc(0), stderr: Buffer.from(reason), status: 1, signal: null, error: new Error(reason) };
+    }
+    return origSpawnSync.call(this, command, spawnArgs, ...rest);
+  };
 }
 
 const LLM_PATHS = {
