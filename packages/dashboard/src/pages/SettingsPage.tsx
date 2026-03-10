@@ -79,6 +79,20 @@ const DEFAULT_RULES: GuardrailRule[] = [
     action: 'block',
     config: { patterns: ['git push --force', 'git push -f', 'migrate', 'DROP DATABASE'] },
   },
+  {
+    name: 'pii_filter',
+    type: 'pii_filter',
+    enabled: false,
+    action: 'warn',
+    config: { categories: ['ssn', 'credit_card', 'api_key', 'private_key'], scope: 'both' },
+  },
+  {
+    name: 'prompt_shield',
+    type: 'prompt_shield',
+    enabled: false,
+    action: 'warn',
+    config: { scope: 'input' },
+  },
 ];
 
 export function SettingsPage() {
@@ -90,6 +104,8 @@ export function SettingsPage() {
   const [loadError, setLoadError] = useState('');
   const loaded = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Preserve fields the UI doesn't edit (apiKeys, recording, dashboard)
+  const preservedFields = useRef<Pick<import('../api').SettingsData, 'apiKeys' | 'recording' | 'dashboard'>>({});
 
   // Load settings + provider list from API
   useEffect(() => {
@@ -97,6 +113,12 @@ export function SettingsPage() {
       if (data.drift) setDriftConfig({ ...DEFAULT_DRIFT, ...data.drift });
       if (data.guardrails) setRules(data.guardrails);
       if (data.webhooks) setWebhooks(data.webhooks);
+      // Preserve fields the settings page doesn't edit
+      preservedFields.current = {
+        apiKeys: data.apiKeys,
+        recording: data.recording,
+        dashboard: data.dashboard,
+      };
       // Mark loaded after state settles
       setTimeout(() => { loaded.current = true; }, 100);
     }).catch(() => {
@@ -124,7 +146,7 @@ export function SettingsPage() {
     saveTimer.current = setTimeout(async () => {
       setSaveStatus('saving');
       try {
-        await api.saveSettings({ drift: driftConfig, guardrails: rules, webhooks });
+        await api.saveSettings({ drift: driftConfig, guardrails: rules, webhooks, ...preservedFields.current });
         setSaveStatus('saved');
         setTimeout(() => setSaveStatus('idle'), 1500);
       } catch {
@@ -420,6 +442,14 @@ function describeRule(rule: GuardrailRule): string {
       return 'No hosts configured — add allowed or blocked hosts';
     }
     case 'review_gate': return `Requires approval: ${(c.patterns as string[]).slice(0, 3).join(', ')}${(c.patterns as string[]).length > 3 ? '...' : ''}`;
+    case 'pii_filter': {
+      const cats = (c.categories as string[] || []);
+      const scope = c.scope || 'both';
+      return `Scans ${scope}: ${cats.join(', ')}`;
+    }
+    case 'prompt_shield': {
+      return `Detects prompt injection (scope: ${c.scope || 'input'})`;
+    }
     default: return '';
   }
 }

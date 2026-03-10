@@ -146,7 +146,7 @@ export type Result<T, E = Error> =
 
 export interface GuardrailRule {
   name: string;
-  type: 'file_protect' | 'command_block' | 'cost_limit' | 'token_limit' | 'directory_scope' | 'network_lock' | 'review_gate';
+  type: 'file_protect' | 'command_block' | 'cost_limit' | 'token_limit' | 'directory_scope' | 'network_lock' | 'review_gate' | 'pii_filter' | 'prompt_shield';
   action: 'warn' | 'block';
 }
 

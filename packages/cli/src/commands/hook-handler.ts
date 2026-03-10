@@ -15,7 +15,7 @@ import { Command } from 'commander';
 import { join, extname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { Storage, scoreHeuristic, slidingDriftScore } from '@hawkeye/core';
+import { Storage, scoreHeuristic, slidingDriftScore, scanContent } from '@hawkeye/core';
 import type { TraceEvent, EventType, DriftFlag } from '@hawkeye/core';
 
 // ── Cost estimation ──
@@ -85,12 +85,27 @@ interface NetworkLockConfig {
   blockedHosts: string[];
 }
 
+interface ContentGuardrailConfig {
+  piiFilter: {
+    enabled: boolean;
+    action: string;
+    categories: string[];
+    scope: string;
+  } | null;
+  promptShield: {
+    enabled: boolean;
+    action: string;
+    scope: string;
+  } | null;
+}
+
 interface GuardrailConfig {
   protectedFiles: string[];
   dangerousCommands: string[];
   blockedDirs: string[];
   reviewGatePatterns: string[];
   networkLock: NetworkLockConfig | null;
+  contentGuardrails: ContentGuardrailConfig;
   autoPause: boolean;
   webhooks: WebhookConfig[];
 }
@@ -108,6 +123,7 @@ function loadGuardrailConfig(): GuardrailConfig {
     blockedDirs: ['/etc', '/usr', '/var', '/sys', '/boot', '~/.ssh', '~/.gnupg', '~/.aws'],
     reviewGatePatterns: [],
     networkLock: null,
+    contentGuardrails: { piiFilter: null, promptShield: null },
     autoPause: true,
     webhooks: [],
   };
@@ -142,6 +158,21 @@ function loadGuardrailConfig(): GuardrailConfig {
             action: rule.action || 'block',
             allowedHosts: rule.config.allowedHosts || [],
             blockedHosts: rule.config.blockedHosts || [],
+          };
+        }
+        if (rule.type === 'pii_filter' && rule.config) {
+          defaults.contentGuardrails.piiFilter = {
+            enabled: true,
+            action: rule.action || 'warn',
+            categories: (rule.config.categories as string[]) || ['ssn', 'credit_card', 'api_key', 'private_key'],
+            scope: (rule.config.scope as string) || 'both',
+          };
+        }
+        if (rule.type === 'prompt_shield' && rule.config) {
+          defaults.contentGuardrails.promptShield = {
+            enabled: true,
+            action: rule.action || 'warn',
+            scope: (rule.config.scope as string) || 'input',
           };
         }
       }
@@ -548,6 +579,63 @@ function checkNetworkLock(
   }
 
   return null;
+}
+
+// ── Content guardrail checks ──
+
+function checkContentGuardrails(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  toolOutput: string | undefined,
+  config: GuardrailConfig,
+): { piiWarnings: string[]; injectionWarnings: string[] } {
+  const piiWarnings: string[] = [];
+  const injectionWarnings: string[] = [];
+
+  const { piiFilter, promptShield } = config.contentGuardrails;
+  if (!piiFilter && !promptShield) return { piiWarnings, injectionWarnings };
+
+  // Collect text to scan from tool input/output
+  const textsToScan: string[] = [];
+
+  if (toolName === 'Bash') {
+    const cmd = String(toolInput.command || '');
+    if (cmd) textsToScan.push(cmd);
+    if (toolOutput) textsToScan.push(toolOutput);
+  } else if (toolName === 'Write') {
+    const content = toolInput.content ? String(toolInput.content) : '';
+    if (content) textsToScan.push(content);
+  } else if (toolName === 'Edit') {
+    const oldStr = toolInput.old_string ? String(toolInput.old_string) : '';
+    const newStr = toolInput.new_string ? String(toolInput.new_string) : '';
+    if (oldStr) textsToScan.push(oldStr);
+    if (newStr) textsToScan.push(newStr);
+  }
+
+  for (const text of textsToScan) {
+    // PII scanning
+    if (piiFilter) {
+      const result = scanContent(text, piiFilter.categories);
+      if (result.piiMatches.length > 0) {
+        const types = [...new Set(result.piiMatches.map((m) => m.type))];
+        piiWarnings.push(
+          `PII detected (${types.join(', ')}): ${result.piiMatches.length} match${result.piiMatches.length > 1 ? 'es' : ''}`,
+        );
+      }
+    }
+
+    // Prompt injection scanning
+    if (promptShield) {
+      const result = scanContent(text);
+      if (result.promptInjection) {
+        injectionWarnings.push(
+          `Prompt injection patterns detected: ${result.injectionPatterns.join(', ')}`,
+        );
+      }
+    }
+  }
+
+  return { piiWarnings, injectionWarnings };
 }
 
 // ── Event mapping ──
@@ -1085,6 +1173,49 @@ export const hookHandlerCommand = new Command('hook-handler')
             });
           }
 
+          // ── Content guardrail scanning (PII + prompt injection) ──
+          const guardConfig = loadGuardrailConfig();
+          const contentScan = checkContentGuardrails(
+            toolName,
+            toolInput,
+            toolOutput,
+            guardConfig,
+          );
+
+          if (contentScan.piiWarnings.length > 0) {
+            const piiAction = guardConfig.contentGuardrails.piiFilter?.action || 'warn';
+            for (const warning of contentScan.piiWarnings) {
+              process.stderr.write(`[hawkeye] PII filter (${piiAction}): ${warning}\n`);
+              storage.insertGuardrailViolation(
+                session.hawkeyeSessionId,
+                eventId,
+                {
+                  ruleName: 'pii_filter',
+                  severity: piiAction as 'warn' | 'block',
+                  description: warning,
+                  actionTaken: piiAction === 'block' ? 'blocked' : 'logged',
+                },
+              );
+            }
+          }
+
+          if (contentScan.injectionWarnings.length > 0) {
+            const shieldAction = guardConfig.contentGuardrails.promptShield?.action || 'warn';
+            for (const warning of contentScan.injectionWarnings) {
+              process.stderr.write(`[hawkeye] Prompt shield (${shieldAction}): ${warning}\n`);
+              storage.insertGuardrailViolation(
+                session.hawkeyeSessionId,
+                eventId,
+                {
+                  ruleName: 'prompt_shield',
+                  severity: shieldAction as 'warn' | 'block',
+                  description: warning,
+                  actionTaken: shieldAction === 'block' ? 'blocked' : 'logged',
+                },
+              );
+            }
+          }
+
           // ── Drift detection ──
           const drift = runDriftCheck(
             storage,
@@ -1102,7 +1233,6 @@ export const hookHandlerCommand = new Command('hook-handler')
 
           // Auto-pause on critical drift + webhook notification
           if (drift && drift.flag === 'critical') {
-            const guardConfig = loadGuardrailConfig();
             if (guardConfig.autoPause) {
               storage.pauseSession(session.hawkeyeSessionId);
               process.stderr.write(

@@ -59,6 +59,11 @@ export type {
   DirectoryScopeRule,
   NetworkLockRule,
   ReviewGateRule,
+  PiiFilterRule,
+  PromptShieldRule,
 } from './guardrails/rules.js';
+
+export { scanContent } from './guardrails/content-scanner.js';
+export type { PiiMatch, ContentScanResult } from './guardrails/content-scanner.js';
 
 export { Logger } from './logger.js';

@@ -48,10 +48,9 @@ export function ComparePage() {
   async function loadComparison(ids: string[]) {
     setLoading(true);
     try {
-      const res = await fetch(`/api/compare?ids=${ids.join(',')}`);
-      const data = await res.json();
+      const data = await api.compareSessions(ids);
       if (Array.isArray(data)) {
-        setComparisons(data);
+        setComparisons(data as unknown as SessionComparison[]);
       }
     } catch {}
     setLoading(false);

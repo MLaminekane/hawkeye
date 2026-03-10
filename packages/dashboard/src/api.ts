@@ -77,6 +77,15 @@ export interface SettingsData {
     url: string;
     events: string[];
   }>;
+  apiKeys?: Record<string, string>;
+  recording?: {
+    ignorePatterns: string[];
+    maxStdoutBytes: number;
+    captureLlmContent: boolean;
+  };
+  dashboard?: {
+    openBrowser: boolean;
+  };
 }
 
 export interface GlobalStatsData {
@@ -128,6 +137,18 @@ export const api = {
 
   revertFile: (eventId: string) =>
     postJson<{ ok: boolean; path?: string; error?: string }>(`${API_BASE}/revert`, { event_id: eventId }),
+
+  compareSessions: (ids: string[]) =>
+    fetchJson<Record<string, unknown>[]>(`${API_BASE}/compare?ids=${ids.join(',')}`),
+
+  getPendingReviews: () =>
+    fetchJson<Array<{ id: string; timestamp: string; sessionId: string; command: string; matchedPattern: string }>>(`${API_BASE}/pending-reviews`),
+
+  approveReview: (id: string, scope: 'session' | 'always' = 'session') =>
+    postJson<{ ok: boolean }>(`${API_BASE}/review-approve`, { id, scope }),
+
+  denyReview: (id: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/review-deny`, { id }),
 };
 
 // ─── WebSocket client ────────────────────────────────────────
@@ -135,11 +156,11 @@ export const api = {
 export type WsMessage =
   | { type: 'event'; sessionId: string; event: EventData }
   | { type: 'drift_update'; sessionId: string; score: number; flag: string; reason: string }
-  | { type: 'session_start'; session: SessionData }
-  | { type: 'session_end'; session: SessionData }
+  | { type: 'session_end'; session: { id: string; status: string } }
   | { type: 'session_pause'; sessionId: string }
   | { type: 'session_resume'; sessionId: string }
-  | { type: 'guardrail_violation'; sessionId: string; violation: Record<string, unknown> };
+  | { type: 'review_approved'; reviewId: string; pattern: string; scope: string }
+  | { type: 'review_denied'; reviewId: string; pattern: string };
 
 type WsListener = (msg: WsMessage) => void;
 

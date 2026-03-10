@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
-import type { TraceEvent, CommandEvent, FileEvent, ApiEvent } from '../types.js';
-import type { GuardrailRuleConfig, GuardrailViolation } from './rules.js';
+import type { TraceEvent, CommandEvent, FileEvent, ApiEvent, LlmEvent } from '../types.js';
+import type { GuardrailRuleConfig, GuardrailViolation, PiiFilterRule, PromptShieldRule } from './rules.js';
+import { scanContent } from './content-scanner.js';
 import { Logger } from '../logger.js';
 
 const logger = new Logger('guardrails');
@@ -199,6 +200,65 @@ export function createGuardrailEnforcer(
     return null;
   }
 
+  function evaluatePiiFilter(
+    event: TraceEvent,
+    rule: PiiFilterRule,
+  ): GuardrailViolation | null {
+    if (event.type !== 'llm_call') return null;
+    const data = event.data as LlmEvent;
+
+    const textsToScan: string[] = [];
+    if ((rule.scope === 'input' || rule.scope === 'both') && data.prompt) {
+      textsToScan.push(data.prompt);
+    }
+    if ((rule.scope === 'output' || rule.scope === 'both') && data.response) {
+      textsToScan.push(data.response);
+    }
+
+    for (const text of textsToScan) {
+      const result = scanContent(text, rule.categories);
+      if (result.piiMatches.length > 0) {
+        const types = [...new Set(result.piiMatches.map((m) => m.type))];
+        return {
+          ruleName: rule.name,
+          severity: rule.action,
+          description: `PII detected in LLM ${rule.scope}: ${types.join(', ')} (${result.piiMatches.length} match${result.piiMatches.length > 1 ? 'es' : ''})`,
+          actionTaken: rule.action === 'block' ? 'blocked' : 'logged',
+        };
+      }
+    }
+    return null;
+  }
+
+  function evaluatePromptShield(
+    event: TraceEvent,
+    rule: PromptShieldRule,
+  ): GuardrailViolation | null {
+    if (event.type !== 'llm_call') return null;
+    const data = event.data as LlmEvent;
+
+    const textsToScan: string[] = [];
+    if ((rule.scope === 'input' || rule.scope === 'both') && data.prompt) {
+      textsToScan.push(data.prompt);
+    }
+    if ((rule.scope === 'output' || rule.scope === 'both') && data.response) {
+      textsToScan.push(data.response);
+    }
+
+    for (const text of textsToScan) {
+      const result = scanContent(text);
+      if (result.promptInjection) {
+        return {
+          ruleName: rule.name,
+          severity: rule.action,
+          description: `Prompt injection attempt detected: ${result.injectionPatterns.join(', ')}`,
+          actionTaken: rule.action === 'block' ? 'blocked' : 'logged',
+        };
+      }
+    }
+    return null;
+  }
+
   return {
     evaluate(event: TraceEvent): GuardrailViolation[] {
       const violations: GuardrailViolation[] = [];
@@ -221,6 +281,12 @@ export function createGuardrailEnforcer(
             break;
           case 'review_gate':
             violation = evaluateReviewGate(event, rule);
+            break;
+          case 'pii_filter':
+            violation = evaluatePiiFilter(event, rule);
+            break;
+          case 'prompt_shield':
+            violation = evaluatePromptShield(event, rule);
             break;
           // cost_limit and token_limit are checked separately
         }

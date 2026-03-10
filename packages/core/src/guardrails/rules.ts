@@ -50,6 +50,21 @@ export interface ReviewGateRule {
   action: 'block';
 }
 
+export interface PiiFilterRule {
+  name: string;
+  type: 'pii_filter';
+  action: 'warn' | 'block';
+  categories: string[]; // e.g. ['ssn', 'credit_card', 'email', 'phone', 'api_key', 'ip_address']
+  scope: 'input' | 'output' | 'both'; // Cloudflare pattern: evaluate prompts, responses, or both
+}
+
+export interface PromptShieldRule {
+  name: string;
+  type: 'prompt_shield';
+  action: 'warn' | 'block';
+  scope: 'input' | 'output' | 'both';
+}
+
 export type GuardrailRuleConfig =
   | FileProtectRule
   | CommandBlockRule
@@ -57,7 +72,9 @@ export type GuardrailRuleConfig =
   | TokenLimitRule
   | DirectoryScopeRule
   | NetworkLockRule
-  | ReviewGateRule;
+  | ReviewGateRule
+  | PiiFilterRule
+  | PromptShieldRule;
 
 export interface GuardrailViolation {
   ruleName: string;
