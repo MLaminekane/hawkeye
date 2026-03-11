@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "hawkeye": {
+      "command": "node",
+      "args": ["/Users/lamine/Documents/Projects/Hawkeye/packages/cli/dist/index.js", "mcp"]
+    }
+  }
+}

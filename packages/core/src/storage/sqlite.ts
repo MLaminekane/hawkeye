@@ -84,6 +84,17 @@ export class Storage {
     }
   }
 
+  updateSessionObjective(sessionId: string, objective: string): Result<void> {
+    try {
+      this.db
+        .prepare(`UPDATE sessions SET objective = ? WHERE id = ?`)
+        .run(objective, sessionId);
+      return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
   endSession(
     sessionId: string,
     status: 'completed' | 'aborted',

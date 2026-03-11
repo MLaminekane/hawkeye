@@ -1259,45 +1259,31 @@ export const hookHandlerCommand = new Command('hook-handler')
           storage.close();
           process.exit(0);
         } else if (eventType === 'Stop') {
-          // ── Session end ──
+          // ── Stop event ──
+          // NOTE: Claude Code fires Stop after EVERY response, not just when the
+          // conversation ends. We must NOT end the session here — just update the
+          // drift score snapshot and keep the session open. The session is ended
+          // manually via `hawkeye end` or the dashboard, or auto-closed by
+          // inactivity detection in the TUI/serve command.
           const sessions = loadSessions();
           const hookSession = sessions[claudeSessionId];
 
           if (hookSession) {
-            // Compute final drift score
-            const finalDrift =
+            // Update drift score snapshot (non-destructive)
+            const currentDrift =
               hookSession.driftScores.length > 0
                 ? slidingDriftScore(hookSession.driftScores)
                 : null;
 
-            if (finalDrift !== null) {
+            if (currentDrift !== null) {
               storage.updateFinalDriftScore(
                 hookSession.hawkeyeSessionId,
-                finalDrift,
+                currentDrift,
               );
             }
 
-            // End the session
-            storage.endSession(hookSession.hawkeyeSessionId, 'completed');
-
-            // Record session_end event
-            const seq = storage.getNextSequence(hookSession.hawkeyeSessionId);
-            storage.insertEvent({
-              id: randomUUID(),
-              sessionId: hookSession.hawkeyeSessionId,
-              timestamp: new Date(),
-              sequence: seq,
-              type: 'session_end' as EventType,
-              data: {
-                description: hookData.stop_reason || 'Session ended',
-                reasoning: `Total cost: $${hookSession.totalCostUsd.toFixed(4)}, Events: ${hookSession.eventCount}`,
-              } as unknown as TraceEvent['data'],
-              durationMs: 0,
-              costUsd: 0,
-            });
-
-            // Remove from active sessions
-            delete sessions[claudeSessionId];
+            // Update last activity timestamp
+            hookSession.lastActivityAt = new Date().toISOString();
             saveSessions(sessions);
           }
 

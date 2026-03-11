@@ -2,6 +2,15 @@ import type { TraceEvent, DriftFlag, DriftConfig } from '../types.js';
 import { Logger } from '../logger.js';
 import { scoreHeuristic, slidingDriftScore } from './scorer.js';
 import { buildDriftPrompt, parseDriftResponse, type DriftLlmResponse } from './prompts.js';
+import {
+  type LlmProvider,
+  createOllamaProvider,
+  createAnthropicProvider,
+  createOpenAIProvider,
+  createDeepSeekProvider,
+  createMistralProvider,
+  createGoogleProvider,
+} from '../llm/providers.js';
 
 const logger = new Logger('drift:engine');
 
@@ -20,191 +29,6 @@ export interface DriftEngine {
   getSlidingScore(): number;
   onAlert(callback: DriftAlertCallback): void;
   processEvent(event: TraceEvent, allRecentEvents: TraceEvent[]): Promise<void>;
-}
-
-interface LlmProvider {
-  complete(prompt: string): Promise<string>;
-}
-
-function createOllamaProvider(model: string, ollamaUrl?: string): LlmProvider {
-  const baseUrl = ollamaUrl || 'http://localhost:11434';
-  return {
-    async complete(prompt: string): Promise<string> {
-      const response = await fetch(`${baseUrl}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          prompt,
-          stream: false,
-          options: { temperature: 0.1 },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Ollama error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = (await response.json()) as { response: string };
-      return data.response;
-    },
-  };
-}
-
-function createAnthropicProvider(model: string): LlmProvider {
-  return {
-    async complete(prompt: string): Promise<string> {
-      const apiKey = process.env.ANTHROPIC_API_KEY;
-      if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
-
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: 300,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Anthropic error: ${response.status}`);
-      }
-
-      const data = (await response.json()) as { content: Array<{ text: string }> };
-      return data.content[0].text;
-    },
-  };
-}
-
-function createOpenAIProvider(model: string): LlmProvider {
-  return {
-    async complete(prompt: string): Promise<string> {
-      const apiKey = process.env.OPENAI_API_KEY;
-      if (!apiKey) throw new Error('OPENAI_API_KEY not set');
-
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 300,
-          temperature: 0.1,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`OpenAI error: ${response.status}`);
-      }
-
-      const data = (await response.json()) as {
-        choices: Array<{ message: { content: string } }>;
-      };
-      return data.choices[0].message.content;
-    },
-  };
-}
-
-function createDeepSeekProvider(model: string): LlmProvider {
-  return {
-    async complete(prompt: string): Promise<string> {
-      const apiKey = process.env.DEEPSEEK_API_KEY;
-      if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
-
-      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 300,
-          temperature: 0.1,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`DeepSeek error: ${response.status}`);
-      }
-
-      const data = (await response.json()) as {
-        choices: Array<{ message: { content: string } }>;
-      };
-      return data.choices[0].message.content;
-    },
-  };
-}
-
-function createMistralProvider(model: string): LlmProvider {
-  return {
-    async complete(prompt: string): Promise<string> {
-      const apiKey = process.env.MISTRAL_API_KEY;
-      if (!apiKey) throw new Error('MISTRAL_API_KEY not set');
-
-      const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 300,
-          temperature: 0.1,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Mistral error: ${response.status}`);
-      }
-
-      const data = (await response.json()) as {
-        choices: Array<{ message: { content: string } }>;
-      };
-      return data.choices[0].message.content;
-    },
-  };
-}
-
-function createGoogleProvider(model: string): LlmProvider {
-  return {
-    async complete(prompt: string): Promise<string> {
-      const apiKey = process.env.GOOGLE_API_KEY;
-      if (!apiKey) throw new Error('GOOGLE_API_KEY not set');
-
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        throw new Error(`Google error: ${response.status}`);
-      }
-
-      const data = (await response.json()) as {
-        candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
-      };
-      return data.candidates[0].content.parts[0].text;
-    },
-  };
 }
 
 function formatEventsForPrompt(events: TraceEvent[]): string {

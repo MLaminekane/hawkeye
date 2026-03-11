@@ -66,4 +66,18 @@ export type {
 export { scanContent } from './guardrails/content-scanner.js';
 export type { PiiMatch, ContentScanResult } from './guardrails/content-scanner.js';
 
+export {
+  createLlmProvider,
+  createOllamaProvider,
+  createAnthropicProvider,
+  createOpenAIProvider,
+  createDeepSeekProvider,
+  createMistralProvider,
+  createGoogleProvider,
+} from './llm/providers.js';
+export type { LlmProvider } from './llm/providers.js';
+
+export { buildPostMortemPrompt, parsePostMortemResponse } from './llm/post-mortem.js';
+export type { PostMortemInput, PostMortemResult } from './llm/post-mortem.js';
+
 export { Logger } from './logger.js';

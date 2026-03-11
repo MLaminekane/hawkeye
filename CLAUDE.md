@@ -11,7 +11,7 @@ Hawkeye is an open-source observability and security tool for AI agents (Claude 
 TypeScript monorepo using pnpm workspaces + Turborepo:
 
 - `packages/core` — Node.js SDK: recorder engine, interceptors (terminal, filesystem, network, LLM), SQLite storage, DriftDetect engine, guardrails enforcer
-- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `otel-export`, `end`, `restart`. Interactive TUI via raw-mode stdin with slash command picker.
+- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`. Interactive TUI via raw-mode stdin with slash command picker.
 - `packages/dashboard` — React 19 + Vite + Tailwind CSS + Recharts web UI served by `hawkeye serve` on port 4242
 
 ### Data Flow
@@ -24,7 +24,7 @@ The network interceptor works across process boundaries: `hawkeye record` writes
 
 ### Claude Code Hooks Integration
 
-For agents like Claude Code that use a bundled Node.js runtime (NODE_OPTIONS doesn't work), Hawkeye uses Claude Code hooks. `hawkeye hooks install` configures `.claude/settings.json` with PreToolUse (guardrails — exit code 2 blocks actions) and PostToolUse (event recording) hooks. The `hook-handler` reads JSON from stdin, evaluates guardrails, and writes events directly to SQLite. Sessions are auto-created per Claude Code session_id.
+For agents like Claude Code that use a bundled Node.js runtime (NODE_OPTIONS doesn't work), Hawkeye uses Claude Code hooks. `hawkeye hooks install` configures `.claude/settings.json` with PreToolUse (guardrails — exit code 2 blocks actions), PostToolUse (event recording), and Stop (drift score update) hooks. The `hook-handler` reads JSON from stdin, evaluates guardrails, and writes events directly to SQLite. Sessions are auto-created per Claude Code session_id. **Important**: The Stop hook fires after every Claude Code response (not just conversation end), so it only updates drift scores — it does NOT end the session.
 
 ### Universal Ingestion API
 
@@ -137,3 +137,91 @@ Rules evaluated synchronously before event persistence. Rule types: `file_protec
 | `packages/core/src/types.ts`                | Central type definitions used across all packages                           |
 | `packages/core/src/interceptors/llm.ts`     | LLM endpoint detection, token extraction, cost estimation (shared logic)    |
 | `packages/core/src/drift/scorer.ts`         | Heuristic drift scorer — scoring logic and penalty rules                    |
+| `packages/cli/src/mcp/server.ts`            | MCP server — 27 tools for agent self-awareness (stdio JSON-RPC)             |
+| `packages/core/src/llm/providers.ts`        | LLM provider factory — Ollama, Anthropic, OpenAI, DeepSeek, Mistral, Google |
+| `packages/core/src/llm/post-mortem.ts`      | Post-mortem prompt template and JSON response parser                        |
+
+## MCP Server
+
+Hawkeye exposes an MCP (Model Context Protocol) server via `hawkeye mcp` (stdio JSON-RPC). Agents like Claude Code, Cursor, Windsurf, and Cline can connect to it for real-time self-awareness.
+
+### Setup
+
+Add to `.mcp.json` at project root (Claude Code auto-reads this):
+
+```json
+{
+  "mcpServers": {
+    "hawkeye": {
+      "command": "node",
+      "args": ["path/to/hawkeye/packages/cli/dist/index.js", "mcp"]
+    }
+  }
+}
+```
+
+### MCP Tools Reference (27 tools)
+
+**Observability** — Query session data and metrics:
+
+| Tool | Description |
+|------|-------------|
+| `list_sessions` | List sessions with optional status filter and limit |
+| `get_session` | Get session details by ID or prefix (min 4 chars) |
+| `get_session_events` | Get events with optional type/limit filters |
+| `get_session_drift` | Get drift score snapshots for a session |
+| `get_session_stats` | Get session statistics (actions, cost, tokens, duration) |
+| `get_global_stats` | Get aggregate stats across all sessions |
+| `compare_sessions` | Compare two sessions side by side |
+| `get_violations` | Get guardrail violations for a session |
+| `get_cost_by_file` | Get cost breakdown by file for a session |
+
+**Self-awareness** — Tools the agent calls to understand its own state:
+
+| Tool | Description |
+|------|-------------|
+| `check_drift` | Get current drift score + trend for active session |
+| `get_objective` | Retrieve the original objective of the current session |
+| `check_cost` | Get current cost/token usage vs budget limits |
+| `check_guardrail` | Pre-check if a command/file/network action would be blocked |
+| `check_progress` | Heuristic progress estimate based on actions, files, drift, errors |
+| `log_event` | Record a custom event (decision, note, milestone) |
+| `list_changes` | List files modified in the current session with stats |
+| `get_config` | Read current Hawkeye config (drift, guardrails, webhooks) |
+
+**Intelligence** — LLM-powered analysis and summaries:
+
+| Tool | Description |
+|------|-------------|
+| `get_session_timeline` | Condensed timeline grouped into phases (30s gaps) |
+| `get_error_summary` | Aggregate errors by pattern with frequency and last occurrence |
+| `suggest_correction` | LLM-generated correction when drift is high or errors repeat |
+| `post_mortem` | Full LLM-powered session post-mortem (summary, outcome, recommendations) |
+
+**Actions** — Control session lifecycle:
+
+| Tool | Description |
+|------|-------------|
+| `end_session` | End a recording session |
+| `pause_session` | Pause a recording session |
+| `resume_session` | Resume a paused session |
+| `set_objective` | Update the objective of a session |
+
+**Cross-session** — Search and act across sessions:
+
+| Tool | Description |
+|------|-------------|
+| `search_events` | Keyword search across all sessions' events |
+| `revert_file` | Revert a file to its pre-session state using git |
+
+### Hawkeye MCP Self-Monitoring
+
+This project has a Hawkeye MCP server configured. Use these tools proactively:
+
+- **Every 10 actions**: call `check_drift` to verify you're still aligned with the objective
+- **Before dangerous operations** (force push, delete, deploy): call `check_guardrail` to pre-check
+- **When unsure about direction**: call `get_objective` to re-read the original task
+- **When making a significant decision**: call `log_event` with type "decision" to document your reasoning
+- **If you encounter repeated errors**: call `get_error_summary` to spot patterns
+- **Periodically**: call `check_cost` to stay budget-aware
+- **At session end**: call `post_mortem` for a structured debrief
