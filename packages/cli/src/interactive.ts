@@ -69,6 +69,7 @@ const COMMANDS: SlashCommand[] = [
   { name: 'kill', desc: 'Kill hawkeye background processes' },
   { name: 'settings', desc: 'Configure Hawkeye' },
   { name: 'serve', desc: 'Open dashboard :4242' },
+  { name: 'mcp', desc: 'Show MCP server setup instructions' },
   { name: 'init', desc: 'Initialize Hawkeye (auto-runs on /new)' },
   { name: 'clear', desc: 'Clear screen' },
   { name: 'quit', desc: 'Exit' },
@@ -534,6 +535,8 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     await cmdSettings(cwd);
   } else if (c === 'serve') {
     await cmdServe();
+  } else if (c === 'mcp') {
+    await cmdMcp(dbPath);
   } else if (c === 'init') {
     await cmdInit();
   } else if (c === 'clear') {
@@ -1078,7 +1081,7 @@ async function cmdNew(cwd: string): Promise<void> {
       try {
         const s = JSON.parse(rf(settingsPath, 'utf-8'));
         hooksInstalled = !!(s.hooks?.PreToolUse || s.hooks?.PostToolUse);
-      } catch {}
+      } catch { }
     }
 
     if (!hooksInstalled) {
@@ -1144,7 +1147,7 @@ async function cmdNew(cwd: string): Promise<void> {
   try {
     execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: shellEnv });
     cmdExists = true;
-  } catch {}
+  } catch { }
 
   // Fallback: Cursor macOS app path
   if (!cmdExists && agent.name === 'Cursor') {
@@ -1173,7 +1176,7 @@ async function cmdNew(cwd: string): Promise<void> {
           console.log('');
           // Re-check with refreshed env
           const freshEnv = getShellEnv();
-          try { execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: freshEnv }); cmdExists = true; } catch {}
+          try { execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: freshEnv }); cmdExists = true; } catch { }
           if (!cmdExists) {
             console.log(chalk.red(`  ✗ Still not found after install. Check your PATH.`));
             console.log('');
@@ -1329,7 +1332,7 @@ async function cmdAttach(dbPath: string, cwd: string): Promise<void> {
   try {
     execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: shellEnv });
     cmdExists = true;
-  } catch {}
+  } catch { }
 
   if (!cmdExists && agent.needsInstall) {
     console.log(chalk.yellow(`  ⚠ ${agent.name} not found.`));
@@ -1343,7 +1346,7 @@ async function cmdAttach(dbPath: string, cwd: string): Promise<void> {
       try {
         execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: freshEnv });
         cmdExists = true;
-      } catch {}
+      } catch { }
     }
     if (!cmdExists) {
       console.log(chalk.red('  Agent not available. Cancelled.'));
@@ -1432,7 +1435,7 @@ async function cmdRestart(dbPath: string, cwd: string, args: string): Promise<vo
     const r = db.listSessions({ limit: 10 });
     const sessions = r.ok ? r.value : [];
     console.log('');
-    console.log(`  ${o.bold('0)')} ${o('+ New session')}`);  
+    console.log(`  ${o.bold('0)')} ${o('+ New session')}`);
     for (let i = 0; i < sessions.length; i++) {
       const s = sessions[i];
       console.log(
@@ -1656,7 +1659,7 @@ async function cmdApprove(cwd: string): Promise<void> {
     if (existsSync(pendingFile)) {
       pending = JSON.parse(readFileSync(pendingFile, 'utf-8'));
     }
-  } catch {}
+  } catch { }
 
   if (pending.length === 0) {
     console.log(chalk.dim('  No pending review gate actions.'));
@@ -1721,7 +1724,7 @@ async function cmdApprove(cwd: string): Promise<void> {
     if (existsSync(approvalsFile)) {
       approvals = JSON.parse(readFileSync(approvalsFile, 'utf-8'));
     }
-  } catch {}
+  } catch { }
 
   const removedIds = new Set<string>();
 
@@ -1902,9 +1905,9 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
   // ─── Header ───
   const statusIcon =
     s.status === 'completed' ? chalk.green('✓') :
-    s.status === 'recording' ? chalk.yellow('●') :
-    s.status === 'paused' ? chalk.blue('⏸') :
-    chalk.red('✗');
+      s.status === 'recording' ? chalk.yellow('●') :
+        s.status === 'paused' ? chalk.blue('⏸') :
+          chalk.red('✗');
 
   console.log('');
   console.log(o('  ┌─ Session Inspect ───────────────────────────────'));
@@ -2803,6 +2806,45 @@ async function cmdServe(): Promise<void> {
   console.log(chalk.red('  No available port found (tried 4242-4252).'));
 }
 
+async function cmdMcp(_dbPath: string): Promise<void> {
+  const o = chalk.hex('#ff5f1f');
+  console.log('');
+  console.log(`  ${o.bold('MCP Server')} — Make AI agents self-aware via Hawkeye`);
+  console.log('');
+  console.log(chalk.dim('  27 tools over stdio JSON-RPC for any MCP-compatible agent'));
+  console.log(chalk.dim('  (Claude Code, Cursor, Windsurf, Cline).'));
+  console.log('');
+  console.log(`  ${chalk.white.bold('Usage:')}  ${o('hawkeye mcp')}`);
+  console.log(chalk.dim('  Runs as stdio JSON-RPC — agents connect automatically.'));
+  console.log('');
+  console.log(`  ${chalk.white.bold('Claude Code setup:')}  Add to ${chalk.dim('.mcp.json')} at project root:`);
+  console.log('');
+  console.log(chalk.cyan('  {'));
+  console.log(chalk.cyan('    "mcpServers": {'));
+  console.log(chalk.cyan(`      "hawkeye": { "command": "${o('node')}", "args": ["${o('path/to/hawkeye/dist/index.js')}", "${o('mcp')}"] }`));
+  console.log(chalk.cyan('    }'));
+  console.log(chalk.cyan('  }'));
+  console.log('');
+  console.log(`  ${chalk.white.bold('Observability (9):')}`);
+  console.log(`  list_sessions  get_session  get_session_events  get_session_drift`);
+  console.log(`  get_session_stats  get_global_stats  compare_sessions`);
+  console.log(`  get_violations  get_cost_by_file`);
+  console.log('');
+  console.log(`  ${chalk.white.bold('Self-awareness (8):')}`);
+  console.log(`  check_drift  get_objective  check_cost  check_guardrail`);
+  console.log(`  check_progress  log_event  list_changes  get_config`);
+  console.log('');
+  console.log(`  ${chalk.white.bold('Intelligence (4):')}`);
+  console.log(`  get_session_timeline  get_error_summary  suggest_correction  post_mortem`);
+  console.log('');
+  console.log(`  ${chalk.white.bold('Actions (4):')}`);
+  console.log(`  end_session  pause_session  resume_session  set_objective`);
+  console.log('');
+  console.log(`  ${chalk.white.bold('Cross-session (2):')}`);
+  console.log(`  search_events  revert_file`);
+  console.log('');
+}
+
 async function cmdInit(): Promise<void> {
   const { spawn } = await import('node:child_process');
   const child = spawn(process.execPath, [process.argv[1], 'init'], { stdio: 'inherit' });
@@ -2918,6 +2960,24 @@ export async function startInteractive(): Promise<void> {
     const { Storage } = await import('@hawkeye/core');
     const s = new Storage(dbPath);
     s.close();
+  }
+
+  // Inject saved API keys into process.env so drift engine & child processes inherit them
+  const cfg = loadConfig(cwd);
+  const keyMap: Record<string, string> = {
+    anthropic: 'ANTHROPIC_API_KEY',
+    openai: 'OPENAI_API_KEY',
+    deepseek: 'DEEPSEEK_API_KEY',
+    mistral: 'MISTRAL_API_KEY',
+    google: 'GOOGLE_API_KEY',
+  };
+  if (cfg.apiKeys) {
+    for (const [provider, envVar] of Object.entries(keyMap)) {
+      const key = cfg.apiKeys[provider as keyof typeof cfg.apiKeys];
+      if (key && !process.env[envVar]) {
+        process.env[envVar] = key;
+      }
+    }
   }
 
   printBanner();

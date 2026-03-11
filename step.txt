@@ -243,3 +243,43 @@ apres:
    "observabilité" que "sécurité".
     │ hawkeye record            │ NON — l'action s'exécute, puis est flaggée │
   │                           │  dans la DB
+
+
+    Haute priorité (agent self-awareness)
+
+  ┌────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │             Outil              │                                          Description                                           │
+  ├────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ get_session_timeline           │ Timeline condensée (pas les events bruts) — groupée par phase/fichier, avec drift overlay      │
+  ├────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ get_error_summary              │ Résumé des erreurs de la session en cours — patterns récurrents, dernière erreur, taux d'échec │
+  ├────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ end_session                    │ Terminer la session active via MCP (existe déjà en API: POST /api/sessions/:id/end)            │
+  ├────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ pause_session / resume_session │ Contrôle de session (les endpoints REST existent déjà)                                         │
+  └────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Moyenne priorité (intelligence)
+
+  ┌────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────┐
+  │       Outil        │                                        Description                                         │
+  ├────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ post_mortem        │ Résumé LLM auto-généré d'une session terminée — 0% dans la roadmap, gros différenciateur   │
+  ├────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ suggest_correction │ Quand le drift est warning/critical, suggérer les prochaines actions pour revenir on-track │
+  ├────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ search_events      │ Recherche par mot-clé dans les events de toutes les sessions (debugging cross-session)     │
+  ├────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ revert_file        │ Reverter un fichier à son état pré-session (l'endpoint /api/revert existe déjà)            │
+  └────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Basse priorité (nice to have)
+
+  ┌────────────────┬────────────────────────────────────────────────────────────────────────────────────┐
+  │     Outil      │                                    Description                                     │
+  ├────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+  │ check_progress │ Estimation de progression vers l'objectif (% fichiers touchés vs scope estimé)     │
+  ├────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+  │ get_config     │ Lire la config Hawkeye active (drift thresholds, guardrails) — utile pour le debug │
+  ├────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+  │ set_objective  │ Mettre à jour l'objectif en cours de session si la mission évolue                  │

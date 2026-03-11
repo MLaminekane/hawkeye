@@ -99,13 +99,14 @@ export function SettingsPage() {
   const [rules, setRules] = useState<GuardrailRule[]>(DEFAULT_RULES);
   const [driftConfig, setDriftConfig] = useState(DEFAULT_DRIFT);
   const [webhooks, setWebhooks] = useState<WebhookSetting[]>([]);
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [loadError, setLoadError] = useState('');
   const loaded = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Preserve fields the UI doesn't edit (apiKeys, recording, dashboard)
-  const preservedFields = useRef<Pick<import('../api').SettingsData, 'apiKeys' | 'recording' | 'dashboard'>>({});
+  // Preserve fields the UI doesn't edit (recording, dashboard)
+  const preservedFields = useRef<Pick<import('../api').SettingsData, 'recording' | 'dashboard'>>({});
 
   // Load settings + provider list from API
   useEffect(() => {
@@ -113,9 +114,9 @@ export function SettingsPage() {
       if (data.drift) setDriftConfig({ ...DEFAULT_DRIFT, ...data.drift });
       if (data.guardrails) setRules(data.guardrails);
       if (data.webhooks) setWebhooks(data.webhooks);
+      if (data.apiKeys) setApiKeys(data.apiKeys);
       // Preserve fields the settings page doesn't edit
       preservedFields.current = {
-        apiKeys: data.apiKeys,
         recording: data.recording,
         dashboard: data.dashboard,
       };
@@ -146,7 +147,7 @@ export function SettingsPage() {
     saveTimer.current = setTimeout(async () => {
       setSaveStatus('saving');
       try {
-        await api.saveSettings({ drift: driftConfig, guardrails: rules, webhooks, ...preservedFields.current });
+        await api.saveSettings({ drift: driftConfig, guardrails: rules, webhooks, apiKeys, ...preservedFields.current });
         setSaveStatus('saved');
         setTimeout(() => setSaveStatus('idle'), 1500);
       } catch {
@@ -154,7 +155,7 @@ export function SettingsPage() {
       }
     }, 600);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [driftConfig, rules, webhooks]);
+  }, [driftConfig, rules, webhooks, apiKeys]);
 
   // When provider changes, auto-select first model for that provider
   const handleProviderChange = (newProvider: string) => {
@@ -256,11 +257,7 @@ export function SettingsPage() {
             {driftConfig.provider !== 'ollama' && (
               <div className="col-span-2">
                 <div className="rounded border border-hawk-border-subtle bg-hawk-surface2/60 px-3 py-2 font-mono text-[10px] text-hawk-text3">
-                  {driftConfig.provider === 'anthropic' && 'Requires ANTHROPIC_API_KEY environment variable'}
-                  {driftConfig.provider === 'openai' && 'Requires OPENAI_API_KEY environment variable'}
-                  {driftConfig.provider === 'deepseek' && 'Requires DEEPSEEK_API_KEY environment variable'}
-                  {driftConfig.provider === 'mistral' && 'Requires MISTRAL_API_KEY environment variable'}
-                  {driftConfig.provider === 'google' && 'Requires GOOGLE_API_KEY environment variable'}
+                  Requires {driftConfig.provider} API key — configure it in the <span className="text-hawk-orange">API Keys</span> section below
                 </div>
               </div>
             )}
@@ -306,11 +303,10 @@ export function SettingsPage() {
 
               <button
                 onClick={() => toggleAction(i)}
-                className={`shrink-0 rounded px-2 py-1 font-mono text-[10px] font-bold uppercase ${
-                  rule.action === 'block'
-                    ? 'bg-hawk-red/15 text-hawk-red'
-                    : 'bg-hawk-amber/15 text-hawk-amber'
-                }`}
+                className={`shrink-0 rounded px-2 py-1 font-mono text-[10px] font-bold uppercase ${rule.action === 'block'
+                  ? 'bg-hawk-red/15 text-hawk-red'
+                  : 'bg-hawk-amber/15 text-hawk-amber'
+                  }`}
               >
                 {rule.action}
               </button>
@@ -368,11 +364,10 @@ export function SettingsPage() {
                           return { ...w, events: has ? w.events.filter((e) => e !== ev) : [...w.events, ev] };
                         }));
                       }}
-                      className={`rounded px-2 py-0.5 font-mono text-[10px] transition-colors ${
-                        wh.events.includes(ev)
-                          ? 'bg-hawk-orange/15 text-hawk-orange border border-hawk-orange/30'
-                          : 'bg-hawk-surface3 text-hawk-text3 border border-hawk-border-subtle hover:text-hawk-text'
-                      }`}
+                      className={`rounded px-2 py-0.5 font-mono text-[10px] transition-colors ${wh.events.includes(ev)
+                        ? 'bg-hawk-orange/15 text-hawk-orange border border-hawk-orange/30'
+                        : 'bg-hawk-surface3 text-hawk-text3 border border-hawk-border-subtle hover:text-hawk-text'
+                        }`}
                     >
                       {ev}
                     </button>
@@ -382,6 +377,34 @@ export function SettingsPage() {
             ))}
           </div>
         )}
+      </div>
+
+      {/* API Keys */}
+      <div className="mt-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
+        <div className="border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
+          <h2 className="font-display text-base font-semibold text-hawk-text">API Keys</h2>
+        </div>
+        <div className="p-5 grid grid-cols-2 gap-4">
+          {(['anthropic', 'openai', 'deepseek', 'mistral', 'google'] as const).map((provider) => (
+            <div key={provider}>
+              <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">
+                {provider}
+              </label>
+              <input
+                type="password"
+                value={apiKeys[provider] || ''}
+                onChange={(e) => { setApiKeys((p) => ({ ...p, [provider]: e.target.value })); }}
+                placeholder={`${provider} API key`}
+                className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40"
+              />
+            </div>
+          ))}
+        </div>
+        <div className="border-t border-hawk-border-subtle px-5 py-3">
+          <p className="font-mono text-[10px] text-hawk-text3/60">
+            Keys are saved to <code className="text-hawk-text3">config.json</code> and auto-injected as environment variables when recording.
+          </p>
+        </div>
       </div>
 
       {/* Config file hint */}
