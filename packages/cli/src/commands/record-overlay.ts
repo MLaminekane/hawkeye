@@ -105,6 +105,7 @@ export class RecordOverlay {
 
 function padLine(content: string, width: number): string {
   // Strip ANSI for length calculation
+  // eslint-disable-next-line no-control-regex
   const stripped = content.replace(/\x1B\[[0-9;]*m/g, '');
   const pad = Math.max(0, width - stripped.length);
   return `${o('│')} ${content}${' '.repeat(pad)} ${o('│')}`;

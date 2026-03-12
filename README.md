@@ -92,6 +92,7 @@ Hooks provide:
 
 - **PreToolUse** — Guardrails enforcement (exit code 2 blocks the action)
 - **PostToolUse** — Event recording to SQLite
+- **Stop** — Drift score update (fires after every response, does not end session)
 - Sessions auto-created per `session_id`
 
 ### Interactive TUI
@@ -123,6 +124,8 @@ Type `/` to open the command picker with arrow-key navigation and live filtering
 | `/delete`   | Delete a session                            |
 | `/settings` | Configure DriftDetect, Guardrails, API keys |
 | `/serve`    | Open the web dashboard                      |
+| `/mcp`      | Show MCP server setup instructions          |
+| `/revert`   | Revert file changes from a session          |
 | `/init`     | Initialize Hawkeye                          |
 | `/clear`    | Clear screen                                |
 | `/quit`     | Exit                                        |
@@ -210,6 +213,37 @@ hawkeye hooks uninstall [--local]
 hawkeye hooks status
 ```
 
+### `hawkeye mcp`
+
+Start the MCP (Model Context Protocol) server over stdio. Agents connect automatically.
+
+```bash
+hawkeye mcp [--db <path>]
+```
+
+Add to `.mcp.json` at project root for Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "hawkeye": {
+      "command": "node",
+      "args": ["path/to/hawkeye/packages/cli/dist/index.js", "mcp"]
+    }
+  }
+}
+```
+
+**27 tools** for agent self-awareness:
+
+| Category | Tools |
+|----------|-------|
+| **Observability** (9) | `list_sessions`, `get_session`, `get_session_events`, `get_session_drift`, `get_session_stats`, `get_global_stats`, `compare_sessions`, `get_violations`, `get_cost_by_file` |
+| **Self-awareness** (8) | `check_drift`, `get_objective`, `check_cost`, `check_guardrail`, `check_progress`, `log_event`, `list_changes`, `get_config` |
+| **Intelligence** (4) | `get_session_timeline`, `get_error_summary`, `suggest_correction`, `post_mortem` |
+| **Actions** (4) | `end_session`, `pause_session`, `resume_session`, `set_objective` |
+| **Cross-session** (2) | `search_events`, `revert_file` |
+
 ## Dashboard
 
 The web dashboard (`hawkeye serve`) provides three views:
@@ -237,17 +271,26 @@ The web dashboard (`hawkeye serve`) provides three views:
 
 ### REST API
 
-| Endpoint                   | Method | Description                      |
-| -------------------------- | ------ | -------------------------------- |
-| `/api/sessions`            | GET    | List sessions                    |
-| `/api/sessions/:id`        | GET    | Session details                  |
-| `/api/sessions/:id/events` | GET    | Session events                   |
-| `/api/sessions/:id/drift`  | GET    | Drift snapshots                  |
-| `/api/sessions/:id/end`    | POST   | End a session                    |
-| `/api/settings`            | GET    | Get configuration                |
-| `/api/settings`            | POST   | Save configuration               |
-| `/api/providers`           | GET    | Available LLM providers & models |
-| `/api/ingest`              | POST   | Universal event ingestion        |
+| Endpoint                          | Method | Description                      |
+| --------------------------------- | ------ | -------------------------------- |
+| `/api/sessions`                   | GET    | List sessions                    |
+| `/api/sessions/:id`               | GET    | Session details                  |
+| `/api/sessions/:id/events`        | GET    | Session events                   |
+| `/api/sessions/:id/drift`         | GET    | Drift snapshots                  |
+| `/api/sessions/:id/cost-by-file`  | GET    | Cost breakdown by file           |
+| `/api/sessions/:id/end`           | POST   | End a session                    |
+| `/api/sessions/:id/pause`         | POST   | Pause a session                  |
+| `/api/sessions/:id/resume`        | POST   | Resume a paused session          |
+| `/api/compare?ids=id1,id2`        | GET    | Compare sessions side by side    |
+| `/api/stats`                      | GET    | Global statistics                |
+| `/api/settings`                   | GET    | Get configuration                |
+| `/api/settings`                   | POST   | Save configuration (Zod-validated) |
+| `/api/providers`                  | GET    | Available LLM providers & models |
+| `/api/ingest`                     | POST   | Universal event ingestion (Zod-validated) |
+| `/api/revert`                     | POST   | Revert a file change             |
+| `/api/pending-reviews`            | GET    | List pending review gate items   |
+| `/api/review-approve`             | POST   | Approve a review gate item       |
+| `/api/review-deny`                | POST   | Deny a review gate item          |
 
 ## DriftDetect
 
@@ -293,6 +336,8 @@ Guardrails are evaluated **synchronously before** events are persisted. Violatio
 | `cost_limit`      | Limit spending per session/hour        | `maxUsdPerSession`, `maxUsdPerHour`   |
 | `token_limit`     | Limit token consumption                | `maxTokensPerSession`                 |
 | `directory_scope` | Restrict agent to specific directories | `allowedDirs`, `blockedDirs`          |
+| `network_lock`    | Allow/block specific API hostnames     | `allowedHosts`, `blockedHosts`        |
+| `review_gate`     | Require human approval for commands    | `patterns: string[]` (regex patterns) |
 
 Example configuration (via `/settings` in TUI or dashboard):
 

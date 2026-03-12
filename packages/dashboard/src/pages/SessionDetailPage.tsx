@@ -183,7 +183,7 @@ export function SessionDetailPage() {
 
       {/* ─── Status Bar ─── */}
       <div className="mb-6 rounded-lg border border-hawk-border bg-hawk-surface overflow-hidden">
-        <div className="flex items-center gap-6 px-5 py-3 border-b border-hawk-border bg-hawk-surface2">
+        <div className="flex flex-wrap items-center gap-3 sm:gap-6 px-3 sm:px-5 py-3 border-b border-hawk-border bg-hawk-surface2">
           <div className="flex items-center gap-2">
             {isRecording ? (
               <>
@@ -233,9 +233,9 @@ export function SessionDetailPage() {
           <span className="font-mono text-[10px] text-hawk-text3">{session.id.slice(0, 8)}</span>
         </div>
 
-        <div className="px-5 py-4">
-          <div className="flex items-start justify-between mb-3">
-            <h1 className="font-display text-xl font-bold text-hawk-text">{session.objective}</h1>
+        <div className="px-3 sm:px-5 py-4">
+          <div className="flex flex-col sm:flex-row items-start justify-between gap-2 mb-3">
+            <h1 className="font-display text-xl sm:text-2xl font-bold text-hawk-text">{session.objective}</h1>
             <button
               onClick={handleExportJSON}
               className="shrink-0 rounded border border-hawk-border px-3 py-1.5 font-mono text-[11px] text-hawk-text3 hover:text-hawk-orange hover:border-hawk-orange/30 transition-colors"
@@ -257,7 +257,7 @@ export function SessionDetailPage() {
       {/* ─── Replay Controls ─── */}
       {events.length > 1 && !isRecording && (
         <div className="mb-6 rounded-lg border border-hawk-border bg-hawk-surface overflow-hidden">
-          <div className="flex items-center gap-3 px-5 py-3">
+          <div className="flex flex-wrap items-center gap-3 px-3 sm:px-5 py-3">
             {/* Toggle replay mode */}
             <button
               onClick={toggleReplay}
@@ -349,7 +349,7 @@ export function SessionDetailPage() {
 
       {/* ─── Drift Chart ─── */}
       {driftSnapshots.length > 0 && (
-        <div className="mb-6 rounded-lg border border-hawk-border bg-hawk-surface p-5">
+        <div className="mb-6 rounded-lg border border-hawk-border bg-hawk-surface p-3 sm:p-5">
           <h2 className="font-display text-base font-semibold text-hawk-text mb-3">Drift Score</h2>
           <ResponsiveContainer width="100%" height={180}>
             <LineChart data={driftSnapshots.map((s, i) => ({ ...s, idx: i + 1 }))}>
@@ -382,7 +382,7 @@ export function SessionDetailPage() {
       {/* ─── Timeline ─── */}
       <div className="rounded-lg border border-hawk-border bg-hawk-surface overflow-hidden">
         {/* Header with search + filter */}
-        <div className="px-5 py-3 border-b border-hawk-border">
+        <div className="px-3 sm:px-5 py-3 border-b border-hawk-border">
           <div className="flex items-center justify-between mb-2">
             <h2 className="font-display text-base font-semibold text-hawk-text">Timeline</h2>
             <span className="font-mono text-[10px] text-hawk-text3">
@@ -394,7 +394,7 @@ export function SessionDetailPage() {
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
             {/* Search bar */}
             <input
               type="text"
@@ -404,7 +404,7 @@ export function SessionDetailPage() {
               className="flex-1 rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text placeholder-hawk-text3 outline-none focus:border-hawk-orange/50 transition-colors"
             />
             {/* Type filter badges */}
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 overflow-x-auto scrollbar-hide">
               {Object.entries(typeCounts).map(([type, count]) => (
                 <button
                   key={type}
@@ -502,7 +502,7 @@ function EventRow({ event, expanded, onToggle }: {
   return (
     <div className={`${rowBg} hover:bg-hawk-surface2/50 transition-colors`}>
       <div className="flex items-center gap-3 px-4 py-2.5 cursor-pointer" onClick={onToggle}>
-        <span className="font-mono text-[10px] text-hawk-text3 w-16 shrink-0">{timeStr}</span>
+        <span className="font-mono text-[10px] sm:text-xs text-hawk-text3 hidden sm:block sm:w-16 shrink-0">{timeStr}</span>
         <EventBadge type={event.type} />
         <span className="text-sm text-hawk-text flex-1 min-w-0 truncate font-mono">{summary}</span>
         {event.cost_usd > 0 && (
@@ -514,7 +514,7 @@ function EventRow({ event, expanded, onToggle }: {
 
       {/* Expanded detail */}
       {expanded && (
-        <div className="px-4 pb-3 ml-[5.5rem]">
+        <div className="px-4 pb-3 ml-4 sm:ml-[5.5rem]">
           {/* Guardrail details */}
           {isGuardrail && (
             <GuardrailDetail parsed={parsed} />

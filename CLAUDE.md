@@ -48,10 +48,7 @@ When `hawkeye` is run with no subcommand, it launches an interactive TUI (`packa
 
 ### Configuration
 
-Two config files exist (legacy):
-
-- `hawkeye init` writes **YAML** to `.hawkeye/config.yaml` (legacy format)
-- `hawkeye serve` and the interactive TUI read/write **JSON** to `.hawkeye/config.json` (canonical format)
+All config is **JSON** at `.hawkeye/config.json` (created by `hawkeye init`, edited by TUI `/settings`, dashboard, or directly).
 
 The unified config module is `packages/cli/src/config.ts`:
 

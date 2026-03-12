@@ -109,23 +109,26 @@ export function SettingsPage() {
   const preservedFields = useRef<Pick<import('../api').SettingsData, 'recording' | 'dashboard'>>({});
 
   // Load settings + provider list from API
-  useEffect(() => {
+  const loadSettings = () => {
+    setLoadError('');
     api.getSettings().then((data) => {
       if (data.drift) setDriftConfig({ ...DEFAULT_DRIFT, ...data.drift });
       if (data.guardrails) setRules(data.guardrails);
       if (data.webhooks) setWebhooks(data.webhooks);
       if (data.apiKeys) setApiKeys(data.apiKeys);
-      // Preserve fields the settings page doesn't edit
       preservedFields.current = {
         recording: data.recording,
         dashboard: data.dashboard,
       };
-      // Mark loaded after state settles
       setTimeout(() => { loaded.current = true; }, 100);
     }).catch(() => {
       setLoadError('Could not load settings from server');
       loaded.current = true;
     });
+  };
+
+  useEffect(() => {
+    loadSettings();
 
     api.getProviders().then(setProviderModels).catch(() => {
       // Fallback provider list
@@ -179,9 +182,9 @@ export function SettingsPage() {
 
   return (
     <div>
-      <div className="mb-8 flex items-center justify-between">
+      <div className="mb-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
         <div>
-          <h1 className="font-display text-2xl font-bold text-hawk-text">Settings</h1>
+          <h1 className="font-display text-xl sm:text-2xl font-bold text-hawk-text">Settings</h1>
           <p className="text-sm text-hawk-text3 mt-1">Configure DriftDetect and Guardrails</p>
         </div>
         <div className="flex items-center gap-2">
@@ -198,20 +201,23 @@ export function SettingsPage() {
       </div>
 
       {loadError && (
-        <div className="mb-4 rounded-lg border border-hawk-amber/30 bg-hawk-amber/10 px-4 py-2 font-mono text-xs text-hawk-amber">
-          {loadError}
+        <div className="mb-4 flex items-center justify-between rounded-lg border border-hawk-amber/30 bg-hawk-amber/10 px-4 py-2 font-mono text-xs text-hawk-amber">
+          <span>{loadError}</span>
+          <button onClick={loadSettings} className="rounded bg-hawk-amber/20 px-3 py-1 text-hawk-amber transition-colors hover:bg-hawk-amber/30">
+            Retry
+          </button>
         </div>
       )}
 
       {/* DriftDetect Config */}
       <div className="mb-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
-        <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
+        <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-4 sm:px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">DriftDetect</h2>
           <Toggle enabled={driftConfig.enabled} onToggle={() => { setDriftConfig((p) => ({ ...p, enabled: !p.enabled })); }} />
         </div>
 
         {driftConfig.enabled && (
-          <div className="p-5 grid grid-cols-2 gap-4">
+          <div className="p-4 sm:p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Provider</label>
               <select
@@ -286,7 +292,7 @@ export function SettingsPage() {
 
         <div className="divide-y divide-hawk-border-subtle">
           {rules.map((rule, i) => (
-            <div key={rule.name} className="flex items-start gap-4 px-5 py-4 transition-colors hover:bg-hawk-surface2/35">
+            <div key={rule.name} className="flex items-start gap-3 sm:gap-4 px-4 sm:px-5 py-4 transition-colors hover:bg-hawk-surface2/35">
               <Toggle enabled={rule.enabled} onToggle={() => toggleRule(i)} />
 
               <div className="flex-1 min-w-0">
@@ -335,7 +341,7 @@ export function SettingsPage() {
         ) : (
           <div className="divide-y divide-hawk-border-subtle">
             {webhooks.map((wh, i) => (
-              <div key={i} className="px-5 py-4 space-y-3">
+              <div key={i} className="px-4 sm:px-5 py-4 space-y-3">
                 <div className="flex items-center gap-3">
                   <Toggle enabled={wh.enabled} onToggle={() => { setWebhooks((prev) => prev.map((w, j) => j === i ? { ...w, enabled: !w.enabled } : w)); }} />
                   <input
@@ -352,7 +358,7 @@ export function SettingsPage() {
                     Remove
                   </button>
                 </div>
-                <div className="flex items-center gap-2 ml-12">
+                <div className="flex flex-wrap items-center gap-2 ml-0 sm:ml-12">
                   <span className="font-mono text-[10px] text-hawk-text3 mr-1">Events:</span>
                   {WEBHOOK_EVENTS.map((ev) => (
                     <button
@@ -384,7 +390,7 @@ export function SettingsPage() {
         <div className="border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">API Keys</h2>
         </div>
-        <div className="p-5 grid grid-cols-2 gap-4">
+        <div className="p-4 sm:p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
           {(['anthropic', 'openai', 'deepseek', 'mistral', 'google'] as const).map((provider) => (
             <div key={provider}>
               <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">
@@ -408,7 +414,7 @@ export function SettingsPage() {
       </div>
 
       {/* Config file hint */}
-      <div className="mt-6 rounded-xl border border-hawk-border-subtle bg-hawk-surface2/55 p-4">
+      <div className="mt-6 rounded-xl border border-hawk-border-subtle bg-hawk-surface2/55 p-3 sm:p-4">
         <p className="font-mono text-xs text-hawk-text3">
           Settings are saved to{' '}
           <code className="text-hawk-orange">.hawkeye/config.json</code>{' '}

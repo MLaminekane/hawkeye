@@ -2,13 +2,17 @@ import { useEffect, useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api, hawkeyeWs, type SessionData, type GlobalStatsData } from '../api';
 
+// Module-level cache to prevent flash on route change
+let cachedSessions: SessionData[] | null = null;
+let cachedStats: GlobalStatsData | null = null;
+
 type SortKey = 'date' | 'actions' | 'cost' | 'drift';
 type SortDir = 'asc' | 'desc';
 
 export function SessionsPage() {
-  const [sessions, setSessions] = useState<SessionData[]>([]);
-  const [stats, setStats] = useState<GlobalStatsData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [sessions, setSessions] = useState<SessionData[]>(cachedSessions || []);
+  const [stats, setStats] = useState<GlobalStatsData | null>(cachedStats);
+  const [loading, setLoading] = useState(cachedSessions === null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('date');
@@ -23,12 +27,16 @@ export function SessionsPage() {
     const load = () => {
       api.listSessions(200)
         .then((data) => {
+          cachedSessions = data;
           setSessions(data);
           setLoading(false);
         })
         .catch(() => setLoading(false));
       api.getStats()
-        .then((s) => setStats(s))
+        .then((s) => {
+          cachedStats = s;
+          setStats(s);
+        })
         .catch(() => {});
     };
     load();
@@ -158,21 +166,21 @@ export function SessionsPage() {
       </div>
 
       {/* Search + Status Filters */}
-      <div className="mb-3 flex items-center gap-3">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
         <input
           type="text"
           placeholder="Search objectives, agents..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="flex-1 rounded-lg bg-hawk-surface border border-hawk-border px-3 py-2 font-mono text-xs text-hawk-text placeholder-hawk-text3 outline-none focus:border-hawk-orange/50 transition-colors"
+          className="w-full sm:flex-1 rounded-lg bg-hawk-surface border border-hawk-border px-3 py-2 font-mono text-xs text-hawk-text placeholder-hawk-text3 outline-none focus:border-hawk-orange/50 transition-colors"
         />
-        <div className="flex gap-1">
+        <div className="flex gap-1 overflow-x-auto">
           {['recording', 'completed', 'aborted'].map((status) => (
             statusCounts[status] ? (
               <button
                 key={status}
                 onClick={() => setStatusFilter(statusFilter === status ? null : status)}
-                className={`rounded-lg px-2.5 py-1.5 font-mono text-[10px] font-bold uppercase transition-all ${
+                className={`shrink-0 rounded-lg px-2.5 py-1.5 font-mono text-[10px] font-bold uppercase transition-all ${
                   statusFilter === status
                     ? 'ring-1 ring-hawk-orange bg-hawk-surface2'
                     : 'bg-hawk-surface hover:bg-hawk-surface2'
@@ -182,13 +190,13 @@ export function SessionsPage() {
               </button>
             ) : null
           ))}
+          <button
+            onClick={() => setShowFilters(!showFilters)}
+            className={`shrink-0 rounded-lg px-2.5 py-1.5 font-mono text-[10px] font-bold transition-all ${showFilters ? 'bg-hawk-orange text-black' : 'bg-hawk-surface text-hawk-text3 hover:bg-hawk-surface2'}`}
+          >
+            Filters
+          </button>
         </div>
-        <button
-          onClick={() => setShowFilters(!showFilters)}
-          className={`rounded-lg px-2.5 py-1.5 font-mono text-[10px] font-bold transition-all ${showFilters ? 'bg-hawk-orange text-black' : 'bg-hawk-surface text-hawk-text3 hover:bg-hawk-surface2'}`}
-        >
-          Filters
-        </button>
       </div>
 
       {/* ─── Advanced Filters ─── */}
@@ -306,7 +314,7 @@ function SessionCard({ session: s }: { session: SessionData }) {
         </h3>
 
         {/* Stats row */}
-        <div className="flex items-center gap-4 font-mono text-xs">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs">
           <div className="flex items-center gap-1">
             <span className="text-hawk-text3">Duration:</span>
             <span className="text-hawk-text">{duration}</span>
@@ -325,7 +333,7 @@ function SessionCard({ session: s }: { session: SessionData }) {
           )}
 
           {s.final_drift_score != null && (
-            <div className="flex items-center gap-2 ml-auto">
+            <div className="flex items-center gap-2 sm:ml-auto">
               <span className="text-hawk-text3">Drift:</span>
               <div className="flex items-center gap-1.5">
                 <div className="w-16 h-1.5 rounded-full bg-hawk-surface3 overflow-hidden">

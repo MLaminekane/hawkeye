@@ -18,6 +18,7 @@ import { compareCommand } from './commands/compare.js';
 import { revertCommand } from './commands/revert.js';
 import { approveCommand } from './commands/approve.js';
 import { mcpCommand } from './commands/mcp.js';
+import { daemonCommand } from './commands/daemon.js';
 import { startInteractive } from './interactive.js';
 
 const program = new Command();
@@ -44,6 +45,7 @@ program.addCommand(compareCommand);
 program.addCommand(revertCommand);
 program.addCommand(approveCommand);
 program.addCommand(mcpCommand);
+program.addCommand(daemonCommand);
 
 // If no subcommand is given, launch interactive mode
 const knownCommands = program.commands.flatMap((c) => [c.name(), ...c.aliases()]);
