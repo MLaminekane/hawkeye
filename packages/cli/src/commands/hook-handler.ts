@@ -144,13 +144,21 @@ function loadGuardrailConfig(): GuardrailConfig {
           filePaths.push(...rule.config.paths);
         }
         if (rule.type === 'command_block' && rule.config?.patterns?.length) {
-          cmdPatterns.push(...rule.config.patterns);
+          for (const p of rule.config.patterns) {
+            try { new RegExp(p); cmdPatterns.push(p); } catch {
+              process.stderr.write(`hawkeye: invalid command_block regex skipped: ${p}\n`);
+            }
+          }
         }
         if (rule.type === 'directory_scope' && rule.config?.blockedDirs?.length) {
           blockDirs.push(...rule.config.blockedDirs);
         }
         if (rule.type === 'review_gate' && rule.config?.patterns?.length) {
-          reviewPatterns.push(...rule.config.patterns);
+          for (const p of rule.config.patterns) {
+            try { new RegExp(p); reviewPatterns.push(p); } catch {
+              process.stderr.write(`hawkeye: invalid review_gate regex skipped: ${p}\n`);
+            }
+          }
         }
         if (rule.type === 'network_lock' && rule.config) {
           defaults.networkLock = {
@@ -189,7 +197,9 @@ function loadGuardrailConfig(): GuardrailConfig {
         defaults.webhooks = config.webhooks.filter((w: WebhookConfig) => w.enabled);
       }
     }
-  } catch {}
+  } catch (e) {
+    process.stderr.write(`hawkeye: failed to load guardrail config: ${String(e)}\n`);
+  }
 
   return defaults;
 }
@@ -316,6 +326,40 @@ function getOrCreateSession(
   sessions[claudeSessionId] = hookSession;
   saveSessions(sessions);
   return hookSession;
+}
+
+// ── Session auto-close ──
+// Close sessions that have been inactive for more than INACTIVITY_TIMEOUT_MS.
+// Called opportunistically when processing new events.
+const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+function autoCloseInactiveSessions(storage: Storage): void {
+  const sessions = loadSessions();
+  const now = Date.now();
+  let changed = false;
+
+  for (const [id, session] of Object.entries(sessions)) {
+    const lastActivity = new Date(session.lastActivityAt).getTime();
+    if (now - lastActivity > INACTIVITY_TIMEOUT_MS) {
+      // End the session in the database
+      try {
+        storage.endSession(session.hawkeyeSessionId, 'completed');
+        // Update final drift score if available
+        if (session.driftScores.length > 0) {
+          const finalScore = slidingDriftScore(session.driftScores);
+          storage.updateFinalDriftScore(session.hawkeyeSessionId, finalScore);
+        }
+      } catch {}
+      // Remove from tracking
+      delete sessions[id];
+      changed = true;
+      process.stderr.write(
+        `hawkeye: auto-closed inactive session ${session.hawkeyeSessionId.slice(0, 8)} (${session.objective})\n`,
+      );
+    }
+  }
+
+  if (changed) saveSessions(sessions);
 }
 
 function updateSessionTracking(
@@ -541,11 +585,12 @@ function checkNetworkLock(
   if (!cmd) return null;
 
   // Extract hostnames from curl/wget/fetch commands
+  // eslint-disable-next-line no-useless-escape
   const urlPatterns = [
     // curl https://example.com/... or curl http://example.com/...
-    /\bcurl\b[^|]*?\b(?:https?:\/\/)([^\/\s:]+)/g,
+    /\bcurl\b[^|]*?\b(?:https?:\/\/)([^\/\s:]+)/g, // eslint-disable-line no-useless-escape
     // wget https://example.com/...
-    /\bwget\b[^|]*?\b(?:https?:\/\/)([^\/\s:]+)/g,
+    /\bwget\b[^|]*?\b(?:https?:\/\/)([^\/\s:]+)/g, // eslint-disable-line no-useless-escape
     // curl -X POST https://... (already covered above)
     // nc / ncat hostname port
     /\b(?:nc|ncat)\b\s+([^\s-][^\s]*)/g,
@@ -903,7 +948,14 @@ export const hookHandlerCommand = new Command('hook-handler')
         process.exit(0);
       }
 
-      const hookData = JSON.parse(input);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let hookData: any;
+      try {
+        hookData = JSON.parse(input);
+      } catch (parseErr) {
+        process.stderr.write(`hawkeye hook-handler: invalid JSON from stdin: ${String(parseErr)}\n`);
+        process.exit(0);
+      }
       const claudeSessionId = hookData.session_id || 'unknown';
       const eventType = options.event;
 
@@ -913,6 +965,9 @@ export const hookHandlerCommand = new Command('hook-handler')
 
       const dbPath = join(hawkDir, 'traces.db');
       const storage = new Storage(dbPath);
+
+      // Opportunistically close sessions inactive for 30+ minutes
+      autoCloseInactiveSessions(storage);
 
       try {
         if (eventType === 'PreToolUse') {

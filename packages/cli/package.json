@@ -1,18 +1,23 @@
 {
   "name": "@hawkeye/cli",
   "version": "0.1.0",
-  "description": "CLI for Hawkeye",
+  "description": "CLI for Hawkeye — the flight recorder for AI agents",
   "type": "module",
   "bin": {
     "hawkeye": "./dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "dashboard"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run --passWithNoTests",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "prepack": "node -e \"const{cpSync,existsSync,mkdirSync}=require('fs');const{join}=require('path');const src=join(__dirname,'..','dashboard','dist');const dst=join(__dirname,'dashboard');if(existsSync(src)){mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Bundled dashboard dist into CLI package')}else{console.warn('Dashboard dist not found — run pnpm build first')}\""
   },
   "dependencies": {
     "@hawkeye/core": "workspace:*",

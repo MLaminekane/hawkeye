@@ -16,7 +16,7 @@ interface ScoringContext {
 
 // Dangerous command patterns that trigger immediate alerts
 const DANGEROUS_PATTERNS = [
-  { pattern: /rm\s+-rf\s+[\/~]/, reason: 'Destructive recursive delete on root or home' },
+  { pattern: /rm\s+-rf\s+[/~]/, reason: 'Destructive recursive delete on root or home' },
   { pattern: /sudo\s+rm/, reason: 'Elevated privilege file deletion' },
   { pattern: /curl\s+.*\|\s*(ba)?sh/, reason: 'Piping remote script to shell' },
   { pattern: /wget\s+.*\|\s*(ba)?sh/, reason: 'Piping remote script to shell' },

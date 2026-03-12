@@ -2,12 +2,15 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { api, hawkeyeWs, type SessionData, type EventData, type DriftSnapshot } from '../api';
 
+// Module-level cache
+let cachedActiveSessions: SessionData[] | null = null;
+
 export function LiveSessionPage() {
-  const [sessions, setSessions] = useState<SessionData[]>([]);
+  const [sessions, setSessions] = useState<SessionData[]>(cachedActiveSessions || []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [events, setEvents] = useState<EventData[]>([]);
   const [driftSnapshots, setDriftSnapshots] = useState<DriftSnapshot[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(cachedActiveSessions === null);
   const [isPaused, setIsPaused] = useState(false);
   const [driftDismissed, setDriftDismissed] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -16,6 +19,7 @@ export function LiveSessionPage() {
   useEffect(() => {
     api.listSessions().then((all) => {
       const active = all.filter((s) => s.status === 'recording' || s.status === 'paused');
+      cachedActiveSessions = active;
       setSessions(active);
       if (active.length > 0 && !selectedId) {
         setSelectedId(active[0].id);
@@ -125,7 +129,7 @@ export function LiveSessionPage() {
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Link to="/" className="font-mono text-xs text-hawk-text3 hover:text-hawk-orange transition-colors">← Sessions</Link>
-          <h1 className="font-display text-2xl font-bold text-hawk-text flex items-center gap-2">
+          <h1 className="font-display text-xl sm:text-2xl font-bold text-hawk-text flex items-center gap-2">
             <span className="relative flex h-3 w-3">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-hawk-orange opacity-75"></span>
               <span className="relative inline-flex rounded-full h-3 w-3 bg-hawk-orange"></span>
@@ -137,12 +141,12 @@ export function LiveSessionPage() {
 
       {/* Session tabs for multi-session */}
       {sessions.length > 1 && (
-        <div className="mb-4 flex flex-wrap gap-2 rounded-xl border border-hawk-border-subtle bg-hawk-surface/80 p-2">
+        <div className="mb-4 flex flex-wrap gap-2 rounded-xl border border-hawk-border-subtle bg-hawk-surface/80 p-2 overflow-x-auto scrollbar-hide">
           {sessions.map((s) => (
             <button
               key={s.id}
               onClick={() => { setSelectedId(s.id); setEvents([]); setDriftSnapshots([]); }}
-              className={`rounded-lg px-3 py-1.5 font-mono text-xs transition-all ${
+              className={`rounded-lg px-3 py-1.5 font-mono text-[10px] sm:text-xs transition-all ${
                 selectedId === s.id ? 'bg-hawk-orange text-black font-bold shadow-sm' : 'bg-hawk-surface2/70 text-hawk-text3 hover:bg-hawk-surface2'
               }`}
             >
@@ -154,7 +158,7 @@ export function LiveSessionPage() {
 
       {/* Stats bar + Controls */}
       {selected && (
-        <div className="mb-4 flex items-center gap-6 rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/60 px-5 py-3 font-mono text-xs shadow-sm">
+        <div className="mb-4 flex flex-wrap items-center gap-3 sm:gap-6 rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/60 px-3 sm:px-5 py-3 font-mono text-xs shadow-sm">
           <div className="flex items-center gap-2">
             {isPaused ? (
               <>
@@ -183,7 +187,7 @@ export function LiveSessionPage() {
           )}
 
           {/* Session Controls */}
-          <div className="ml-auto flex items-center gap-2">
+          <div className="sm:ml-auto w-full sm:w-auto justify-end flex items-center gap-2">
             {selected.agent && (
               <span className="rounded bg-hawk-surface3 px-1.5 py-0.5 text-hawk-text3 mr-2">{selected.agent}</span>
             )}
@@ -259,7 +263,7 @@ export function LiveSessionPage() {
           <span className="font-mono text-xs text-hawk-text3">Live Event Stream</span>
           <span className="font-mono text-[10px] text-hawk-text3">{events.length} events</span>
         </div>
-        <div className="max-h-[60vh] space-y-0.5 overflow-y-auto p-2">
+        <div className="max-h-[50vh] sm:max-h-[60vh] space-y-0.5 overflow-y-auto p-2">
           {events.map((e, i) => (
             <LiveEventRow key={e.id} event={e} index={i} />
           ))}
@@ -311,8 +315,8 @@ function LiveEventRow({ event, index }: { event: EventData; index: number }) {
   return (
     <div className={`flex items-center gap-2 px-2 py-1 rounded font-mono text-xs hover:bg-hawk-surface2 transition-colors ${index % 2 === 0 ? '' : 'bg-hawk-surface2/30'}`}>
       <span className={`w-4 text-center ${style.color}`}>{style.icon}</span>
-      <span className="text-hawk-text3 w-16 shrink-0">{time}</span>
-      <span className={`uppercase text-[10px] font-bold w-12 shrink-0 ${style.color}`}>{event.type.replace(/_/g, ' ').slice(0, 6)}</span>
+      <span className="text-hawk-text3 hidden sm:block sm:w-16 shrink-0">{time}</span>
+      <span className={`uppercase text-[8px] sm:text-[10px] font-bold w-10 sm:w-12 shrink-0 ${style.color}`}>{event.type.replace(/_/g, ' ').slice(0, 6)}</span>
       <span className="text-hawk-text truncate flex-1">{summary}</span>
       {event.cost_usd > 0 && <span className="text-hawk-amber shrink-0">${event.cost_usd.toFixed(4)}</span>}
       {event.drift_score != null && (

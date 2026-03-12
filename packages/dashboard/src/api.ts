@@ -37,6 +37,21 @@ export interface DriftSnapshot {
   created_at: string;
 }
 
+export interface TaskData {
+  id: string;
+  prompt: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  agent: string;
+  exitCode?: number;
+  output?: string;
+  error?: string;
+  sessionId?: string;
+  attachments?: string[];
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
@@ -149,6 +164,24 @@ export const api = {
 
   denyReview: (id: string) =>
     postJson<{ ok: boolean }>(`${API_BASE}/review-deny`, { id }),
+
+  listTasks: () =>
+    fetchJson<TaskData[]>(`${API_BASE}/tasks`),
+
+  createTask: (prompt: string, agent = 'claude', attachments?: Array<{ name: string; data: string }>) =>
+    postJson<TaskData>(`${API_BASE}/tasks`, { prompt, agent, attachments }),
+
+  cancelTask: (id: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/tasks/${id}/cancel`, {}),
+
+  getTaskJournal: async (): Promise<string> => {
+    const res = await fetch(`${API_BASE}/tasks/journal`);
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    return res.text();
+  },
+
+  clearTaskJournal: () =>
+    postJson<{ ok: boolean }>(`${API_BASE}/tasks/journal/clear`, {}),
 };
 
 // ─── WebSocket client ────────────────────────────────────────
@@ -160,7 +193,12 @@ export type WsMessage =
   | { type: 'session_pause'; sessionId: string }
   | { type: 'session_resume'; sessionId: string }
   | { type: 'review_approved'; reviewId: string; pattern: string; scope: string }
-  | { type: 'review_denied'; reviewId: string; pattern: string };
+  | { type: 'review_denied'; reviewId: string; pattern: string }
+  | { type: 'task_created'; task: TaskData }
+  | { type: 'task_cancelled'; task: TaskData }
+  | { type: 'task_running'; task: TaskData }
+  | { type: 'task_completed'; task: TaskData }
+  | { type: 'task_failed'; task: TaskData };
 
 type WsListener = (msg: WsMessage) => void;
 

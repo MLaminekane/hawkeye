@@ -283,3 +283,38 @@ apres:
   │ get_config     │ Lire la config Hawkeye active (drift thresholds, guardrails) — utile pour le debug │
   ├────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
   │ set_objective  │ Mettre à jour l'objectif en cours de session si la mission évolue                  │
+
+##Publication 
+
+⏺ Les noms @hawkeye/core et @hawkeye/cli sont disponibles sur npm. Mais tu n'es  
+  pas connecte. Voici ce qu'il faut faire :                                    
+                                                                                 
+  1. Connecte-toi a npm :                                                      
+  npm adduser                                                                    
+  (ou npm login si tu as deja un compte)                                         
+                                                                                 
+  2. Le scope @hawkeye doit etre soit :                                          
+  - Une org npm que tu possedes → cree-la sur https://www.npmjs.com/org/create
+  - Ou publie en --access public (les scoped packages sont prives par defaut)
+
+  3. Pour publier :
+  pnpm build
+  cd packages/core && npm publish --access public
+  cd ../cli && npm publish --access public
+
+  pnpm resout automatiquement workspace:* → ^0.1.0 au moment du publish.
+
+  4. Apres publication, les users feront :
+  npm install -g @hawkeye/cli
+  hawkeye init
+
+  ---
+  Mon avis : oui publie, mais avant ca :
+  - Choisis si tu veux le scope @hawkeye ou un nom non-scope (genre hawkeye-ai)
+  au cas ou tu ne peux pas creer l'org
+  - Verifie que le README.md est a jour (c'est ce qui s'affiche sur npmjs.com) —
+  il l'est
+  - La version 0.1.0 est correcte pour une premiere release
+
+  Tu veux que je t'aide avec autre chose avant de publier, ou tu geres le npm
+  adduser de ton cote ?

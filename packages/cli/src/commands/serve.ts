@@ -9,6 +9,63 @@ import { randomUUID } from 'node:crypto';
 import { Storage } from '@hawkeye/core';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, getDefaultConfig, PROVIDER_MODELS } from '../config.js';
+import { loadTasks, saveTasks, createTask, readJournal, clearJournal, type Task } from './daemon.js';
+// ─── Request Validation ───────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function validateIngest(payload: any): string | null {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return 'Payload must be a JSON object';
+  }
+  if (payload.cost_usd !== undefined && typeof payload.cost_usd !== 'number') {
+    return 'cost_usd must be a number';
+  }
+  if (payload.duration_ms !== undefined && typeof payload.duration_ms !== 'number') {
+    return 'duration_ms must be a number';
+  }
+  if (payload.session_id !== undefined && typeof payload.session_id !== 'string') {
+    return 'session_id must be a string';
+  }
+  return null;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function validateSettings(payload: any): string | null {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return 'Settings must be a JSON object';
+  }
+  if (payload.guardrails !== undefined && !Array.isArray(payload.guardrails)) {
+    return 'guardrails must be an array';
+  }
+  if (payload.webhooks !== undefined && !Array.isArray(payload.webhooks)) {
+    return 'webhooks must be an array';
+  }
+  return null;
+}
+
+// ─── Rate Limiting ────────────────────────────────────────────
+const RATE_WINDOW_MS = 60_000; // 1 minute
+const RATE_MAX_REQUESTS = 600; // per IP per window (local tool, needs headroom for polling)
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return true;
+  }
+  entry.count++;
+  return entry.count <= RATE_MAX_REQUESTS;
+}
+
+// Clean up stale entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitMap) {
+    if (now > entry.resetAt) rateLimitMap.delete(ip);
+  }
+}, 300_000).unref();
 
 /**
  * Kill any existing process listening on the given port.
@@ -62,11 +119,14 @@ export const serveCommand = new Command('serve')
     }
 
     // Resolve dashboard dist directory
+    // Try two locations: (1) bundled inside CLI package (npm install), (2) monorepo sibling (dev)
     const currentDir = fileURLToPath(new URL('.', import.meta.url));
-    const dashboardDist = join(currentDir, '..', '..', '..', 'dashboard', 'dist');
+    const bundledDashboard = join(currentDir, '..', 'dashboard');
+    const monorepoSibling = join(currentDir, '..', '..', '..', 'dashboard', 'dist');
+    const dashboardDist = existsSync(bundledDashboard) ? bundledDashboard : monorepoSibling;
 
     if (!existsSync(dashboardDist)) {
-      console.error(chalk.red('Dashboard not built. Run `pnpm build` first.'));
+      console.error(chalk.red('Dashboard not found. Run `pnpm build` first.'));
       return;
     }
 
@@ -74,15 +134,26 @@ export const serveCommand = new Command('serve')
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       const url = req.url || '/';
+      const clientIp = req.socket.remoteAddress || '127.0.0.1';
 
-      // CORS headers
-      res.setHeader('Access-Control-Allow-Origin', '*');
+      // CORS — restrict to localhost origins
+      const origin = req.headers.origin || '';
+      const allowedOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ? origin : '';
+      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Vary', 'Origin');
 
       if (req.method === 'OPTIONS') {
         res.writeHead(204);
         res.end();
+        return;
+      }
+
+      // Rate limiting on API endpoints
+      if (url.startsWith('/api/') && !checkRateLimit(clientIp)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Too many requests. Try again later.' }));
         return;
       }
 
@@ -129,6 +200,36 @@ export const serveCommand = new Command('serve')
       }
     }
 
+    // Auto-close sessions inactive for 30+ minutes
+    const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+    let lastAutoCloseCheck = Date.now();
+    const autoCloseInterval = setInterval(() => {
+      const now = Date.now();
+      if (now - lastAutoCloseCheck < 60_000) return; // Check once per minute max
+      lastAutoCloseCheck = now;
+      try {
+        const result = storage.listSessions({ status: 'recording', limit: 100 });
+        if (!result.ok) return;
+        for (const s of result.value) {
+          // Get the latest event timestamp via direct query
+          const lastEventTime = (() => {
+            try {
+              const evts = storage.getEvents(s.id);
+              if (evts.ok && evts.value.length > 0) {
+                return new Date(evts.value[evts.value.length - 1].timestamp).getTime();
+              }
+            } catch {}
+            return new Date(s.started_at).getTime();
+          })();
+          if (now - lastEventTime > INACTIVITY_TIMEOUT_MS) {
+            storage.endSession(s.id, 'completed');
+            broadcast({ type: 'session_end', session: { id: s.id, status: 'completed', reason: 'inactivity' } });
+            console.log(chalk.dim(`  Auto-closed inactive session ${s.id.slice(0, 8)}`));
+          }
+        }
+      } catch {}
+    }, 30_000).unref();
+
     // Poll for new events and broadcast to WebSocket clients
     const sessionEventCounts = new Map<string, number>();
     const pollInterval = setInterval(() => {
@@ -158,7 +259,9 @@ export const serveCommand = new Command('serve')
             });
           }
         }
-      } catch {}
+      } catch (e) {
+        process.stderr.write(`hawkeye serve: poll error: ${String(e)}\n`);
+      }
     }, 1000);
 
     // Kill any stale hawkeye serve process on the target port
@@ -217,12 +320,26 @@ export const serveCommand = new Command('serve')
 
     tryListen();
 
-    process.on('SIGINT', () => {
+    // Graceful shutdown
+    function shutdown(signal: string) {
+      console.log(chalk.dim(`\n  Received ${signal}, shutting down...`));
       clearInterval(pollInterval);
+      clearInterval(autoCloseInterval);
       wss.close();
       storage.close();
-      server.close();
-      process.exit(0);
+      server.close(() => process.exit(0));
+      // Force exit after 5s if server doesn't close
+      setTimeout(() => process.exit(0), 5000).unref();
+    }
+
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('uncaughtException', (err) => {
+      process.stderr.write(`hawkeye serve: uncaught exception: ${err.message}\n`);
+      shutdown('uncaughtException');
+    });
+    process.on('unhandledRejection', (reason) => {
+      process.stderr.write(`hawkeye serve: unhandled rejection: ${String(reason)}\n`);
     });
   });
 
@@ -378,6 +495,40 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
       return;
     }
 
+    // GET /api/tasks — List all tasks from the task queue
+    if (url === '/api/tasks') {
+      const tasks = loadTasks(cwd || process.cwd());
+      res.writeHead(200);
+      res.end(JSON.stringify(tasks));
+      return;
+    }
+
+    // GET /api/tasks/journal — Read the persistent task journal (agent memory)
+    if (url === '/api/tasks/journal') {
+      const journal = readJournal(cwd || process.cwd());
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(journal);
+      return;
+    }
+
+    // GET /api/tasks/attachments/:filename — Serve task attachment images
+    const attachMatch = url.match(/^\/api\/tasks\/attachments\/(.+)$/);
+    if (attachMatch) {
+      const filename = decodeURIComponent(attachMatch[1]);
+      const filePath = join(cwd || process.cwd(), '.hawkeye', 'task-attachments', filename);
+      if (!existsSync(filePath)) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Attachment not found' }));
+        return;
+      }
+      const ext = extname(filePath).toLowerCase();
+      const mimeMap: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' };
+      res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
+      res.writeHead(200);
+      res.end(readFileSync(filePath));
+      return;
+    }
+
     // GET /api/pending-reviews — List pending review gate items
     if (url === '/api/pending-reviews') {
       const pendingFile = join(cwd || process.cwd(), '.hawkeye', 'pending-reviews.json');
@@ -420,6 +571,12 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
       // POST /api/ingest
       if (url === '/api/ingest') {
         const payload = JSON.parse(body);
+        const validationErr = validateIngest(payload);
+        if (validationErr) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: validationErr }));
+          return;
+        }
         const eventType = payload.event_type || payload.type || 'api_call';
         const data = payload.data || {};
         const costUsd = payload.cost_usd || 0;
@@ -604,8 +761,88 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
       // POST /api/settings — Save configuration
       if (url === '/api/settings') {
         const config = JSON.parse(body);
+        const settingsErr = validateSettings(config);
+        if (settingsErr) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: settingsErr }));
+          return;
+        }
         const cfgPath = join(cwd, '.hawkeye', 'config.json');
         writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // POST /api/tasks — Create a new task in the queue
+      if (url === '/api/tasks') {
+        const payload = JSON.parse(body);
+        if (!payload.prompt || typeof payload.prompt !== 'string' || !payload.prompt.trim()) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'prompt is required' }));
+          return;
+        }
+        const agent = payload.agent || 'claude';
+        const task = createTask(cwd, payload.prompt.trim(), agent);
+        // Handle image attachments
+        if (payload.attachments && Array.isArray(payload.attachments)) {
+          const attachDir = join(cwd, '.hawkeye', 'task-attachments');
+          if (!existsSync(attachDir)) mkdirSync(attachDir, { recursive: true });
+          const savedPaths: string[] = [];
+          for (const att of payload.attachments) {
+            if (att.data && att.name) {
+              const safeName = `${task.id.slice(0, 8)}-${att.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+              const filePath = join(attachDir, safeName);
+              const base64Data = att.data.replace(/^data:image\/\w+;base64,/, '');
+              writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
+              savedPaths.push(safeName);
+            }
+          }
+          if (savedPaths.length > 0) {
+            // Update task with attachment info and append paths to prompt for agent reference
+            const tasks = loadTasks(cwd);
+            const idx = tasks.findIndex((t) => t.id === task.id);
+            if (idx >= 0) {
+              (tasks[idx] as any).attachments = savedPaths;
+              saveTasks(cwd, tasks);
+            }
+            task.prompt += `\n\n[Attached images: ${savedPaths.map(p => join(cwd, '.hawkeye', 'task-attachments', p)).join(', ')}]`;
+          }
+        }
+        broadcast({ type: 'task_created', task });
+        res.writeHead(201);
+        res.end(JSON.stringify(task));
+        return;
+      }
+
+      // POST /api/tasks/:id/cancel — Cancel a pending task
+      const cancelMatch = url.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
+      if (cancelMatch) {
+        const taskId = cancelMatch[1];
+        const tasks = loadTasks(cwd);
+        const task = tasks.find((t) => t.id === taskId);
+        if (!task) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: 'Task not found' }));
+          return;
+        }
+        if (task.status !== 'pending') {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: `Cannot cancel task with status '${task.status}'` }));
+          return;
+        }
+        task.status = 'cancelled';
+        task.completedAt = new Date().toISOString();
+        saveTasks(cwd, tasks);
+        broadcast({ type: 'task_cancelled', task });
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // POST /api/tasks/journal/clear — Clear the task journal
+      if (url === '/api/tasks/journal/clear') {
+        clearJournal(cwd);
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
         return;

@@ -14,6 +14,7 @@ import {
   type HawkeyeConfig,
   type GuardrailRuleSetting,
 } from './config.js';
+import { loadTasks, createTask, saveTasks, readJournal, clearJournal, type Task } from './commands/daemon.js';
 
 const VERSION = '0.1.0';
 
@@ -68,6 +69,9 @@ const COMMANDS: SlashCommand[] = [
   { name: 'purge', desc: 'Delete ALL sessions (including old)' },
   { name: 'kill', desc: 'Kill hawkeye background processes' },
   { name: 'settings', desc: 'Configure Hawkeye' },
+  { name: 'tasks', desc: 'List & submit remote tasks' },
+  { name: 'remote', desc: 'Launch serve + daemon + tunnel (mobile access)' },
+  { name: 'remote stop', desc: 'Stop tunnel + daemon' },
   { name: 'serve', desc: 'Open dashboard :4242' },
   { name: 'mcp', desc: 'Show MCP server setup instructions' },
   { name: 'init', desc: 'Initialize Hawkeye (auto-runs on /new)' },
@@ -533,6 +537,14 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     await cmdCompare(dbPath, args);
   } else if (c === 'settings') {
     await cmdSettings(cwd);
+  } else if (c === 'tasks') {
+    await cmdTasks(cwd, args);
+  } else if (c === 'remote') {
+    if (args.trim() === 'stop') {
+      await cmdRemoteStop(cwd);
+    } else {
+      await cmdRemote(cwd);
+    }
   } else if (c === 'serve') {
     await cmdServe();
   } else if (c === 'mcp') {
@@ -2595,7 +2607,6 @@ async function settingsWebhooks(config: HawkeyeConfig, cwd: string): Promise<voi
   if (!config.webhooks) config.webhooks = [];
   const EVENTS = ['drift_critical', 'guardrail_block'];
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     console.log('');
     console.log(chalk.bold.white('  Webhooks'));
@@ -2634,7 +2645,7 @@ async function settingsWebhooks(config: HawkeyeConfig, cwd: string): Promise<voi
         console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(EVENTS[i])}`);
       }
       const evPick = await ask(`  ${o('›')} `);
-      let events: string[] = [];
+      let events: string[];
       if (evPick.trim()) {
         events = evPick.split(/[\s,]+/).map((n) => {
           const i = parseInt(n, 10) - 1;
@@ -2752,6 +2763,290 @@ async function cmdPurge(dbPath: string): Promise<void> {
   }
   console.log(chalk.green(`  ✓ Purged ${deleted} session${deleted > 1 ? 's' : ''}`));
   db.close();
+}
+
+// ─── Tasks command ──────────────────────────────────────────
+
+async function cmdTasks(cwd: string, args: string): Promise<void> {
+  const tasks = loadTasks(cwd);
+
+  if (args.trim() === 'new' || args.trim() === 'add') {
+    // Interactive task creation
+    const prompt = await rawPromptSingle('  Prompt: ');
+    if (!prompt.trim()) { console.log(chalk.dim('  Cancelled.')); return; }
+    const agent = await rawPromptSingle(`  Agent ${chalk.dim('(claude)')}: `) || 'claude';
+    const task = createTask(cwd, prompt.trim(), agent.trim() || 'claude');
+    console.log(`  ${chalk.green('✓')} Task created: ${o.bold(task.id.slice(0, 8))}`);
+    console.log(chalk.dim(`    Submit from phone: POST /api/tasks or use the dashboard`));
+    return;
+  }
+
+  if (args.trim() === 'clear') {
+    const completed = tasks.filter((t) => t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled');
+    const remaining = tasks.filter((t) => t.status === 'pending' || t.status === 'running');
+    saveTasks(cwd, remaining);
+    console.log(chalk.green(`  ✓ Cleared ${completed.length} finished tasks`));
+    return;
+  }
+
+  if (args.trim() === 'journal') {
+    const journal = readJournal(cwd);
+    if (!journal) { console.log(chalk.dim('  No journal yet. Tasks will be logged here after execution.')); return; }
+    console.log('');
+    console.log(`  ${o.bold('Task Journal')} ${chalk.dim('(agent memory)')}`);
+    console.log(chalk.dim('  ─'.repeat(25)));
+    console.log(journal);
+    return;
+  }
+
+  if (args.trim() === 'clear-journal') {
+    clearJournal(cwd);
+    console.log(chalk.green('  ✓ Journal cleared — agent memory reset'));
+    return;
+  }
+
+  if (tasks.length === 0) {
+    console.log(chalk.dim('  No tasks. Use /tasks new or submit from the dashboard.'));
+    return;
+  }
+
+  console.log('');
+  console.log(`  ${o.bold('Tasks')} ${chalk.dim(`(${tasks.length})`)}`);
+  console.log(chalk.dim('  ─'.repeat(25)));
+
+  const statusIcon: Record<string, string> = {
+    pending: chalk.yellow('⏳'),
+    running: chalk.blue('▶'),
+    completed: chalk.green('✓'),
+    failed: chalk.red('✗'),
+    cancelled: chalk.dim('⊘'),
+  };
+
+  for (const t of tasks.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())) {
+    const icon = statusIcon[t.status] || '·';
+    const shortId = t.id.slice(0, 8);
+    const promptPreview = t.prompt.length > 60 ? t.prompt.slice(0, 60) + '...' : t.prompt;
+    const statusColor = t.status === 'completed' ? chalk.green : t.status === 'failed' ? chalk.red : t.status === 'running' ? chalk.blue : chalk.yellow;
+    console.log(`  ${icon} ${o(shortId)} ${chalk.white(promptPreview)}`);
+    console.log(`    ${statusColor(t.status)} ${chalk.dim(t.agent)} ${chalk.dim(timeAgo(t.createdAt))}${t.exitCode !== undefined ? chalk.dim(` exit:${t.exitCode}`) : ''}`);
+  }
+  console.log('');
+  console.log(chalk.dim('  /tasks new — create  |  /tasks clear — remove finished  |  /tasks journal — view memory'));
+}
+
+async function rawPromptSingle(label: string): Promise<string> {
+  process.stdout.write(label);
+  return new Promise<string>((resolve) => {
+    let buf = '';
+    const onData = (data: Buffer) => {
+      const ch = data.toString();
+      if (ch === '\r' || ch === '\n') {
+        process.stdout.write('\n');
+        process.stdin.removeListener('data', onData);
+        resolve(buf);
+      } else if (ch === '\x7f' || ch === '\b') {
+        if (buf.length > 0) {
+          buf = buf.slice(0, -1);
+          process.stdout.write('\b \b');
+        }
+      } else if (ch === '\x03') {
+        resolve('');
+      } else if (ch >= ' ') {
+        buf += ch;
+        process.stdout.write(ch);
+      }
+    };
+    process.stdin.on('data', onData);
+  });
+}
+
+// ─── Remote command (serve + daemon + tunnel) ──────────────
+
+async function cmdRemote(cwd: string): Promise<void> {
+  const { spawn, execSync: execSyncLocal } = await import('node:child_process');
+  const http = await import('node:http');
+  const tunnelFile = join(cwd, '.hawkeye', 'tunnel.json');
+
+  console.log('');
+  console.log(`  ${o.bold('Hawkeye Remote')}`);
+  console.log(chalk.dim('  ─'.repeat(25)));
+
+  // 1. Check/start serve
+  let servePort = 0;
+  for (let p = 4242; p <= 4252; p++) {
+    const info = await new Promise<{ cwd?: string } | null>((resolve) => {
+      const req = http.get(`http://localhost:${p}/api/info`, { timeout: 500 }, (res) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk; });
+        res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+    if (info?.cwd === cwd) { servePort = p; break; }
+  }
+
+  if (servePort) {
+    console.log(`  ${chalk.green('✓')} Dashboard already running on port ${servePort}`);
+  } else {
+    servePort = 4242;
+    const serveChild = spawn(process.execPath, [process.argv[1], 'serve', '-p', String(servePort)], {
+      cwd,
+      stdio: 'ignore',
+      detached: true,
+      env: { ...process.env },
+    });
+    serveChild.unref();
+    console.log(`  ${chalk.green('✓')} Dashboard started on port ${servePort}`);
+    // Wait for it to be ready
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+
+  // 2. Check/start daemon
+  let daemonRunning = false;
+  try {
+    const ps = execSyncLocal('pgrep -f "hawkeye daemon"', { encoding: 'utf-8', timeout: 3000 }).trim();
+    daemonRunning = ps.length > 0;
+  } catch {}
+
+  if (daemonRunning) {
+    console.log(`  ${chalk.green('✓')} Daemon already running`);
+  } else {
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+    const daemonChild = spawn(process.execPath, [process.argv[1], 'daemon', '--interval', '5'], {
+      cwd,
+      stdio: 'ignore',
+      detached: true,
+      env,
+    });
+    daemonChild.unref();
+    console.log(`  ${chalk.green('✓')} Daemon started (poll every 5s)`);
+  }
+
+  // 3. Check if cloudflared is available
+  let hasCloudflared = false;
+  try {
+    execSyncLocal('which cloudflared', { encoding: 'utf-8', timeout: 3000 });
+    hasCloudflared = true;
+  } catch {}
+
+  if (!hasCloudflared) {
+    console.log(`  ${chalk.yellow('⚠')} cloudflared not found. Install with: ${chalk.cyan('brew install cloudflared')}`);
+    console.log(`  ${chalk.dim('Local access:')} ${chalk.cyan(`http://localhost:${servePort}`)}`);
+    console.log('');
+    return;
+  }
+
+  // 4. Check for existing tunnel
+  let existingUrl = '';
+  try {
+    if (existsSync(tunnelFile)) {
+      const tunnelData = JSON.parse(readFileSync(tunnelFile, 'utf-8'));
+      if (tunnelData.url && tunnelData.pid) {
+        // Check if the tunnel process is still alive
+        try {
+          process.kill(tunnelData.pid, 0);
+          existingUrl = tunnelData.url;
+        } catch {
+          // Process dead, clean up
+        }
+      }
+    }
+  } catch {}
+
+  if (existingUrl) {
+    console.log(`  ${chalk.green('✓')} Tunnel already active`);
+    console.log('');
+    console.log(`  ${o.bold('📱 Remote URL:')}`);
+    console.log(`  ${chalk.cyan.bold(existingUrl)}`);
+    console.log(`  ${chalk.cyan.bold(existingUrl + '/tasks')}`);
+    console.log('');
+    console.log(chalk.dim('  Open this URL on your phone to submit tasks remotely.'));
+    console.log(chalk.dim('  Use /tasks to see task status. /remote stop to shut down.'));
+    console.log('');
+    return;
+  }
+
+  // 5. Start new tunnel
+  console.log(`  ${chalk.dim('Starting tunnel...')}`);
+
+  const tunnelChild = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${servePort}`], {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+    env: { ...process.env },
+  });
+  tunnelChild.unref();
+
+  // Parse the tunnel URL from stderr (cloudflared outputs to stderr)
+  const tunnelUrl = await new Promise<string>((resolve) => {
+    let output = '';
+    const timeout = setTimeout(() => resolve(''), 20000);
+
+    const onData = (chunk: Buffer) => {
+      output += chunk.toString();
+      const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+      if (match) {
+        clearTimeout(timeout);
+        resolve(match[0]);
+      }
+    };
+
+    tunnelChild.stderr?.on('data', onData);
+    tunnelChild.stdout?.on('data', onData);
+    tunnelChild.on('error', () => { clearTimeout(timeout); resolve(''); });
+  });
+
+  if (!tunnelUrl) {
+    console.log(`  ${chalk.red('✗')} Failed to start tunnel`);
+    console.log(`  ${chalk.dim('Local access:')} ${chalk.cyan(`http://localhost:${servePort}`)}`);
+    console.log('');
+    return;
+  }
+
+  // Save tunnel info
+  const hawkDir = join(cwd, '.hawkeye');
+  if (!existsSync(hawkDir)) mkdirSync(hawkDir, { recursive: true });
+  writeFileSync(tunnelFile, JSON.stringify({ url: tunnelUrl, pid: tunnelChild.pid, port: servePort, startedAt: new Date().toISOString() }, null, 2));
+
+  console.log(`  ${chalk.green('✓')} Tunnel active`);
+  console.log('');
+  console.log(`  ${o.bold('📱 Remote URL:')}`);
+  console.log(`  ${chalk.cyan.bold(tunnelUrl)}`);
+  console.log(`  ${chalk.cyan.bold(tunnelUrl + '/tasks')}`);
+  console.log('');
+  console.log(chalk.dim('  Open this URL on your phone to submit tasks remotely.'));
+  console.log(chalk.dim('  Use /tasks to see task status. /remote stop to shut down.'));
+  console.log('');
+}
+
+async function cmdRemoteStop(cwd: string): Promise<void> {
+  const { execSync: execSyncLocal } = await import('node:child_process');
+  const tunnelFile = join(cwd, '.hawkeye', 'tunnel.json');
+
+  console.log('');
+  // Kill tunnel
+  try {
+    if (existsSync(tunnelFile)) {
+      const data = JSON.parse(readFileSync(tunnelFile, 'utf-8'));
+      if (data.pid) {
+        try { process.kill(data.pid, 'SIGTERM'); } catch {}
+      }
+      writeFileSync(tunnelFile, '{}');
+    }
+    execSyncLocal('pkill -f "cloudflared tunnel" 2>/dev/null || true', { timeout: 3000 });
+    console.log(`  ${chalk.green('✓')} Tunnel stopped`);
+  } catch {}
+
+  // Kill daemon
+  try {
+    execSyncLocal('pkill -f "hawkeye daemon" 2>/dev/null || true', { timeout: 3000 });
+    console.log(`  ${chalk.green('✓')} Daemon stopped`);
+  } catch {}
+
+  console.log(chalk.dim('  Dashboard left running (use /kill to stop it too)'));
+  console.log('');
 }
 
 async function cmdServe(): Promise<void> {

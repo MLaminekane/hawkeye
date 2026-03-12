@@ -81,7 +81,7 @@ export function ComparePage() {
         <Link to="/" className="font-mono text-xs text-hawk-text3 hover:text-hawk-orange transition-colors">
           ← Sessions
         </Link>
-        <h1 className="font-display text-2xl font-bold text-hawk-text mt-2">Compare Sessions</h1>
+        <h1 className="font-display text-xl sm:text-2xl font-bold text-hawk-text mt-2">Compare Sessions</h1>
         <p className="text-sm text-hawk-text3 mt-1">
           Select 2 or more sessions to compare side by side
         </p>
@@ -121,13 +121,13 @@ export function ComparePage() {
                   <span className="text-sm text-hawk-text flex-1 truncate">
                     {s.objective}
                   </span>
-                  <span className="font-mono text-[10px] text-hawk-text3 shrink-0">
+                  <span className="font-mono text-[10px] text-hawk-text3 shrink-0 hidden sm:inline">
                     {s.agent || 'unknown'}
                   </span>
-                  <span className="font-mono text-[10px] text-hawk-amber shrink-0">
+                  <span className="font-mono text-[10px] text-hawk-amber shrink-0 hidden sm:inline">
                     ${s.total_cost_usd.toFixed(4)}
                   </span>
-                  <span className="font-mono text-[10px] text-hawk-text3 shrink-0">
+                  <span className="font-mono text-[10px] text-hawk-text3 shrink-0 hidden sm:inline">
                     {s.total_actions}a
                   </span>
                 </button>
@@ -160,7 +160,7 @@ export function ComparePage() {
 
       {/* Comparison results */}
       {comparisons && comparisons.length >= 2 && (
-        <div className="space-y-6">
+        <div className="space-y-3 sm:space-y-6">
           {/* Reset button */}
           <button
             onClick={() => {
@@ -174,7 +174,8 @@ export function ComparePage() {
           </button>
 
           {/* Summary cards */}
-          <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${comparisons.length}, 1fr)` }}>
+          <div className="compare-summary-grid grid grid-cols-1 gap-3 sm:gap-4">
+          <style>{`@media(min-width:640px){.compare-summary-grid{grid-template-columns:repeat(${comparisons.length},1fr)!important}}`}</style>
             {comparisons.map((c) => (
               <div
                 key={c.session.id}
