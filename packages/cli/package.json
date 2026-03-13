@@ -1,6 +1,6 @@
 {
   "name": "hawkeye-ai",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "The flight recorder for AI agents - observability and security for Claude Code, Aider, AutoGPT and more",
   "license": "MIT",
   "homepage": "https://github.com/MLaminekane/hawkeye#readme",
