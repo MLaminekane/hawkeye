@@ -47,26 +47,26 @@ Hawkeye is a **flight recorder** for AI agents. It captures every action an agen
 ### npm (recommended)
 
 ```bash
-npm install -g @mklamine/hawkeye-cli
+npm install -g hawkeye-ai
 ```
 
 ### npx (no install)
 
 ```bash
-npx @mklamine/hawkeye-cli
+npx hawkeye-ai
 ```
 
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew tap mklamine/hawkeye
+brew tap MLaminekane/hawkeye
 brew install hawkeye
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/lamine/hawkeye.git
+git clone https://github.com/MLaminekane/hawkeye.git
 cd hawkeye
 pnpm install && pnpm build
 cd packages/cli && npm link
@@ -552,17 +552,14 @@ pnpm --filter @hawkeye/cli build       # Build only CLI
 
 ### npm
 
-Hawkeye is published as two packages on npm:
-
-- [`@mklamine/hawkeye-core`](https://www.npmjs.com/package/@mklamine/hawkeye-core) — Core SDK
-- [`@mklamine/hawkeye-cli`](https://www.npmjs.com/package/@mklamine/hawkeye-cli) — CLI with bundled dashboard
+Hawkeye is published on npm as [`hawkeye-ai`](https://www.npmjs.com/package/hawkeye-ai).
 
 ```bash
 # Build everything
 pnpm build
 
-# Publish (pnpm resolves workspace:* to real versions)
-pnpm -r publish --access public --no-git-checks
+# Publish CLI (includes bundled dashboard)
+cd packages/cli && npm publish
 ```
 
 The CLI `prepack` script automatically copies the dashboard build into the CLI package so it ships as a single installable.
@@ -575,8 +572,8 @@ To distribute via Homebrew, create a tap repository (e.g. `homebrew-hawkeye`) wi
 # Formula/hawkeye.rb
 class Hawkeye < Formula
   desc "The flight recorder for AI agents"
-  homepage "https://github.com/mklamine/hawkeye"
-  url "https://registry.npmjs.org/@mklamine/hawkeye-cli/-/hawkeye-cli-0.1.1.tgz"
+  homepage "https://github.com/MLaminekane/hawkeye"
+  url "https://registry.npmjs.org/hawkeye-ai/-/hawkeye-ai-0.1.3.tgz"
   sha256 "SHA256_OF_TARBALL"
 
   depends_on "node@20"
@@ -596,10 +593,10 @@ Then:
 
 ```bash
 # Create the tap repo
-gh repo create mklamine/homebrew-hawkeye --public
+gh repo create MLaminekane/homebrew-hawkeye --public
 
 # Users install with:
-brew tap mklamine/hawkeye
+brew tap MLaminekane/hawkeye
 brew install hawkeye
 ```
 
