@@ -56,11 +56,12 @@ export class RecordOverlay {
   /** One-time static banner printed at the start of recording. */
   private renderBanner(): void {
     const s = this.state;
-    const W = 64;
+    // Adapt to terminal width, clamp between 40 and 100
+    const W = Math.min(Math.max(40, (process.stderr.columns || 80) - 4), 100);
     const sid = s.sessionId.slice(0, 8);
 
     const title = ` Hawkeye Recording `;
-    const topPad = W - title.length - 1;
+    const topPad = Math.max(0, W - title.length + 1);
     const top = o(`┌─${title}${'─'.repeat(topPad)}┐`);
     const row1 = padLine(`Session: ${chalk.cyan(sid)}  │  Agent: ${chalk.white(s.agent)}  │  ${o('● REC')}`, W);
     const row2 = padLine(`Objective: ${chalk.dim(truncate(s.objective, W - 14))}`, W);
@@ -104,9 +105,9 @@ export class RecordOverlay {
 }
 
 function padLine(content: string, width: number): string {
-  // Strip ANSI for length calculation
+  // Strip ALL ANSI escape sequences (CSI, OSC, etc.) for accurate length
   // eslint-disable-next-line no-control-regex
-  const stripped = content.replace(/\x1B\[[0-9;]*m/g, '');
+  const stripped = content.replace(/\x1B\[[^m]*m/g, '');
   const pad = Math.max(0, width - stripped.length);
   return `${o('│')} ${content}${' '.repeat(pad)} ${o('│')}`;
 }

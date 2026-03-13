@@ -1,14 +1,15 @@
 import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { join, extname } from 'node:path';
-import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'node:fs';
+import { join, extname, resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync, watch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { exec, execSync } from 'node:child_process';
+import { exec, execFile, execSync, spawn } from 'node:child_process';
 import chalk from 'chalk';
 import { randomUUID } from 'node:crypto';
 import { Storage } from '@hawkeye/core';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { loadConfig, getDefaultConfig, PROVIDER_MODELS } from '../config.js';
+import { loadConfig, getDefaultConfig, PROVIDER_MODELS, getDeveloperName } from '../config.js';
+import { generatePdfBuffer } from './export.js';
 import { loadTasks, saveTasks, createTask, readJournal, clearJournal, type Task } from './daemon.js';
 // ─── Request Validation ───────────────────────────────────────
 
@@ -42,30 +43,6 @@ function validateSettings(payload: any): string | null {
   }
   return null;
 }
-
-// ─── Rate Limiting ────────────────────────────────────────────
-const RATE_WINDOW_MS = 60_000; // 1 minute
-const RATE_MAX_REQUESTS = 600; // per IP per window (local tool, needs headroom for polling)
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const entry = rateLimitMap.get(ip);
-  if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
-    return true;
-  }
-  entry.count++;
-  return entry.count <= RATE_MAX_REQUESTS;
-}
-
-// Clean up stale entries every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, entry] of rateLimitMap) {
-    if (now > entry.resetAt) rateLimitMap.delete(ip);
-  }
-}, 300_000).unref();
 
 /**
  * Kill any existing process listening on the given port.
@@ -150,12 +127,8 @@ export const serveCommand = new Command('serve')
         return;
       }
 
-      // Rate limiting on API endpoints
-      if (url.startsWith('/api/') && !checkRateLimit(clientIp)) {
-        res.writeHead(429, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Too many requests. Try again later.' }));
-        return;
-      }
+      // Rate limiting disabled — this is a local dev tool, not a public API.
+      // Browser polling + hooks + dashboard + CLI can easily exceed any limit.
 
       // API routes
       if (url.startsWith('/api/')) {
@@ -279,7 +252,7 @@ export const serveCommand = new Command('serve')
       server.listen(currentPort, () => {
         console.log('');
         console.log(chalk.green('  Hawkeye Dashboard'));
-        console.log(chalk.dim('  ─'.repeat(25)));
+        console.log(chalk.dim('  ' + '─'.repeat(Math.min(50, (process.stdout.columns || 60) - 4))));
         if (currentPort !== port) {
           console.log(`  ${chalk.yellow('⚠')} Port ${port} was in use, using ${currentPort} instead`);
         }
@@ -290,12 +263,15 @@ export const serveCommand = new Command('serve')
         console.log(chalk.dim('  Press Ctrl+C to stop'));
         console.log('');
 
-        // Auto-open browser if configured
-        const cfg = loadConfig(cwd);
-        if (cfg.dashboard?.openBrowser !== false) {
-          const url = `http://localhost:${currentPort}`;
-          const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-          exec(`${cmd} ${url}`, () => {});
+        // Auto-open browser if configured (skip on auto-reload restarts)
+        const isReload = process.env.HAWKEYE_RELOAD === '1';
+        if (!isReload) {
+          const cfg = loadConfig(cwd);
+          if (cfg.dashboard?.openBrowser !== false) {
+            const url = `http://localhost:${currentPort}`;
+            const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+            exec(`${cmd} ${url}`, () => {});
+          }
         }
       });
 
@@ -319,6 +295,60 @@ export const serveCommand = new Command('serve')
     }
 
     tryListen();
+
+    // ─── Auto-reload on build ──────────────────────────────────
+    // Watch CLI dist/ for changes (triggers on `pnpm build`)
+    // When detected, gracefully restart the server process
+    const cliDistDir = join(currentDir, '..');
+    let reloadDebounce: ReturnType<typeof setTimeout> | null = null;
+    let isRestarting = false;
+
+    function scheduleReload(changedFile: string) {
+      if (isRestarting) return;
+      if (reloadDebounce) clearTimeout(reloadDebounce);
+      reloadDebounce = setTimeout(() => {
+        isRestarting = true;
+        console.log('');
+        console.log(chalk.cyan(`  ↻ Build detected (${changedFile}), restarting server...`));
+
+        // Restart: spawn a new serve process and exit current
+        const child = spawn(process.execPath, process.argv.slice(1), {
+          cwd: process.cwd(),
+          stdio: 'inherit',
+          detached: true,
+          env: { ...process.env, HAWKEYE_RELOAD: '1' },
+        });
+        child.unref();
+
+        // Give the new process a moment to bind, then exit
+        clearInterval(pollInterval);
+        clearInterval(autoCloseInterval);
+        wss.close();
+        storage.close();
+        server.close(() => process.exit(0));
+        setTimeout(() => process.exit(0), 2000).unref();
+      }, 1500); // 1.5s debounce — build writes multiple files
+    }
+
+    // Watch CLI dist (API code changes)
+    try {
+      watch(cliDistDir, { recursive: false }, (_event, filename) => {
+        if (filename && filename.endsWith('.js')) {
+          scheduleReload(filename);
+        }
+      });
+    } catch {}
+
+    // Watch dashboard dist (UI changes) — just for the WebSocket reload signal
+    try {
+      watch(dashboardDist, { recursive: false }, (_event, filename) => {
+        if (filename && (filename.endsWith('.js') || filename.endsWith('.css'))) {
+          // Dashboard files are read from disk per-request, so no restart needed
+          // But broadcast a reload signal to connected dashboard clients
+          broadcast({ type: 'session_end' as any, session: { id: '__reload__', status: 'reload' } });
+        }
+      });
+    } catch {}
 
     // Graceful shutdown
     function shutdown(signal: string) {
@@ -446,6 +476,36 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
       return;
     }
 
+    // GET /api/sessions/:id/export-pdf
+    const pdfMatch = url.match(/^\/api\/sessions\/([^/]+)\/export-pdf$/);
+    if (pdfMatch) {
+      const sResult = storage.getSession(pdfMatch[1]);
+      if (!sResult.ok || !sResult.value) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Session not found' }));
+        return;
+      }
+      const sess = sResult.value;
+      const evts = storage.getEvents(sess.id);
+      const drifts = storage.getDriftSnapshots(sess.id);
+      const costByFile = storage.getCostByFile(sess.id);
+      generatePdfBuffer(
+        sess,
+        evts.ok ? evts.value : [],
+        drifts.ok ? drifts.value : [],
+        costByFile.ok ? costByFile.value : [],
+      ).then((buf) => {
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="hawkeye-${sess.id.slice(0, 8)}.pdf"`);
+        res.writeHead(200);
+        res.end(buf);
+      }).catch((err) => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: `PDF generation failed: ${String(err)}` }));
+      });
+      return;
+    }
+
     // GET /api/settings
     if (url === '/api/settings') {
       const config = loadConfig(cwd || process.cwd());
@@ -495,6 +555,19 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
       return;
     }
 
+    // GET /api/analytics/developers — Cross-developer analytics
+    if (url === '/api/analytics/developers') {
+      const result = storage.getDevAnalytics();
+      if (result.ok) {
+        res.writeHead(200);
+        res.end(JSON.stringify(result.value));
+      } else {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: result.error.message }));
+      }
+      return;
+    }
+
     // GET /api/tasks — List all tasks from the task queue
     if (url === '/api/tasks') {
       const tasks = loadTasks(cwd || process.cwd());
@@ -515,7 +588,13 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
     const attachMatch = url.match(/^\/api\/tasks\/attachments\/(.+)$/);
     if (attachMatch) {
       const filename = decodeURIComponent(attachMatch[1]);
-      const filePath = join(cwd || process.cwd(), '.hawkeye', 'task-attachments', filename);
+      const attachDir = resolve(cwd || process.cwd(), '.hawkeye', 'task-attachments');
+      const filePath = resolve(attachDir, filename);
+      if (!filePath.startsWith(attachDir + '/')) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: 'Forbidden' }));
+        return;
+      }
       if (!existsSync(filePath)) {
         res.writeHead(404);
         res.end(JSON.stringify({ error: 'Attachment not found' }));
@@ -596,6 +675,7 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
               agent: payload.agent || 'external',
               model: payload.model,
               workingDir: payload.working_dir || process.cwd(),
+              developer: payload.developer || getDeveloperName(),
             },
             totalCostUsd: 0,
             totalTokens: 0,
@@ -742,8 +822,9 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         }
 
         // Strategy 2: Use git checkout to restore the file
-        exec(
-          `git checkout HEAD -- "${filePath}"`,
+        execFile(
+          'git',
+          ['checkout', 'HEAD', '--', filePath],
           { cwd },
           (err) => {
             if (err) {
@@ -954,7 +1035,15 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
 }
 
 function serveStatic(url: string, distDir: string, res: ServerResponse): void {
-  let filePath = join(distDir, url === '/' ? 'index.html' : url);
+  const resolvedDir = resolve(distDir);
+  let filePath = resolve(distDir, url === '/' ? 'index.html' : url.replace(/^\//, ''));
+
+  // Path traversal protection
+  if (!filePath.startsWith(resolvedDir + '/') && filePath !== resolvedDir) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
 
   // SPA fallback: if file doesn't exist, serve index.html
   if (!existsSync(filePath) || statSync(filePath).isDirectory()) {

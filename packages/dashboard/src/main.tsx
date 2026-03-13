@@ -8,21 +8,26 @@ import { LiveSessionPage } from './pages/LiveSessionPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { ComparePage } from './pages/ComparePage';
 import { TasksPage } from './pages/TasksPage';
+import { AnalyticsPage } from './pages/AnalyticsPage';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route path="/" element={<SessionsPage />} />
-          <Route path="/session/:id" element={<SessionDetailPage />} />
-          <Route path="/live" element={<LiveSessionPage />} />
-          <Route path="/compare" element={<ComparePage />} />
-          <Route path="/tasks" element={<TasksPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route path="/" element={<SessionsPage />} />
+            <Route path="/session/:id" element={<ErrorBoundary><SessionDetailPage /></ErrorBoundary>} />
+            <Route path="/live" element={<LiveSessionPage />} />
+            <Route path="/compare" element={<ComparePage />} />
+            <Route path="/tasks" element={<TasksPage />} />
+            <Route path="/analytics" element={<AnalyticsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>,
 );

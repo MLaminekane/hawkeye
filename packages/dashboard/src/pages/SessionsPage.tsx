@@ -71,6 +71,7 @@ export function SessionsPage() {
       result = result.filter((s) =>
         s.objective.toLowerCase().includes(q) ||
         (s.agent || '').toLowerCase().includes(q) ||
+        (s.developer || '').toLowerCase().includes(q) ||
         s.id.includes(q)
       );
     }
@@ -299,6 +300,11 @@ function SessionCard({ session: s }: { session: SessionData }) {
         {s.agent && (
           <span className="rounded bg-hawk-surface3 px-1.5 py-0.5 font-mono text-[10px] text-hawk-text3">
             {s.agent}
+          </span>
+        )}
+        {s.developer && (
+          <span className="rounded bg-hawk-orange/10 px-1.5 py-0.5 font-mono text-[10px] text-hawk-orange/70">
+            {s.developer}
           </span>
         )}
 

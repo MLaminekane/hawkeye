@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 
 // ─── Shape (matches dashboard SettingsData & serve getDefaultConfig) ─────
@@ -227,4 +228,15 @@ export function loadConfig(cwd: string): HawkeyeConfig {
 export function saveConfig(cwd: string, config: HawkeyeConfig): void {
   const p = configPath(cwd);
   writeFileSync(p, JSON.stringify(config, null, 2), 'utf-8');
+}
+
+// ─── Developer identity ───────────────────────────────────────
+
+/** Get the current developer name from git config or OS user. */
+export function getDeveloperName(): string {
+  try {
+    return execSync('git config user.name', { encoding: 'utf-8', timeout: 3000 }).trim();
+  } catch {
+    return process.env.USER || process.env.USERNAME || 'unknown';
+  }
 }

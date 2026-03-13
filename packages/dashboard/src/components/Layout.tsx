@@ -25,6 +25,7 @@ export function Layout() {
     { to: '/live', label: 'Live' },
     { to: '/compare', label: 'Compare' },
     { to: '/tasks', label: 'Tasks' },
+    { to: '/analytics', label: 'Analytics' },
     { to: '/settings', label: 'Settings' },
   ];
 

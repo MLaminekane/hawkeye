@@ -14,6 +14,20 @@ export interface SessionData {
   total_tokens: number;
   total_actions: number;
   final_drift_score: number | null;
+  developer: string | null;
+}
+
+export interface DeveloperAnalyticsData {
+  developer: string;
+  total_sessions: number;
+  completed_sessions: number;
+  aborted_sessions: number;
+  total_actions: number;
+  total_cost_usd: number;
+  total_tokens: number;
+  avg_drift_score: number;
+  first_session: string | null;
+  last_session: string | null;
 }
 
 export interface EventData {
@@ -182,6 +196,9 @@ export const api = {
 
   clearTaskJournal: () =>
     postJson<{ ok: boolean }>(`${API_BASE}/tasks/journal/clear`, {}),
+
+  getDevAnalytics: () =>
+    fetchJson<DeveloperAnalyticsData[]>(`${API_BASE}/analytics/developers`),
 };
 
 // ─── WebSocket client ────────────────────────────────────────

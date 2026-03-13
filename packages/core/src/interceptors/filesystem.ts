@@ -16,6 +16,11 @@ const DEFAULT_IGNORED = [
   '**/*.db-journal',
   '**/*.db-wal',
   '**/*.db-shm',
+  // Agent internal files — not real user actions
+  '**/.aider*',           // Aider chat history, input history, tags cache
+  '**/.cursor/**',        // Cursor internal state
+  '**/.claude/**',        // Claude Code internal state
+  '**/.codex/**',         // Codex internal state
 ];
 
 export type FileCallback = (event: FileEvent) => void;
@@ -138,8 +143,11 @@ export function createFilesystemInterceptor(
 
       const blockedSegments = [
         '.hawkeye', 'node_modules', '.git', '.turbo', 'dist',
+        '.cursor', '.claude', '.codex',
         ...(opts.extraBlockedSegments ?? []),
       ];
+      // File prefixes to ignore (e.g. .aider.chat.history.md)
+      const blockedPrefixes = ['.aider'];
       const blockedExtensions = [
         '.db', '.db-journal', '.db-wal', '.db-shm',
         ...(opts.extraBlockedExtensions ?? []),
@@ -152,6 +160,11 @@ export function createFilesystemInterceptor(
           }
           for (const ext of blockedExtensions) {
             if (filePath.endsWith(ext)) return true;
+          }
+          // Check file basename prefixes (e.g. .aider.chat.history.md)
+          const basename = filePath.split('/').pop() || '';
+          for (const prefix of blockedPrefixes) {
+            if (basename.startsWith(prefix)) return true;
           }
           return false;
         },

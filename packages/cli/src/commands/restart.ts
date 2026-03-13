@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import chalk from 'chalk';
 import { Storage } from '@hawkeye/core';
+import { getDeveloperName } from '../config.js';
 
 export const restartCommand = new Command('restart')
   .description('Restart a session (re-open a completed session or end active ones and start fresh)')
@@ -75,6 +76,7 @@ export const restartCommand = new Command('restart')
         agent,
         model,
         workingDir: cwd,
+        developer: getDeveloperName(),
       },
       totalCostUsd: 0,
       totalTokens: 0,

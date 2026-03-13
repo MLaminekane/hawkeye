@@ -1,15 +1,16 @@
 import { Command } from 'commander';
 import { join } from 'node:path';
-import { existsSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, writeFileSync } from 'node:fs';
 import chalk from 'chalk';
+import PDFDocument from 'pdfkit';
 import { Storage, type SessionRow, type EventRow } from '@hawkeye/core';
 
 export const exportCommand = new Command('export')
   .description('Export a session report')
   .argument('<session-id>', 'Session ID (or prefix)')
-  .option('-f, --format <type>', 'Output format: json or html', 'html')
+  .option('-f, --format <type>', 'Output format: json, html, or pdf', 'html')
   .option('-o, --output <file>', 'Output file path')
-  .action((sessionIdPrefix: string, options) => {
+  .action(async (sessionIdPrefix: string, options) => {
     const cwd = process.cwd();
     const dbPath = join(cwd, '.hawkeye', 'traces.db');
 
@@ -37,6 +38,7 @@ export const exportCommand = new Command('export')
 
     const eventsResult = storage.getEvents(session.id);
     const driftResult = storage.getDriftSnapshots(session.id);
+    const costByFileResult = storage.getCostByFile(session.id);
     storage.close();
 
     if (!eventsResult.ok) {
@@ -46,8 +48,10 @@ export const exportCommand = new Command('export')
 
     const events = eventsResult.value;
     const drifts = driftResult.ok ? driftResult.value : [];
+    const costByFile = costByFileResult.ok ? costByFileResult.value : [];
     const format = options.format || 'html';
-    const defaultExt = format === 'json' ? '.json' : '.html';
+    const extMap: Record<string, string> = { json: '.json', html: '.html', pdf: '.pdf' };
+    const defaultExt = extMap[format] || '.html';
     const outputPath = options.output || `hawkeye-${session.id.slice(0, 8)}${defaultExt}`;
 
     if (format === 'json') {
@@ -62,6 +66,8 @@ export const exportCommand = new Command('export')
         generator: 'hawkeye-cli',
       };
       writeFileSync(outputPath, JSON.stringify(data, null, 2));
+    } else if (format === 'pdf') {
+      await generatePdfReport(outputPath, session, events, drifts, costByFile);
     } else {
       const html = generateHtmlReport(
         session as unknown as Record<string, unknown>,
@@ -76,6 +82,330 @@ export const exportCommand = new Command('export')
     console.log(chalk.dim(`  Session: ${session.id.slice(0, 8)} — ${session.objective}`));
     console.log(chalk.dim(`  Events: ${events.length}`));
   });
+
+// ─── PDF Report ──────────────────────────────────────────────
+
+const PDF_COLORS = {
+  bg: '#09090B',
+  surface: '#111117',
+  surface2: '#18181F',
+  border: '#242430',
+  text: '#E0E0EA',
+  text2: '#9898A8',
+  text3: '#5A5A6E',
+  orange: '#FF5F1F',
+  green: '#22C55E',
+  amber: '#F0A830',
+  red: '#EF4444',
+  blue: '#3B82F6',
+  purple: '#A78BFA',
+  cyan: '#06B6D4',
+};
+
+export async function generatePdfReport(
+  outputPath: string,
+  session: SessionRow,
+  events: EventRow[],
+  drifts: Array<{ score: number; flag: string; reason: string; created_at: string }>,
+  costByFile: Array<{ path: string; cost: number; edits: number }>,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: 'A4',
+      margins: { top: 50, bottom: 50, left: 40, right: 40 },
+      bufferPages: true,
+    });
+
+    const stream = createWriteStream(outputPath);
+    doc.pipe(stream);
+
+    const pageW = doc.page.width - 80; // usable width
+    const startTime = new Date(session.started_at).getTime();
+
+    // ── Header ──
+    doc.rect(0, 0, doc.page.width, 110).fill(PDF_COLORS.surface);
+    doc.rect(40, 30, 4, 50).fill(PDF_COLORS.orange);
+
+    doc.fontSize(20).fillColor(PDF_COLORS.text);
+    doc.text('Hawkeye Session Report', 54, 32, { width: pageW - 14 });
+
+    doc.fontSize(11).fillColor(PDF_COLORS.text2);
+    doc.text(session.objective, 54, 56, { width: pageW - 14 });
+
+    // Status badge
+    const statusColors: Record<string, string> = {
+      completed: PDF_COLORS.green,
+      aborted: PDF_COLORS.red,
+      recording: PDF_COLORS.orange,
+      paused: PDF_COLORS.amber,
+    };
+    const statusColor = statusColors[session.status] || PDF_COLORS.text3;
+    doc.fontSize(8).fillColor(statusColor);
+    doc.text(session.status.toUpperCase(), 54, 78);
+
+    // ── Stats bar ──
+    doc.y = 120;
+    const stats = [
+      { label: 'Session', value: session.id.slice(0, 8) },
+      { label: 'Agent', value: session.agent || 'unknown' },
+      { label: 'Developer', value: session.developer || 'unknown' },
+      { label: 'Duration', value: formatDuration(session.started_at, session.ended_at) },
+      { label: 'Actions', value: String(session.total_actions || events.length) },
+      { label: 'Cost', value: `$${(session.total_cost_usd || 0).toFixed(4)}` },
+      { label: 'Tokens', value: formatNumber(session.total_tokens || 0) },
+    ];
+    if (session.final_drift_score != null) {
+      stats.push({ label: 'Drift', value: `${session.final_drift_score}/100` });
+    }
+
+    const statW = pageW / stats.length;
+    stats.forEach((s, i) => {
+      const x = 40 + i * statW;
+      doc.fontSize(7).fillColor(PDF_COLORS.text3);
+      doc.text(s.label.toUpperCase(), x, 120, { width: statW });
+      doc.fontSize(9).fillColor(PDF_COLORS.text);
+      doc.text(s.value, x, 132, { width: statW });
+    });
+
+    // ── Separator ──
+    doc.moveTo(40, 150).lineTo(40 + pageW, 150).strokeColor(PDF_COLORS.border).stroke();
+    doc.y = 160;
+
+    // ── Event Timeline Table ──
+    doc.fontSize(13).fillColor(PDF_COLORS.orange);
+    doc.text('Event Timeline', 40, doc.y);
+    doc.y += 8;
+
+    // Table header
+    const cols = [
+      { label: 'TIME', w: 50 },
+      { label: 'TYPE', w: 55 },
+      { label: 'EVENT', w: pageW - 185 },
+      { label: 'COST', w: 50 },
+      { label: 'DRIFT', w: 30 },
+    ];
+
+    let y = doc.y;
+
+    function drawTableHeader() {
+      doc.rect(40, y, pageW, 16).fill(PDF_COLORS.surface2);
+      let x = 44;
+      for (const col of cols) {
+        doc.fontSize(6).fillColor(PDF_COLORS.text3);
+        doc.text(col.label, x, y + 5, { width: col.w });
+        x += col.w;
+      }
+      y += 18;
+    }
+
+    drawTableHeader();
+
+    // Table rows
+    const maxEvents = Math.min(events.length, 200); // Cap for very long sessions
+    for (let i = 0; i < maxEvents; i++) {
+      const e = events[i];
+      const data = JSON.parse(e.data);
+      const elapsed = formatElapsed(new Date(e.timestamp).getTime() - startTime);
+      const { label, color } = getTypeStyle(e.type);
+      const summary = getEventSummary(e.type, data, e as unknown as Record<string, unknown>);
+      const cost = e.cost_usd > 0 ? `$${e.cost_usd.toFixed(4)}` : '';
+      const drift = e.drift_score != null ? String(Math.round(e.drift_score)) : '';
+
+      // Check page break
+      if (y > doc.page.height - 80) {
+        doc.addPage();
+        y = 50;
+        drawTableHeader();
+      }
+
+      // Alternating row bg
+      if (i % 2 === 0) {
+        doc.rect(40, y, pageW, 14).fill('#0D0D12');
+      }
+
+      let x = 44;
+      doc.fontSize(7).fillColor(PDF_COLORS.text3);
+      doc.text(elapsed, x, y + 4, { width: cols[0].w });
+      x += cols[0].w;
+
+      doc.fillColor(color);
+      doc.text(label, x, y + 4, { width: cols[1].w });
+      x += cols[1].w;
+
+      doc.fillColor(PDF_COLORS.text);
+      doc.text(summary.slice(0, 80), x, y + 4, { width: cols[2].w });
+      x += cols[2].w;
+
+      doc.fillColor(PDF_COLORS.amber);
+      doc.text(cost, x, y + 4, { width: cols[3].w });
+      x += cols[3].w;
+
+      doc.fillColor(PDF_COLORS.text2);
+      doc.text(drift, x, y + 4, { width: cols[4].w });
+
+      y += 14;
+    }
+
+    if (events.length > maxEvents) {
+      doc.fontSize(7).fillColor(PDF_COLORS.text3);
+      doc.text(`... and ${events.length - maxEvents} more events`, 44, y + 4);
+      y += 18;
+    }
+
+    // ── Cost by File ──
+    if (costByFile.length > 0) {
+      if (y > doc.page.height - 120) {
+        doc.addPage();
+        y = 50;
+      }
+
+      y += 10;
+      doc.moveTo(40, y).lineTo(40 + pageW, y).strokeColor(PDF_COLORS.border).stroke();
+      y += 12;
+
+      doc.fontSize(13).fillColor(PDF_COLORS.orange);
+      doc.text('Cost by File', 40, y);
+      y += 22;
+
+      const topFiles = costByFile.slice(0, 15);
+      for (const f of topFiles) {
+        if (y > doc.page.height - 60) {
+          doc.addPage();
+          y = 50;
+        }
+        const barWidth = Math.max(2, (f.cost / (costByFile[0].cost || 1)) * (pageW * 0.4));
+        doc.rect(40, y, barWidth, 10).fill(PDF_COLORS.orange + '30');
+        doc.rect(40, y, barWidth, 10).strokeColor(PDF_COLORS.orange + '60').stroke();
+
+        const shortPath = f.path.length > 60 ? '...' + f.path.slice(-57) : f.path;
+        doc.fontSize(7).fillColor(PDF_COLORS.text);
+        doc.text(shortPath, 44, y + 2, { width: pageW * 0.6 });
+        doc.fillColor(PDF_COLORS.amber);
+        doc.text(`$${f.cost.toFixed(4)}  (${f.edits} edits)`, 40 + pageW * 0.7, y + 2, { width: pageW * 0.3, align: 'right' });
+        y += 16;
+      }
+    }
+
+    // ── Drift History ──
+    if (drifts.length > 0) {
+      if (y > doc.page.height - 120) {
+        doc.addPage();
+        y = 50;
+      }
+
+      y += 10;
+      doc.moveTo(40, y).lineTo(40 + pageW, y).strokeColor(PDF_COLORS.border).stroke();
+      y += 12;
+
+      doc.fontSize(13).fillColor(PDF_COLORS.orange);
+      doc.text('Drift Score History', 40, y);
+      y += 22;
+
+      // Simple text-based drift timeline
+      const chartH = 60;
+      const chartW = pageW;
+
+      // Draw chart axes
+      doc.moveTo(40, y).lineTo(40, y + chartH).strokeColor(PDF_COLORS.border).stroke();
+      doc.moveTo(40, y + chartH).lineTo(40 + chartW, y + chartH).strokeColor(PDF_COLORS.border).stroke();
+
+      // Y-axis labels
+      doc.fontSize(6).fillColor(PDF_COLORS.text3);
+      doc.text('100', 20, y - 2);
+      doc.text('50', 24, y + chartH / 2 - 4);
+      doc.text('0', 28, y + chartH - 2);
+
+      // Threshold lines
+      const warnY = y + chartH * (1 - 60 / 100);
+      const critY = y + chartH * (1 - 30 / 100);
+      doc.moveTo(40, warnY).lineTo(40 + chartW, warnY).dash(3, { space: 3 }).strokeColor(PDF_COLORS.amber + '60').stroke();
+      doc.moveTo(40, critY).lineTo(40 + chartW, critY).dash(3, { space: 3 }).strokeColor(PDF_COLORS.red + '60').stroke();
+      doc.undash();
+
+      // Plot points
+      if (drifts.length > 1) {
+        const stepX = chartW / (drifts.length - 1);
+        doc.moveTo(40, y + chartH * (1 - drifts[0].score / 100));
+        for (let i = 1; i < drifts.length; i++) {
+          const px = 40 + i * stepX;
+          const py = y + chartH * (1 - drifts[i].score / 100);
+          doc.lineTo(px, py);
+        }
+        doc.strokeColor(PDF_COLORS.orange).lineWidth(1.5).stroke();
+        doc.lineWidth(1);
+
+        // Draw dots
+        for (let i = 0; i < drifts.length; i++) {
+          const px = 40 + i * stepX;
+          const py = y + chartH * (1 - drifts[i].score / 100);
+          const flagColor = drifts[i].flag === 'critical' ? PDF_COLORS.red : drifts[i].flag === 'warning' ? PDF_COLORS.amber : PDF_COLORS.green;
+          doc.circle(px, py, 2.5).fill(flagColor);
+        }
+      }
+
+      y += chartH + 20;
+
+      // Drift reasons (last few)
+      const recentDrifts = drifts.slice(-5);
+      for (const d of recentDrifts) {
+        if (y > doc.page.height - 50) {
+          doc.addPage();
+          y = 50;
+        }
+        const flagColor = d.flag === 'critical' ? PDF_COLORS.red : d.flag === 'warning' ? PDF_COLORS.amber : PDF_COLORS.green;
+        doc.rect(40, y, 3, 10).fill(flagColor);
+        doc.fontSize(7).fillColor(PDF_COLORS.text2);
+        doc.text(`${Math.round(d.score)}/100`, 48, y + 1, { width: 40 });
+        doc.fillColor(PDF_COLORS.text3);
+        doc.text((d.reason || '').slice(0, 100), 92, y + 1, { width: pageW - 52 });
+        y += 14;
+      }
+    }
+
+    // ── Footer ──
+    const pages = doc.bufferedPageRange();
+    for (let i = 0; i < pages.count; i++) {
+      doc.switchToPage(i);
+      doc.fontSize(6).fillColor(PDF_COLORS.text3);
+      doc.text(
+        `Hawkeye Report — ${session.id.slice(0, 8)} — ${new Date().toLocaleDateString()} — Page ${i + 1}/${pages.count}`,
+        40,
+        doc.page.height - 35,
+        { width: pageW, align: 'center' },
+      );
+    }
+
+    doc.end();
+    stream.on('finish', resolve);
+    stream.on('error', reject);
+  });
+}
+
+/** Generate PDF and return as Buffer (for HTTP responses). */
+export async function generatePdfBuffer(
+  session: SessionRow,
+  events: EventRow[],
+  drifts: Array<{ score: number; flag: string; reason: string; created_at: string }>,
+  costByFile: Array<{ path: string; cost: number; edits: number }>,
+): Promise<Buffer> {
+  const { tmpdir } = await import('node:os');
+  const { join: joinPath } = await import('node:path');
+  const { readFileSync, unlinkSync } = await import('node:fs');
+  const { randomUUID } = await import('node:crypto');
+  const tmpPath = joinPath(tmpdir(), `hawkeye-${randomUUID()}.pdf`);
+  await generatePdfReport(tmpPath, session, events, drifts, costByFile);
+  const buf = readFileSync(tmpPath);
+  try { unlinkSync(tmpPath); } catch {}
+  return buf;
+}
+
+function formatNumber(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+// ─── HTML Report ─────────────────────────────────────────────
 
 function generateHtmlReport(
   session: Record<string, unknown>,
@@ -161,6 +491,8 @@ function generateHtmlReport(
 </body>
 </html>`;
 }
+
+// ─── Shared helpers ──────────────────────────────────────────
 
 function getTypeStyle(type: string): { label: string; color: string } {
   const map: Record<string, { label: string; color: string }> = {
