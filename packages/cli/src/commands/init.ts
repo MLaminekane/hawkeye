@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { mkdirSync, readFileSync, existsSync, appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import chalk from 'chalk';
-import { Storage } from '@hawkeye/core';
+import { Storage } from '@mklamine/hawkeye-core';
 import { getDefaultConfig } from '../config.js';
 
 export const initCommand = new Command('init')

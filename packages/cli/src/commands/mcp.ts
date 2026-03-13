@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
-import { Storage } from '@hawkeye/core';
+import { Storage } from '@mklamine/hawkeye-core';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createMcpServer } from '../mcp/server.js';
 

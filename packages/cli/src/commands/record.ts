@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync, openSync } from 'node:fs';
 import { ReadStream } from 'node:tty';
 import chalk from 'chalk';
-import { createRecorder, Logger, type DriftCheckResult, type GuardrailViolation, type GuardrailRuleConfig } from '@hawkeye/core';
+import { createRecorder, Logger, type DriftCheckResult, type GuardrailViolation, type GuardrailRuleConfig } from '@mklamine/hawkeye-core';
 import { RecordOverlay } from './record-overlay.js';
 import { loadConfig, getDefaultConfig, type WebhookSettings } from '../config.js';
 
@@ -402,7 +402,7 @@ export const recordCommand = new Command('record')
     childProcess.on('message', (msg: unknown) => {
       const m = msg as { type?: string; event?: Record<string, unknown>; hostname?: string; url?: string; reason?: string; guardType?: string; detail?: string };
       if (m?.type === 'hawkeye:llm' && m.event) {
-        recorder.recordLlmEvent(m.event as unknown as import('@hawkeye/core').LlmEvent);
+        recorder.recordLlmEvent(m.event as unknown as import('@mklamine/hawkeye-core').LlmEvent);
       } else if (m?.type === 'hawkeye:network_block' && m.hostname && m.reason) {
         // Network block happened in child process — log it in the parent
         overlay.stop();
@@ -444,7 +444,7 @@ export const recordCommand = new Command('record')
     });
   });
 
-function getEventSummary(event: import('@hawkeye/core').TraceEvent): string {
+function getEventSummary(event: import('@mklamine/hawkeye-core').TraceEvent): string {
   const d = event.data as unknown as Record<string, unknown>;
   switch (event.type) {
     case 'command': return `${d.command || ''} ${((d.args as string[]) || []).join(' ')}`.trim();

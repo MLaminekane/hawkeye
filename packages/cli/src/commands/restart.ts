@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import chalk from 'chalk';
-import { Storage } from '@hawkeye/core';
+import { Storage } from '@mklamine/hawkeye-core';
 import { getDeveloperName } from '../config.js';
 
 export const restartCommand = new Command('restart')

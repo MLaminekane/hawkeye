@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { Storage } from '@hawkeye/core';
+import { Storage } from '@mklamine/hawkeye-core';
 
 // Test fixture directory
 const TEST_DIR = join(process.cwd(), '.hawkeye-test-hook');

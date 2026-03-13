@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import chalk from 'chalk';
-import { Storage, type EventRow } from '@hawkeye/core';
+import { Storage, type EventRow } from '@mklamine/hawkeye-core';
 
 export const replayCommand = new Command('replay')
   .description('Replay a recorded session action by action')
