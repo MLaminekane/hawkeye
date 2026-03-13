@@ -1,11 +1,11 @@
 {
   "name": "@mklamine/hawkeye-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Core SDK for Hawkeye — recording, interception, drift detection",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lamine/hawkeye",
+    "url": "https://github.com/mklamine/hawkeye",
     "directory": "packages/core"
   },
   "publishConfig": {
