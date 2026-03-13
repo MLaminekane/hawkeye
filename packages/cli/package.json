@@ -1,5 +1,5 @@
 {
-  "name": "@hawkeye/cli",
+  "name": "@mklamine/hawkeye-cli",
   "version": "0.1.0",
   "description": "CLI for Hawkeye — the flight recorder for AI agents",
   "license": "MIT",
@@ -40,7 +40,7 @@
     "prepack": "node -e \"const{cpSync,existsSync,mkdirSync}=require('fs');const{join}=require('path');const src=join(__dirname,'..','dashboard','dist');const dst=join(__dirname,'dashboard');if(existsSync(src)){mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Bundled dashboard dist into CLI package')}else{console.warn('Dashboard dist not found — run pnpm build first')}\""
   },
   "dependencies": {
-    "@hawkeye/core": "workspace:*",
+    "@mklamine/hawkeye-core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "chalk": "^5.4.1",
     "commander": "^12.1.0",

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { exec, execFile, execSync, spawn } from 'node:child_process';
 import chalk from 'chalk';
 import { randomUUID } from 'node:crypto';
-import { Storage } from '@hawkeye/core';
+import { Storage } from '@mklamine/hawkeye-core';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, getDefaultConfig, PROVIDER_MODELS, getDeveloperName } from '../config.js';
 import { generatePdfBuffer } from './export.js';

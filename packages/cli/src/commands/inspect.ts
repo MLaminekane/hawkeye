@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import chalk from 'chalk';
-import { Storage } from '@hawkeye/core';
+import { Storage } from '@mklamine/hawkeye-core';
 
 const o = chalk.hex('#ff5f1f');
 

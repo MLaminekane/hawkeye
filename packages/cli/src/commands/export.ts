@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { createWriteStream, existsSync, writeFileSync } from 'node:fs';
 import chalk from 'chalk';
 import PDFDocument from 'pdfkit';
-import { Storage, type SessionRow, type EventRow } from '@hawkeye/core';
+import { Storage, type SessionRow, type EventRow } from '@mklamine/hawkeye-core';
 
 export const exportCommand = new Command('export')
   .description('Export a session report')

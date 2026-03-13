@@ -15,8 +15,8 @@ import { Command } from 'commander';
 import { join, extname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { Storage, scoreHeuristic, slidingDriftScore, scanContent } from '@hawkeye/core';
-import type { TraceEvent, EventType, DriftFlag } from '@hawkeye/core';
+import { Storage, scoreHeuristic, slidingDriftScore, scanContent } from '@mklamine/hawkeye-core';
+import type { TraceEvent, EventType, DriftFlag } from '@mklamine/hawkeye-core';
 import { getDeveloperName } from '../config.js';
 
 // ── Cost estimation ──

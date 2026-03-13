@@ -2,13 +2,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Storage, EventType, TraceEvent } from '@hawkeye/core';
+import type { Storage, EventType, TraceEvent } from '@mklamine/hawkeye-core';
 import {
   createLlmProvider,
   buildPostMortemPrompt,
   parsePostMortemResponse,
-} from '@hawkeye/core';
-import type { PostMortemInput } from '@hawkeye/core';
+} from '@mklamine/hawkeye-core';
+import type { PostMortemInput } from '@mklamine/hawkeye-core';
 import { loadConfig, getDefaultConfig } from '../config.js';
 import type { GuardrailRuleSetting, HawkeyeConfig } from '../config.js';
 

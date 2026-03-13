@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import chalk from 'chalk';
-import { Storage } from '@hawkeye/core';
+import { Storage } from '@mklamine/hawkeye-core';
 
 export const revertCommand = new Command('revert')
   .description('Revert file changes from a session')

@@ -12,7 +12,7 @@ import { Command } from 'commander';
 import { join } from 'node:path';
 import { existsSync, writeFileSync } from 'node:fs';
 import chalk from 'chalk';
-import { Storage } from '@hawkeye/core';
+import { Storage } from '@mklamine/hawkeye-core';
 
 interface OtlpSpan {
   traceId: string;

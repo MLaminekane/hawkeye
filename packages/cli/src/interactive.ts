@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import chalk from 'chalk';
-import { Storage, type SessionRow, type EventRow } from '@hawkeye/core';
+import { Storage, type SessionRow, type EventRow } from '@mklamine/hawkeye-core';
 import {
   loadConfig,
   saveConfig,
@@ -3314,7 +3314,7 @@ export async function startInteractive(): Promise<void> {
     const cfgPath = join(hawkDir, 'config.json');
     writeFileSync(cfgPath, JSON.stringify(getDefaultConfig(), null, 2), 'utf-8');
     // Trigger DB creation via Storage constructor
-    const { Storage } = await import('@hawkeye/core');
+    const { Storage } = await import('@mklamine/hawkeye-core');
     const s = new Storage(dbPath);
     s.close();
   }
