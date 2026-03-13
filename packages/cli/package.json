@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mklamine/hawkeye.git",
+    "url": "git+https://github.com/MLaminekane/hawkeye.git",
     "directory": "packages/cli"
   },
   "keywords": [
