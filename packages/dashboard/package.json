@@ -1,6 +1,7 @@
 {
   "name": "@hawkeye/dashboard",
   "version": "0.1.0",
+  "private": true,
   "description": "Web dashboard for Hawkeye",
   "type": "module",
   "scripts": {
