@@ -1,17 +1,14 @@
+<h1 align="center">Hawkeye</h1>
+
 <p align="center">
-  <pre align="center">
-   ██╗  ██╗
-   ██║  ██║
-   ███████║  <b>Hawkeye</b>
-   ██╔══██║  The flight recorder for AI agents
-   ██║  ██║
-   ╚═╝  ╚═╝
-  </pre>
+  <strong>The flight recorder for AI agents</strong><br/>
+  <sub>Open-source observability & security for Claude Code · Aider · AutoGPT · CrewAI · Open Interpreter · any LLM-powered agent</sub>
 </p>
 
 <p align="center">
-  <strong>Open-source observability & security for AI agents</strong><br/>
-  <em>Claude Code · Aider · AutoGPT · CrewAI · Open Interpreter · any LLM-powered agent</em>
+  <a href="https://www.npmjs.com/package/hawkeye-ai"><img src="https://img.shields.io/npm/v/hawkeye-ai?color=ff5f1f&label=npm" alt="npm version"></a>
+  <a href="https://github.com/MLaminekane/hawkeye/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license"></a>
+  <a href="https://github.com/MLaminekane/hawkeye"><img src="https://img.shields.io/github/stars/MLaminekane/hawkeye?style=social" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
