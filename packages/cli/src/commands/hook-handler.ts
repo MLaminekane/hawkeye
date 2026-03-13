@@ -252,17 +252,55 @@ function getSessionsFile(): string {
 function loadSessions(): Record<string, HookSession> {
   const file = getSessionsFile();
   if (!existsSync(file)) return {};
-  try {
-    return JSON.parse(readFileSync(file, 'utf-8'));
-  } catch {
-    return {};
+  // Retry once on parse failure (concurrent write may produce partial read)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return JSON.parse(readFileSync(file, 'utf-8'));
+    } catch {
+      if (attempt === 0) {
+        const wait = Date.now() + 50;
+        while (Date.now() < wait) { /* spin */ }
+      }
+    }
   }
+  return {};
 }
 
 function saveSessions(sessions: Record<string, HookSession>): void {
   const dir = getHawkDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(getSessionsFile(), JSON.stringify(sessions, null, 2));
+  const file = getSessionsFile();
+  const lockFile = file + '.lock';
+
+  // Acquire lock with retry (spin up to 2s)
+  const deadline = Date.now() + 2000;
+  while (true) {
+    try {
+      writeFileSync(lockFile, String(process.pid), { flag: 'wx' });
+      break;
+    } catch {
+      if (Date.now() > deadline) {
+        // Stale lock — force remove and retry once
+        try { unlinkSync(lockFile); } catch {}
+        try {
+          writeFileSync(lockFile, String(process.pid), { flag: 'wx' });
+          break;
+        } catch {
+          // Give up, write without lock rather than losing data
+          break;
+        }
+      }
+      // Busy wait 10ms
+      const wait = Date.now() + 10;
+      while (Date.now() < wait) { /* spin */ }
+    }
+  }
+
+  try {
+    writeFileSync(file, JSON.stringify(sessions, null, 2));
+  } finally {
+    try { unlinkSync(lockFile); } catch {}
+  }
 }
 
 function getOrCreateSession(

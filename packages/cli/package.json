@@ -2,6 +2,26 @@
   "name": "@hawkeye/cli",
   "version": "0.1.0",
   "description": "CLI for Hawkeye — the flight recorder for AI agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lamine/hawkeye",
+    "directory": "packages/cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "observability",
+    "security",
+    "claude",
+    "llm",
+    "flight-recorder",
+    "guardrails",
+    "drift-detection"
+  ],
   "type": "module",
   "bin": {
     "hawkeye": "./dist/index.js"

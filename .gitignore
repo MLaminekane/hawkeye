@@ -19,6 +19,9 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Local Claude Code settings (contains user-specific paths)
+.claude/settings.local.json
+
 # Turbo
 .turbo/
 

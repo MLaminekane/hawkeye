@@ -11,16 +11,18 @@
 
 <p align="center">
   <strong>Open-source observability & security for AI agents</strong><br/>
-  <em>Claude Code · Cursor · AutoGPT · CrewAI · Aider · any LLM-powered agent</em>
+  <em>Claude Code · Aider · AutoGPT · CrewAI · Open Interpreter · any LLM-powered agent</em>
 </p>
 
 <p align="center">
+  <a href="#installation">Install</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
   <a href="#cli-commands">CLI</a> •
   <a href="#dashboard">Dashboard</a> •
   <a href="#driftdetect">DriftDetect</a> •
   <a href="#guardrails">Guardrails</a> •
+  <a href="#security">Security</a> •
   <a href="#architecture">Architecture</a>
 </p>
 
@@ -38,17 +40,41 @@ Hawkeye is a **flight recorder** for AI agents. It captures every action an agen
 - **Interactive TUI** — Terminal-responsive CLI with arrow-key navigation and slash commands
 - **OpenTelemetry export** — Push traces to Grafana Tempo, Jaeger, Datadog, Honeycomb
 - **Universal ingestion API** — Accept events from any source (MCP servers, custom tools)
-- **Multi-agent support** — Claude Code (hooks), Aider, Cursor, Open Interpreter, or any custom command
+- **Multi-agent support** — Claude Code (hooks), Aider, Open Interpreter, AutoGPT, CrewAI, or any custom command
+
+## Installation
+
+### npm (recommended)
+
+```bash
+npm install -g @hawkeye/cli
+```
+
+### npx (no install)
+
+```bash
+npx @hawkeye/cli
+```
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap lamine/hawkeye
+brew install hawkeye
+```
+
+### From source
+
+```bash
+git clone https://github.com/lamine/hawkeye.git
+cd hawkeye
+pnpm install && pnpm build
+cd packages/cli && npm link
+```
 
 ## Quick Start
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Build all packages
-pnpm build
-
 # Initialize in your project
 hawkeye init
 
@@ -71,7 +97,7 @@ hawkeye record -o "Fix bug #42" --agent cursor -- cursor .
 hawkeye record -o "Deploy to staging" --no-drift -- node deploy.js
 ```
 
-Hawkeye automatically detects the agent (Claude Code, Cursor, Copilot, AutoGPT, CrewAI, Aider) and intercepts:
+Hawkeye automatically detects the agent (Claude Code, Aider, AutoGPT, CrewAI, Open Interpreter) and intercepts:
 
 | Interceptor    | What it captures                                       |
 | -------------- | ------------------------------------------------------ |
@@ -438,6 +464,24 @@ Manage settings via:
 - **Dashboard**: Settings page at `http://localhost:4242/settings`
 - **Direct edit**: `.hawkeye/config.json`
 
+## Security
+
+Hawkeye is designed to run locally. The dashboard server binds to `localhost` and includes multiple security layers:
+
+| Protection | Description |
+|---|---|
+| **CORS** | Only `localhost` / `127.0.0.1` origins accepted |
+| **WebSocket origin check** | Upgrade requests from cross-origin pages are rejected |
+| **POST body limit** | 5 MB max — oversized requests are destroyed (prevents DoS) |
+| **Path traversal** | Static file serving and attachment endpoints verify resolved paths stay within their root |
+| **No command injection** | All git operations use `execFile()` with argument arrays, never shell strings |
+| **Config file permissions** | `.hawkeye/config.json` written with `0o600` (owner-only) to protect API keys |
+| **Concurrent write safety** | Hook handler uses exclusive lockfile for `hook-sessions.json` writes |
+
+### API Keys
+
+API keys for LLM providers (Anthropic, OpenAI, etc.) are stored in `.hawkeye/config.json`. The file is created with restricted permissions (`0o600`), but you should also add `.hawkeye/` to your global `.gitignore` to avoid accidental commits.
+
 ## Architecture
 
 TypeScript monorepo using **pnpm workspaces** + **Turborepo**:
@@ -503,6 +547,128 @@ pnpm --filter @hawkeye/cli build       # Build only CLI
 - Named exports only (no default exports except React components)
 - `Result<T, E>` pattern for error handling (no throwing in core)
 - Prettier: semi, singleQuote, trailingComma: all, printWidth: 100
+
+## Publishing
+
+### npm
+
+Hawkeye is published as two packages: `@hawkeye/core` (SDK) and `@hawkeye/cli` (CLI with bundled dashboard).
+
+```bash
+# Build everything
+pnpm build
+
+# Publish (pnpm resolves workspace:* to real versions)
+pnpm -r publish --access public
+```
+
+The CLI `prepack` script automatically copies the dashboard build into the CLI package so it ships as a single installable.
+
+### Homebrew
+
+To distribute via Homebrew, create a tap repository (e.g. `homebrew-hawkeye`) with a formula:
+
+```ruby
+# Formula/hawkeye.rb
+class Hawkeye < Formula
+  desc "The flight recorder for AI agents"
+  homepage "https://github.com/lamine/hawkeye"
+  url "https://registry.npmjs.org/@hawkeye/cli/-/cli-0.1.0.tgz"
+  sha256 "SHA256_OF_TARBALL"
+
+  depends_on "node@20"
+
+  def install
+    system "npm", "install", *std_npm_args
+    bin.install_symlink libexec/"bin/hawkeye"
+  end
+
+  test do
+    assert_match "hawkeye", shell_output("#{bin}/hawkeye --version")
+  end
+end
+```
+
+Then:
+
+```bash
+# Create the tap repo
+gh repo create lamine/homebrew-hawkeye --public
+
+# Users install with:
+brew tap lamine/hawkeye
+brew install hawkeye
+```
+
+### GitHub Releases
+
+Automate releases with a GitHub Actions workflow:
+
+```bash
+# Tag a release
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Add a `.github/workflows/release.yml` to auto-publish to npm on tag push (see below).
+
+## CI/CD
+
+<details>
+<summary><code>.github/workflows/ci.yml</code> — Test & Build</summary>
+
+```yaml
+name: CI
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+```
+
+</details>
+
+<details>
+<summary><code>.github/workflows/release.yml</code> — Publish to npm on tag</summary>
+
+```yaml
+name: Release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm -r publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+```
+
+</details>
 
 ## Acknowledgments
 

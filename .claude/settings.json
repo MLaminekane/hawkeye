@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node /Users/lamine/Documents/Projects/Hawkeye/packages/cli/dist/index.js hook-handler --event PreToolUse"
+            "command": "hawkeye hook-handler --event PreToolUse"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node /Users/lamine/Documents/Projects/Hawkeye/packages/cli/dist/index.js hook-handler --event PostToolUse"
+            "command": "hawkeye hook-handler --event PostToolUse"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node /Users/lamine/Documents/Projects/Hawkeye/packages/cli/dist/index.js hook-handler --event Stop"
+            "command": "hawkeye hook-handler --event Stop"
           }
         ]
       }

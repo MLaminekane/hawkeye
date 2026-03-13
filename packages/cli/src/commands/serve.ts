@@ -155,7 +155,9 @@ export const serveCommand = new Command('serve')
     });
 
     server.on('upgrade', (req, socket, head) => {
-      if (req.url === '/ws') {
+      const wsOrigin = req.headers.origin || '';
+      const isLocalOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(wsOrigin);
+      if (req.url === '/ws' && (isLocalOrigin || !wsOrigin)) {
         wss.handleUpgrade(req, socket, head, (ws) => {
           wss.emit('connection', ws, req);
         });
@@ -643,9 +645,22 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
 function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res: ServerResponse, broadcast: (msg: Record<string, unknown>) => void, cwd: string): void {
   res.setHeader('Content-Type', 'application/json');
 
+  const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB
   let body = '';
-  req.on('data', (chunk) => { body += chunk; });
+  let exceeded = false;
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+      exceeded = true;
+      req.destroy();
+    }
+  });
   req.on('end', () => {
+    if (exceeded) {
+      res.writeHead(413);
+      res.end(JSON.stringify({ error: 'Payload too large (max 5 MB)' }));
+      return;
+    }
     try {
       // POST /api/ingest
       if (url === '/api/ingest') {

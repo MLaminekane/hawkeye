@@ -123,6 +123,25 @@ hawkeye                         # Test the CLI globally
 
 SQLite via `better-sqlite3` with WAL mode. Schema in `packages/core/src/storage/schema.ts`. Four tables: `sessions`, `events`, `drift_snapshots`, `guardrail_violations`. Manual migrations (no ORM). Local data directory: `.hawkeye/` (auto-created on first use). `Storage` class has `deleteSession()` and `getCostByFile()` methods.
 
+## Security
+
+### API Server (`serve.ts`)
+
+- **CORS**: restricted to `localhost`/`127.0.0.1` origins only
+- **WebSocket origin validation**: upgrade requests rejected unless origin is localhost or absent (direct CLI connections)
+- **POST body size limit**: 5 MB max — requests exceeding this are destroyed with 413
+- **Path traversal protection**: `serveStatic()` and `/api/tasks/attachments` both resolve paths and verify they don't escape their root directory
+- **No command injection**: `/api/revert` uses `execFile()` (array args) instead of `exec()` (shell string)
+
+### Configuration (`config.ts`)
+
+- **File permissions**: `saveConfig()` writes `config.json` with mode `0o600` (owner read/write only) and creates `.hawkeye/` with mode `0o700`. This protects API keys stored in config from other users on shared machines.
+
+### Hook Handler (`hook-handler.ts`)
+
+- **Lockfile for concurrent writes**: `saveSessions()` uses an exclusive lockfile (`hook-sessions.json.lock`) to prevent race conditions when multiple hook invocations write simultaneously. Includes stale lock detection (2s timeout) and retry with spin-wait.
+- **Read retry**: `loadSessions()` retries once on JSON parse failure to handle reads during concurrent writes.
+
 ## Common Gotchas
 
 - `hawkeye serve` **auto-restarts** after `pnpm build` — no manual restart needed. Dashboard static files are read per-request so UI changes are immediate.
@@ -132,7 +151,6 @@ SQLite via `better-sqlite3` with WAL mode. Schema in `packages/core/src/storage/
 - Claude Code hooks require `hawkeye hooks install` (NODE_OPTIONS preload doesn't work with Claude Code's bundled Node.js runtime)
 - Daemon tasks run as independent `claude -p` processes. Use `--continue` for conversation continuity (auto-detected within 30 min window)
 - Task journal (`.hawkeye/task-journal.md`) is auto-trimmed to 30 entries. Clear via `/tasks clear-journal` or dashboard Memory button
-- Rate limiter is set to 600 req/min per IP — generous for local dev tools with polling + hooks
 
 ## DriftDetect
 

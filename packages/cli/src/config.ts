@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync, statSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 
@@ -226,8 +226,13 @@ export function loadConfig(cwd: string): HawkeyeConfig {
 }
 
 export function saveConfig(cwd: string, config: HawkeyeConfig): void {
+  const dir = join(cwd, '.hawkeye');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o700);
+  }
   const p = configPath(cwd);
-  writeFileSync(p, JSON.stringify(config, null, 2), 'utf-8');
+  writeFileSync(p, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
 }
 
 // ─── Developer identity ───────────────────────────────────────
