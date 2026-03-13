@@ -1,6 +1,6 @@
 {
   "name": "hawkeye-ai",
-  "version": "0.1.7",
+  "version": "0.1.11",
   "description": "The flight recorder for AI agents - observability and security for Claude Code, Aider, AutoGPT and more",
   "license": "MIT",
   "homepage": "https://github.com/MLaminekane/hawkeye#readme",
@@ -38,7 +38,7 @@
     "dev": "tsc --watch",
     "test": "vitest run --passWithNoTests",
     "lint": "eslint src/",
-    "prepack": "node -e \"const{cpSync,existsSync,mkdirSync}=require('fs');const{join}=require('path');const src=join(__dirname,'..','dashboard','dist');const dst=join(__dirname,'dashboard');if(existsSync(src)){mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Bundled dashboard dist into CLI package')}else{console.warn('Dashboard dist not found — run pnpm build first')};const readme=join(__dirname,'..','..','README.md');if(existsSync(readme)){cpSync(readme,join(__dirname,'README.md'));console.log('Copied README.md')}\""
+    "prepack": "node -e \"const{cpSync,existsSync,mkdirSync,rmSync}=require('fs');const{join}=require('path');const src=join(__dirname,'..','dashboard','dist');const dst=join(__dirname,'dashboard');if(existsSync(src)){if(existsSync(dst)){rmSync(dst,{recursive:true,force:true});console.log('Cleaned old dashboard bundle')}mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Bundled dashboard dist into CLI package')}else{console.warn('Dashboard dist not found — run pnpm build first')};const readme=join(__dirname,'..','..','README.md');if(existsSync(readme)){cpSync(readme,join(__dirname,'README.md'));console.log('Copied README.md')}\""
   },
   "dependencies": {
     "@mklamine/hawkeye-core": "^0.1.1",
