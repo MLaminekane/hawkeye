@@ -33,10 +33,12 @@ Hawkeye is a **flight recorder** for AI agents. It captures every action an agen
 - **Session recording & replay** — Full timeline of every agent action with costs and metadata
 - **DriftDetect** — Real-time objective drift detection using heuristic + LLM scoring
 - **Guardrails** — File protection, command blocking, cost limits, token limits, directory scoping
-- **Visual dashboard** — Web UI with session explorer, drift charts, and settings management
-- **Interactive TUI** — Claude Code-style CLI with arrow-key navigation and slash commands
+- **Visual dashboard** — Mobile-responsive web UI with session explorer, drift charts, and settings management
+- **Remote tasks** — Submit prompts from your phone via dashboard, with image attachments, auto-approve, and persistent agent memory
+- **Interactive TUI** — Terminal-responsive CLI with arrow-key navigation and slash commands
 - **OpenTelemetry export** — Push traces to Grafana Tempo, Jaeger, Datadog, Honeycomb
 - **Universal ingestion API** — Accept events from any source (MCP servers, custom tools)
+- **Multi-agent support** — Claude Code (hooks), Aider, Cursor, Open Interpreter, or any custom command
 
 ## Quick Start
 
@@ -114,21 +116,26 @@ Launch the interactive mode by running `hawkeye` with no subcommand:
 
 Type `/` to open the command picker with arrow-key navigation and live filtering:
 
-| Command     | Description                                 |
-| ----------- | ------------------------------------------- |
-| `/sessions` | List & manage recorded sessions             |
-| `/active`   | Show current recording                      |
-| `/stats`    | Session statistics                          |
-| `/end`      | End active sessions                         |
-| `/restart`  | Restart a session (with picker)             |
-| `/delete`   | Delete a session                            |
-| `/settings` | Configure DriftDetect, Guardrails, API keys |
-| `/serve`    | Open the web dashboard                      |
-| `/mcp`      | Show MCP server setup instructions          |
-| `/revert`   | Revert file changes from a session          |
-| `/init`     | Initialize Hawkeye                          |
-| `/clear`    | Clear screen                                |
-| `/quit`     | Exit                                        |
+| Command        | Description                                    |
+| -------------- | ---------------------------------------------- |
+| `/new`         | New session — pick agent, model, objective     |
+| `/sessions`    | List & manage recorded sessions                |
+| `/active`      | Show current recording                         |
+| `/stats`       | Session statistics                             |
+| `/end`         | End active sessions                            |
+| `/restart`     | Restart a session (with picker)                |
+| `/delete`      | Delete a session                               |
+| `/tasks`       | List, create, clear remote tasks               |
+| `/tasks journal` | View agent memory (task history)             |
+| `/remote`      | Launch serve + daemon + Cloudflare tunnel      |
+| `/remote stop` | Stop tunnel + daemon                           |
+| `/settings`    | Configure DriftDetect, Guardrails, API keys    |
+| `/serve`       | Open the web dashboard                         |
+| `/mcp`         | Show MCP server setup instructions             |
+| `/revert`      | Revert file changes from a session             |
+| `/init`        | Initialize Hawkeye                             |
+| `/clear`       | Clear screen                                   |
+| `/quit`        | Exit                                           |
 
 ## CLI Commands
 
@@ -174,7 +181,20 @@ Replay a session action-by-action with timing.
 hawkeye serve [-p 4242]
 ```
 
-Launch the web dashboard on `http://localhost:4242`.
+Launch the web dashboard on `http://localhost:4242`. Auto-reloads after `pnpm build` — watches `dist/` and restarts the server when compiled files change.
+
+### `hawkeye daemon`
+
+```bash
+hawkeye daemon [--agent claude] [--interval 30]
+```
+
+Run the task daemon — polls `.hawkeye/tasks.json` for pending tasks and executes them. Features:
+
+- **Persistent memory**: writes a task journal (`.hawkeye/task-journal.md`) after each task
+- **Conversation continuity**: uses `claude --continue` within 30-min windows
+- **Context injection**: enriches prompts with git status, recent commits, and task history
+- Works with any agent CLI, not just Claude
 
 ### `hawkeye export`
 
@@ -246,13 +266,13 @@ Add to `.mcp.json` at project root for Claude Code:
 
 ## Dashboard
 
-The web dashboard (`hawkeye serve`) provides three views:
+The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 
 ### Sessions Page
 
 - List all sessions with status filtering (recording / completed / aborted)
 - Search by objective or agent name
-- Auto-refresh every 5 seconds
+- Auto-refresh every 5 seconds, module-level cache (no flash on page change)
 - Shows costs, drift scores, action counts
 
 ### Session Detail Page
@@ -262,6 +282,20 @@ The web dashboard (`hawkeye serve`) provides three views:
 - **Expandable details** — Full event payload for each action
 - **Live mode** — Auto-refreshes every 3 seconds for active sessions
 - **Export** — Download session as JSON
+
+### Tasks Page (Remote)
+
+- Submit prompts remotely from your phone
+- **Image attachments** — Upload photos to include with prompts
+- **Auto-approve toggle** — Automatically approve all guardrail-blocked actions
+- **Approve/Deny buttons** — Manually review dangerous actions
+- **Agent memory** — View/clear the persistent task journal
+- Status tracking: pending, running, completed, failed
+
+### Compare Page
+
+- Select two sessions to compare side by side
+- Stats comparison (actions, cost, tokens, drift)
 
 ### Settings Page
 
@@ -288,6 +322,12 @@ The web dashboard (`hawkeye serve`) provides three views:
 | `/api/providers`                  | GET    | Available LLM providers & models |
 | `/api/ingest`                     | POST   | Universal event ingestion (Zod-validated) |
 | `/api/revert`                     | POST   | Revert a file change             |
+| `/api/tasks`                      | GET    | List remote tasks                |
+| `/api/tasks`                      | POST   | Create a task (with attachments) |
+| `/api/tasks/:id/cancel`           | POST   | Cancel a pending task            |
+| `/api/tasks/journal`              | GET    | Read agent memory journal        |
+| `/api/tasks/journal/clear`        | POST   | Clear agent memory               |
+| `/api/tasks/attachments/:file`    | GET    | Serve task image attachments     |
 | `/api/pending-reviews`            | GET    | List pending review gate items   |
 | `/api/review-approve`             | POST   | Approve a review gate item       |
 | `/api/review-deny`                | POST   | Deny a review gate item          |

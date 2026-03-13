@@ -18,6 +18,7 @@ export interface SessionMetadata {
   gitBranch?: string;
   gitCommitBefore?: string;
   gitCommitAfter?: string;
+  developer?: string;
 }
 
 export type EventType =

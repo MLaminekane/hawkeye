@@ -116,6 +116,14 @@ export function createRecorder(options: RecorderOptions): Recorder {
   const sessionId = options.sessionId || uuid();
   const gitInfo = getGitInfo(options.workingDir);
 
+  // Detect developer from git config
+  let developer: string | undefined;
+  try {
+    developer = execSync('git config user.name', { encoding: 'utf-8', cwd: options.workingDir, timeout: 3000 }).trim();
+  } catch {
+    developer = process.env.USER || process.env.USERNAME;
+  }
+
   const session: AgentSession = {
     id: sessionId,
     objective: options.objective,
@@ -127,6 +135,7 @@ export function createRecorder(options: RecorderOptions): Recorder {
       workingDir: options.workingDir,
       gitBranch: gitInfo.branch,
       gitCommitBefore: gitInfo.commit,
+      developer,
     },
     totalCostUsd: 0,
     totalTokens: 0,

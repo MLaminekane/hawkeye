@@ -22,6 +22,7 @@ export interface SessionRow {
   total_actions: number;
   final_drift_score: number | null;
   metadata: string | null;
+  developer: string | null;
 }
 
 export interface EventRow {
@@ -45,6 +46,17 @@ export class Storage {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(SCHEMA);
+    this.runMigrations();
+  }
+
+  private runMigrations(): void {
+    // Add developer column if missing (migration for existing DBs)
+    try {
+      const cols = this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'developer')) {
+        this.db.exec('ALTER TABLE sessions ADD COLUMN developer TEXT');
+      }
+    } catch {}
   }
 
   createSession(session: AgentSession): Result<string> {
@@ -52,8 +64,8 @@ export class Storage {
       const id = session.id || uuid();
       this.db
         .prepare(
-          `INSERT INTO sessions (id, objective, agent, model, working_dir, git_branch, git_commit_before, started_at, status, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO sessions (id, objective, agent, model, working_dir, git_branch, git_commit_before, started_at, status, metadata, developer)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -66,6 +78,7 @@ export class Storage {
           session.startedAt.toISOString(),
           session.status,
           JSON.stringify(session.metadata),
+          session.metadata.developer ?? null,
         );
       return { ok: true, value: id };
     } catch (e) {
@@ -417,6 +430,41 @@ export class Storage {
     }
   }
 
+  getDevAnalytics(): Result<DeveloperAnalytics[]> {
+    try {
+      const rows = this.db.prepare(`
+        SELECT
+          COALESCE(developer, 'unknown') as developer,
+          COUNT(*) as total_sessions,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_sessions,
+          SUM(CASE WHEN status = 'aborted' THEN 1 ELSE 0 END) as aborted_sessions,
+          COALESCE(SUM(total_actions), 0) as total_actions,
+          COALESCE(SUM(total_cost_usd), 0) as total_cost_usd,
+          COALESCE(SUM(total_tokens), 0) as total_tokens,
+          COALESCE(AVG(CASE WHEN final_drift_score IS NOT NULL THEN final_drift_score END), 0) as avg_drift_score,
+          MIN(started_at) as first_session,
+          MAX(started_at) as last_session
+        FROM sessions
+        GROUP BY COALESCE(developer, 'unknown')
+        ORDER BY total_sessions DESC
+      `).all() as DeveloperAnalytics[];
+      return { ok: true, value: rows };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
+  updateSessionDeveloper(sessionId: string, developer: string): Result<void> {
+    try {
+      this.db
+        .prepare('UPDATE sessions SET developer = ? WHERE id = ?')
+        .run(developer, sessionId);
+      return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
   close(): void {
     this.db.close();
   }
@@ -557,4 +605,17 @@ export interface SessionComparison {
   durationMs: number;
   filesChanged: string[];
   topCostFiles: Array<{ path: string; cost: number }>;
+}
+
+export interface DeveloperAnalytics {
+  developer: string;
+  total_sessions: number;
+  completed_sessions: number;
+  aborted_sessions: number;
+  total_actions: number;
+  total_cost_usd: number;
+  total_tokens: number;
+  avg_drift_score: number;
+  first_session: string | null;
+  last_session: string | null;
 }

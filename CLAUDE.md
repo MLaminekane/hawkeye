@@ -11,12 +11,12 @@ Hawkeye is an open-source observability and security tool for AI agents (Claude 
 TypeScript monorepo using pnpm workspaces + Turborepo:
 
 - `packages/core` — Node.js SDK: recorder engine, interceptors (terminal, filesystem, network, LLM), SQLite storage, DriftDetect engine, guardrails enforcer
-- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`. Interactive TUI via raw-mode stdin with slash command picker.
-- `packages/dashboard` — React 19 + Vite + Tailwind CSS + Recharts web UI served by `hawkeye serve` on port 4242
+- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`. Interactive TUI via raw-mode stdin with slash command picker.
+- `packages/dashboard` — React 19 + Vite + Tailwind CSS + Recharts web UI served by `hawkeye serve` on port 4242. Mobile responsive.
 
 ### Data Flow
 
-Interceptors capture events → Recorder evaluates guardrails (sync, blocking) → persists to SQLite → triggers drift check (async, non-blocking). The CLI's `serve` command exposes a REST API (`/api/sessions`, `/api/sessions/:id/events`, `/api/sessions/:id/drift`, `/api/sessions/:id/pause`, `/api/sessions/:id/resume`, `/api/sessions/:id/end`, `/api/sessions/:id/cost-by-file`, `/api/compare?ids=id1,id2`, `/api/settings`, `/api/providers`, `/api/ingest`, `/api/stats`, `/api/revert`) and serves the dashboard as static files.
+Interceptors capture events → Recorder evaluates guardrails (sync, blocking) → persists to SQLite → triggers drift check (async, non-blocking). The CLI's `serve` command exposes a REST API (`/api/sessions`, `/api/sessions/:id/events`, `/api/sessions/:id/drift`, `/api/sessions/:id/pause`, `/api/sessions/:id/resume`, `/api/sessions/:id/end`, `/api/sessions/:id/cost-by-file`, `/api/compare?ids=id1,id2`, `/api/settings`, `/api/providers`, `/api/ingest`, `/api/stats`, `/api/revert`, `/api/tasks`, `/api/tasks/journal`, `/api/pending-reviews`, `/api/review-approve`, `/api/review-deny`) and serves the dashboard as static files. The server **auto-reloads** on `pnpm build` — it watches `dist/` and restarts itself when compiled files change.
 
 ### Network Interception (Child Process)
 
@@ -42,9 +42,35 @@ When `hawkeye` is run with no subcommand, it launches an interactive TUI (`packa
 - **Slash command picker**: type `/` to open dropdown, arrow keys to navigate, Tab to complete, Escape to dismiss, live filtering as you type
 - **Ghost text** `/ for commands` when buffer is empty
 - **Piped mode fallback**: when stdin is not TTY, uses a line queue (`nextLine()`, `lineQueue[]`, `lineWaiter`) for proper async serialization
+- **Terminal-responsive**: `tw()` returns clamped terminal width (max 120), `hr()` generates adaptive horizontal rules. All separators, session lines, inspect boxes adapt to terminal width
 - Commands dispatch from `executeCommand()` to individual `cmdXxx()` functions
 - Numeric input at main prompt selects from `lastSessions[]` array
 - Settings management via sub-menus (DriftDetect, Guardrails, API Keys) using `loadConfig()`/`saveConfig()` from `config.ts`
+- `/tasks` — List/create/clear remote tasks, view/clear agent memory journal
+- `/remote` — Launch serve + daemon + cloudflare tunnel for mobile access
+- `/remote stop` — Kill tunnel + daemon
+
+### Remote Tasks & Daemon
+
+`hawkeye daemon` (`packages/cli/src/commands/daemon.ts`) polls `.hawkeye/tasks.json` for pending tasks and executes them via `claude -p` (or any agent CLI). Key features:
+
+- **Persistent memory** via `.hawkeye/task-journal.md`: after each task, a summary (prompt, files changed via `git diff --stat`, output) is appended to the journal. This journal is injected as context into every new task prompt, so the agent "remembers" what it did before.
+- **Session continuity** (`--continue`): for Claude, if the last task completed within 30 minutes, uses `claude --continue -p` to resume the conversation instead of starting fresh.
+- **Context injection**: when starting a new session (no `--continue`), the prompt is enriched with git status, branch, recent commits, and the task journal.
+- **Task queue**: tasks stored in `.hawkeye/tasks.json`, created via dashboard (`POST /api/tasks`), TUI (`/tasks new`), or direct file edit.
+- **Image attachments**: tasks can include base64-encoded images saved to `.hawkeye/task-attachments/` and served via `/api/tasks/attachments/:filename`.
+- **Review gate integration**: dashboard Tasks page has auto-approve toggle + approve/deny buttons for guardrail-blocked actions.
+
+### Server Auto-Reload
+
+`hawkeye serve` watches the CLI `dist/` directory using `fs.watch`. When `pnpm build` writes new compiled `.js` files:
+
+1. Debounces for 1.5s (build writes multiple files)
+2. Spawns a new serve process (detached, inherits stdio)
+3. Gracefully shuts down the current process (close WebSocket, DB, HTTP server)
+4. New server takes over on the same port
+
+Dashboard static files (HTML/CSS/JS) are read from disk per-request, so dashboard changes are visible immediately after build without server restart.
 
 ### Configuration
 
@@ -99,10 +125,14 @@ SQLite via `better-sqlite3` with WAL mode. Schema in `packages/core/src/storage/
 
 ## Common Gotchas
 
-- Port 4242 (dashboard) may be in use from previous sessions — kill the old process before restarting `hawkeye serve`
+- `hawkeye serve` **auto-restarts** after `pnpm build` — no manual restart needed. Dashboard static files are read per-request so UI changes are immediate.
+- Port 4242 (dashboard) may be in use from previous sessions — serve handles this by killing the old process automatically
 - `pnpm build` must succeed before testing CLI commands (TypeScript must be compiled)
 - Live stats for recording sessions: `serve.ts` computes from events table since sessions table only updates on end
 - Claude Code hooks require `hawkeye hooks install` (NODE_OPTIONS preload doesn't work with Claude Code's bundled Node.js runtime)
+- Daemon tasks run as independent `claude -p` processes. Use `--continue` for conversation continuity (auto-detected within 30 min window)
+- Task journal (`.hawkeye/task-journal.md`) is auto-trimmed to 30 entries. Clear via `/tasks clear-journal` or dashboard Memory button
+- Rate limiter is set to 600 req/min per IP — generous for local dev tools with polling + hooks
 
 ## DriftDetect
 
@@ -125,18 +155,21 @@ Rules evaluated synchronously before event persistence. Rule types: `file_protec
 
 ## Key Files Reference
 
-| File                                        | Why it's non-obvious                                                        |
-| ------------------------------------------- | --------------------------------------------------------------------------- |
-| `packages/cli/src/interactive.ts`           | TUI with raw-mode input, slash command picker — all `cmdXxx()` functions    |
-| `packages/cli/src/config.ts`                | Unified config types, load/save, `PROVIDER_MODELS` map (shared by TUI+API) |
-| `packages/cli/src/commands/serve.ts`        | Dashboard server + all REST API endpoints (not just static file serving)    |
-| `packages/cli/src/commands/hook-handler.ts` | Internal hook handler — reads JSON from stdin, writes directly to SQLite    |
-| `packages/core/src/types.ts`                | Central type definitions used across all packages                           |
-| `packages/core/src/interceptors/llm.ts`     | LLM endpoint detection, token extraction, cost estimation (shared logic)    |
-| `packages/core/src/drift/scorer.ts`         | Heuristic drift scorer — scoring logic and penalty rules                    |
-| `packages/cli/src/mcp/server.ts`            | MCP server — 27 tools for agent self-awareness (stdio JSON-RPC)             |
-| `packages/core/src/llm/providers.ts`        | LLM provider factory — Ollama, Anthropic, OpenAI, DeepSeek, Mistral, Google |
-| `packages/core/src/llm/post-mortem.ts`      | Post-mortem prompt template and JSON response parser                        |
+| File                                        | Why it's non-obvious                                                          |
+| ------------------------------------------- | ----------------------------------------------------------------------------- |
+| `packages/cli/src/interactive.ts`           | TUI with raw-mode input, slash command picker — all `cmdXxx()` functions      |
+| `packages/cli/src/config.ts`                | Unified config types, load/save, `PROVIDER_MODELS` map (shared by TUI+API)   |
+| `packages/cli/src/commands/serve.ts`        | Dashboard server + all REST API endpoints + auto-reload watcher               |
+| `packages/cli/src/commands/daemon.ts`       | Task daemon — polls tasks.json, context injection, journal, `--continue`      |
+| `packages/cli/src/commands/hook-handler.ts` | Internal hook handler — reads JSON from stdin, writes directly to SQLite      |
+| `packages/cli/src/commands/record-overlay.ts` | Recording banner + terminal title bar (adaptive width)                      |
+| `packages/core/src/types.ts`                | Central type definitions used across all packages                             |
+| `packages/core/src/interceptors/llm.ts`     | LLM endpoint detection, token extraction, cost estimation (shared logic)      |
+| `packages/core/src/drift/scorer.ts`         | Heuristic drift scorer — scoring logic and penalty rules                      |
+| `packages/cli/src/mcp/server.ts`            | MCP server — 27 tools for agent self-awareness (stdio JSON-RPC)               |
+| `packages/core/src/llm/providers.ts`        | LLM provider factory — Ollama, Anthropic, OpenAI, DeepSeek, Mistral, Google   |
+| `packages/core/src/llm/post-mortem.ts`      | Post-mortem prompt template and JSON response parser                          |
+| `packages/dashboard/src/pages/TasksPage.tsx` | Remote tasks page — image upload, auto-approve, journal viewer               |
 
 ## MCP Server
 

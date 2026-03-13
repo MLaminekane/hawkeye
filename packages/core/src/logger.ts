@@ -7,6 +7,16 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
   error: 3,
 };
 
+/** Global log level override — set via HAWKEYE_LOG_LEVEL env or Logger.setGlobalLevel(). */
+let globalLevel: LogLevel | null = null;
+
+function resolveGlobalLevel(): LogLevel | null {
+  if (globalLevel) return globalLevel;
+  const env = process.env.HAWKEYE_LOG_LEVEL;
+  if (env && env in LEVEL_ORDER) return env as LogLevel;
+  return null;
+}
+
 export class Logger {
   private level: LogLevel;
   private prefix: string;
@@ -16,8 +26,14 @@ export class Logger {
     this.level = level;
   }
 
+  /** Set log level globally for all Logger instances. */
+  static setGlobalLevel(level: LogLevel): void {
+    globalLevel = level;
+  }
+
   private shouldLog(level: LogLevel): boolean {
-    return LEVEL_ORDER[level] >= LEVEL_ORDER[this.level];
+    const effective = resolveGlobalLevel() ?? this.level;
+    return LEVEL_ORDER[level] >= LEVEL_ORDER[effective];
   }
 
   private format(level: LogLevel, msg: string): string {

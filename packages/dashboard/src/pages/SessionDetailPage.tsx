@@ -48,6 +48,7 @@ export function SessionDetailPage() {
   const [replayIndex, setReplayIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [pdfLoading, setPdfLoading] = useState(false);
   const playTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -85,7 +86,7 @@ export function SessionDetailPage() {
 
   // Replay: auto-advance when playing
   useEffect(() => {
-    if (!isPlaying || !replayMode) return;
+    if (!isPlaying || !replayMode || events.length === 0) return;
     if (replayIndex >= events.length) {
       setIsPlaying(false);
       return;
@@ -162,7 +163,7 @@ export function SessionDetailPage() {
   const handleExportJSON = () => {
     const data = {
       session,
-      events: events.map((e) => ({ ...e, data: JSON.parse(e.data) })),
+      events: events.map((e) => { try { return { ...e, data: JSON.parse(e.data) }; } catch { return { ...e, data: {} }; } }),
       driftSnapshots,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -172,6 +173,26 @@ export function SessionDetailPage() {
     a.download = `hawkeye-${session.id.slice(0, 8)}.json`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  // Export as PDF (server-side generation)
+  const handleExportPDF = async () => {
+    setPdfLoading(true);
+    try {
+      const res = await fetch(`/api/sessions/${session.id}/export-pdf`);
+      if (!res.ok) throw new Error('PDF export failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hawkeye-${session.id.slice(0, 8)}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // Silently fail
+    } finally {
+      setPdfLoading(false);
+    }
   };
 
   return (
@@ -225,7 +246,12 @@ export function SessionDetailPage() {
             </div>
           )}
 
-          <div className="ml-auto flex items-center gap-1 font-mono text-xs">
+          <div className="ml-auto flex items-center gap-2 font-mono text-xs">
+            {session.developer && (
+              <span className="rounded bg-hawk-orange/10 px-1.5 py-0.5 text-[10px] text-hawk-orange/70">
+                {session.developer}
+              </span>
+            )}
             <span className="text-hawk-text3">Agent:</span>
             <span className="text-hawk-text font-semibold">{session.agent || 'unknown'}</span>
           </div>
@@ -236,12 +262,21 @@ export function SessionDetailPage() {
         <div className="px-3 sm:px-5 py-4">
           <div className="flex flex-col sm:flex-row items-start justify-between gap-2 mb-3">
             <h1 className="font-display text-xl sm:text-2xl font-bold text-hawk-text">{session.objective}</h1>
-            <button
-              onClick={handleExportJSON}
-              className="shrink-0 rounded border border-hawk-border px-3 py-1.5 font-mono text-[11px] text-hawk-text3 hover:text-hawk-orange hover:border-hawk-orange/30 transition-colors"
-            >
-              Export JSON
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleExportPDF}
+                disabled={pdfLoading}
+                className="shrink-0 rounded border border-hawk-orange/30 bg-hawk-orange/10 px-3 py-1.5 font-mono text-[11px] text-hawk-orange hover:bg-hawk-orange/20 transition-colors disabled:opacity-50"
+              >
+                {pdfLoading ? 'Generating...' : 'Export PDF'}
+              </button>
+              <button
+                onClick={handleExportJSON}
+                className="shrink-0 rounded border border-hawk-border px-3 py-1.5 font-mono text-[11px] text-hawk-text3 hover:text-hawk-orange hover:border-hawk-orange/30 transition-colors"
+              >
+                Export JSON
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -559,11 +594,12 @@ function CostBreakdown({ events }: { events: EventData[] }) {
   // Group by model
   const byModel: Record<string, { cost: number; tokens: number; calls: number }> = {};
   llmEvents.forEach((e) => {
-    const data = JSON.parse(e.data);
-    const key = `${data.provider}/${data.model}`;
+    let data: Record<string, unknown> = {};
+    try { data = JSON.parse(e.data); } catch { /* skip malformed */ }
+    const key = `${data.provider || 'unknown'}/${data.model || 'unknown'}`;
     if (!byModel[key]) byModel[key] = { cost: 0, tokens: 0, calls: 0 };
     byModel[key].cost += e.cost_usd;
-    byModel[key].tokens += (data.totalTokens || 0);
+    byModel[key].tokens += (Number(data.totalTokens) || 0);
     byModel[key].calls += 1;
   });
 
@@ -621,9 +657,10 @@ function FilesChanged({ events, onToggle, expandedEvent }: { events: EventData[]
   // Deduplicate by path, keep last event
   const fileMap: Record<string, { event: EventData; data: Record<string, unknown> }> = {};
   fileEvents.forEach((e) => {
-    const data = JSON.parse(e.data);
+    let data: Record<string, unknown> = {};
+    try { data = JSON.parse(e.data); } catch { /* skip malformed */ }
     const path = String(data.path || '');
-    fileMap[path] = { event: e, data };
+    if (path) fileMap[path] = { event: e, data };
   });
 
   return (

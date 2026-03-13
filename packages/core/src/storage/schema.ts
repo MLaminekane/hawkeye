@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   total_tokens INTEGER DEFAULT 0,
   total_actions INTEGER DEFAULT 0,
   final_drift_score REAL,
-  metadata TEXT
+  metadata TEXT,
+  developer TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (

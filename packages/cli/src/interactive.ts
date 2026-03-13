@@ -13,6 +13,7 @@ import {
   PROVIDER_MODELS,
   type HawkeyeConfig,
   type GuardrailRuleSetting,
+  getDeveloperName,
 } from './config.js';
 import { loadTasks, createTask, saveTasks, readJournal, clearJournal, type Task } from './commands/daemon.js';
 
@@ -80,6 +81,16 @@ const COMMANDS: SlashCommand[] = [
 ];
 
 const o = chalk.hex('#ff5f1f');
+
+/** Terminal-safe width (never exceed actual columns) */
+function tw(): number {
+  return Math.min(process.stdout.columns || 80, 120);
+}
+
+/** Horizontal rule that adapts to terminal width */
+function hr(ch = '─', indent = 2): string {
+  return ch.repeat(Math.max(10, tw() - indent));
+}
 
 // Line queue for piped mode (serializes async sub-prompts)
 const lineQueue: string[] = [];
@@ -187,17 +198,24 @@ function printActiveBar(dbPath: string): void {
   storage.close();
   if (!r.ok || r.value.length === 0) return;
   const s = r.value[0];
-  const w = process.stdout.columns || 60;
+  const w = tw();
   console.log(chalk.dim('━'.repeat(w)));
+  const maxObj = Math.max(10, w - 40);
+  const objText = s.objective.length > maxObj ? s.objective.slice(0, maxObj - 1) + '…' : s.objective;
   console.log(
-    `  ${o('●')} ${chalk.white(s.objective)}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.dim(dur(s.started_at, null))}  ${chalk.dim(`${s.total_actions} actions`)}`,
+    `  ${o('●')} ${chalk.white(objText)}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.dim(dur(s.started_at, null))}  ${chalk.dim(`${s.total_actions} actions`)}`,
   );
   console.log(chalk.dim('━'.repeat(w)));
 }
 
 function printSession(i: number, s: SessionRow): void {
+  const w = tw();
+  // Adapt objective width: leave room for id(10) + badge(4) + duration(9) + actions(6) + cost(8) + ago(8) + margins(10) ≈ 55
+  const maxObj = Math.max(15, w - 55);
+  const objText = s.objective.length > maxObj ? s.objective.slice(0, maxObj - 1) + '…' : s.objective.padEnd(maxObj);
+  const cost = s.total_cost_usd > 0 ? chalk.hex('#FFB443')('$' + s.total_cost_usd.toFixed(2)) : '';
   console.log(
-    `  ${o.bold(`${i})`)} ${badge(s.status)}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.white(s.objective.slice(0, 35).padEnd(35))}  ${chalk.dim(dur(s.started_at, s.ended_at).padEnd(7))}  ${chalk.dim(String(s.total_actions).padStart(4))}a  ${s.total_cost_usd > 0 ? chalk.hex('#FFB443')('$' + s.total_cost_usd.toFixed(2)) + '  ' : ''}${chalk.dim(timeAgo(s.started_at))}`,
+    `  ${o.bold(`${i})`)} ${badge(s.status)} ${chalk.dim(s.id.slice(0, 8))}  ${chalk.white(objText)}  ${chalk.dim(dur(s.started_at, s.ended_at).padEnd(7))} ${chalk.dim(String(s.total_actions).padStart(3))}a ${cost} ${chalk.dim(timeAgo(s.started_at))}`,
   );
 }
 
@@ -560,8 +578,16 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
   } else if (c === 'help') {
     printCommands();
   } else {
-    // Run as shell command
-    await runShellCommand(cmd);
+    // Check if it's a known agent command → auto-record
+    const firstWord = cmd.split(/\s/)[0].toLowerCase();
+    const matchedAgent = AGENTS.find(
+      (a) => a.command && a.command.split(/\s/)[0].toLowerCase() === firstWord,
+    );
+    if (matchedAgent) {
+      await autoRecord(matchedAgent, cmd, cwd);
+    } else {
+      await runShellCommand(cmd);
+    }
   }
 
   return false;
@@ -1003,7 +1029,7 @@ async function cmdEnd(dbPath: string, args: string): Promise<void> {
 
   console.log('');
   console.log(chalk.bold.white('  Active Sessions'));
-  console.log(chalk.dim('  ─'.repeat(25)));
+  console.log(chalk.dim('  ' + hr('─', 4)));
   for (let i = 0; i < active.length; i++) {
     const s = active[i];
     const st = s.status === 'paused' ? chalk.blue('⏸') : o('●');
@@ -1048,7 +1074,6 @@ interface AgentDef {
 const AGENTS: AgentDef[] = [
   { name: 'Claude Code', command: 'claude', description: 'Anthropic Claude Code CLI', usesHooks: true },
   { name: 'Aider', command: 'aider', description: 'AI pair programming (supports DeepSeek, OpenAI, etc.)', needsInstall: 'brew install aider' },
-  { name: 'Cursor', command: 'cursor', description: 'Cursor AI editor', needsInstall: 'Download from https://cursor.com' },
   { name: 'Open Interpreter', command: 'interpreter', description: 'Natural language → code execution', needsInstall: 'pipx install open-interpreter' },
   { name: 'Custom command', command: '', description: 'Enter any command manually' },
 ];
@@ -1056,7 +1081,7 @@ const AGENTS: AgentDef[] = [
 async function cmdNew(cwd: string): Promise<void> {
   console.log('');
   console.log(chalk.bold.white('  New Session'));
-  console.log(chalk.dim('  ─'.repeat(25)));
+  console.log(chalk.dim('  ' + hr('─', 4)));
   console.log('');
 
   // 1. Pick agent
@@ -1064,7 +1089,8 @@ async function cmdNew(cwd: string): Promise<void> {
   console.log('');
   for (let i = 0; i < AGENTS.length; i++) {
     const a = AGENTS[i];
-    console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(a.name)}  ${chalk.dim(a.description)}`);
+    console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(a.name)}`);
+    console.log(`     ${chalk.dim(a.description)}`);
   }
   console.log('');
   const pick = await ask(`  ${o('›')} `);
@@ -1126,7 +1152,7 @@ async function cmdNew(cwd: string): Promise<void> {
       objective: obj,
       startedAt: new Date(),
       status: 'recording',
-      metadata: { agent: 'claude-code', workingDir: cwd },
+      metadata: { agent: 'claude-code', workingDir: cwd, developer: getDeveloperName() },
       totalCostUsd: 0,
       totalTokens: 0,
       totalActions: 0,
@@ -1160,15 +1186,6 @@ async function cmdNew(cwd: string): Promise<void> {
     execSync(`which ${cmd.split(' ')[0]}`, { stdio: 'ignore', env: shellEnv });
     cmdExists = true;
   } catch { }
-
-  // Fallback: Cursor macOS app path
-  if (!cmdExists && agent.name === 'Cursor') {
-    const cursorAppCli = '/Applications/Cursor.app/Contents/Resources/app/bin/cursor';
-    if (exs(cursorAppCli)) {
-      cmd = cursorAppCli;
-      cmdExists = true;
-    }
-  }
 
   if (!cmdExists) {
     console.log('');
@@ -1220,17 +1237,19 @@ async function cmdNew(cwd: string): Promise<void> {
     console.log(chalk.dim('  Pick a model for Aider:'));
     console.log('');
     const models = [
-      { label: 'DeepSeek Chat', value: 'deepseek/deepseek-chat' },
-      { label: 'DeepSeek Reasoner', value: 'deepseek/deepseek-reasoner' },
-      { label: 'Claude Sonnet', value: 'anthropic/claude-sonnet-4-6' },
-      { label: 'Claude Opus', value: 'anthropic/claude-opus-4-6' },
-      { label: 'GPT-4o', value: 'openai/gpt-4o' },
-      { label: 'GPT-4.1', value: 'openai/gpt-4.1' },
-      { label: 'Ollama (local)', value: 'ollama/llama3.2' },
-      { label: 'Custom', value: '' },
+      { label: 'DeepSeek Chat', value: 'deepseek/deepseek-chat', provider: 'DeepSeek' },
+      { label: 'DeepSeek Reasoner', value: 'deepseek/deepseek-reasoner', provider: 'DeepSeek' },
+      { label: 'Claude Sonnet', value: 'anthropic/claude-sonnet-4-6', provider: 'Anthropic' },
+      { label: 'Claude Opus', value: 'anthropic/claude-opus-4-6', provider: 'Anthropic' },
+      { label: 'GPT-4o', value: 'openai/gpt-4o', provider: 'OpenAI' },
+      { label: 'GPT-4.1', value: 'openai/gpt-4.1', provider: 'OpenAI' },
+      { label: 'Ollama (local)', value: 'ollama/llama3.2', provider: 'Local' },
+      { label: 'Custom', value: '', provider: '' },
     ];
     for (let i = 0; i < models.length; i++) {
-      console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(models[i].label)}`);
+      const m = models[i];
+      const prov = m.provider ? chalk.dim(` (${m.provider})`) : '';
+      console.log(`  ${o.bold(`${i + 1})`)} ${chalk.white(m.label)}${prov}`);
     }
     console.log('');
     const mPick = await ask(`  ${o('›')} `);
@@ -1281,7 +1300,7 @@ async function cmdAttach(dbPath: string, cwd: string): Promise<void> {
   if (active.length > 1) {
     console.log('');
     console.log(chalk.bold.white('  Active Sessions'));
-    console.log(chalk.dim('  ─'.repeat(25)));
+    console.log(chalk.dim('  ' + hr('─', 4)));
     for (let i = 0; i < active.length; i++) {
       console.log(
         `  ${o.bold(`${i + 1})`)} ${chalk.dim(active[i].id.slice(0, 8))}  ${chalk.white(active[i].objective.slice(0, 40))}  ${chalk.dim(dur(active[i].started_at, null))}`,
@@ -1301,7 +1320,7 @@ async function cmdAttach(dbPath: string, cwd: string): Promise<void> {
 
   console.log('');
   console.log(chalk.bold.white('  Attach Agent'));
-  console.log(chalk.dim('  ─'.repeat(25)));
+  console.log(chalk.dim('  ' + hr('─', 4)));
   console.log(`  ${chalk.dim('Session:')} ${o(session.id.slice(0, 8))} — ${chalk.white(session.objective)}`);
   console.log('');
 
@@ -1417,6 +1436,44 @@ async function cmdAttach(dbPath: string, cwd: string): Promise<void> {
   await new Promise<void>((res) => child.on('close', () => res()));
 }
 
+async function autoRecord(agent: AgentDef, fullCmd: string, cwd: string): Promise<void> {
+  console.log('');
+  console.log(
+    chalk.dim(`  Detected agent: ${o.bold(agent.name)}. Starting recorded session.`),
+  );
+
+  if (agent.usesHooks) {
+    // Claude Code uses hooks — just run the command directly.
+    // Session is either pre-created via /new, or hooks auto-create one.
+    await runShellCommand(fullCmd);
+    return;
+  }
+
+  // Ask for objective
+  const obj = await ask(`  ${chalk.dim('Objective:')} `);
+  if (!obj) return;
+
+  // Extract model from command if present (e.g. "aider --model deepseek/deepseek-chat")
+  const modelMatch = fullCmd.match(/--model\s+(\S+)/);
+  const modelArg = modelMatch ? modelMatch[1] : null;
+
+  console.log('');
+  console.log(
+    chalk.dim(
+      `  Launching: hawkeye record -o "${obj}"${modelArg ? ` -m ${modelArg}` : ''} -- ${fullCmd}`,
+    ),
+  );
+  console.log('');
+
+  const { spawn: sp } = await import('node:child_process');
+  const args = ['record', '-o', obj, ...(modelArg ? ['-m', modelArg] : []), '--', ...fullCmd.split(' ')];
+  const child = sp(process.execPath, [process.argv[1], ...args], {
+    stdio: 'inherit',
+    cwd,
+  });
+  await new Promise<void>((res) => child.on('close', () => res()));
+}
+
 async function runShellCommand(line: string): Promise<void> {
   const { spawn: sp } = await import('node:child_process');
   console.log('');
@@ -1490,7 +1547,7 @@ async function cmdRestart(dbPath: string, cwd: string, args: string): Promise<vo
       objective: obj,
       startedAt: new Date(),
       status: 'recording',
-      metadata: { agent, model, workingDir: cwd },
+      metadata: { agent, model, workingDir: cwd, developer: getDeveloperName() },
       totalCostUsd: 0,
       totalTokens: 0,
       totalActions: 0,
@@ -1921,10 +1978,11 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
         s.status === 'paused' ? chalk.blue('⏸') :
           chalk.red('✗');
 
+  const innerW = Math.max(20, tw() - 6);
   console.log('');
-  console.log(o('  ┌─ Session Inspect ───────────────────────────────'));
+  console.log(o('  ┌─ Session Inspect ' + '─'.repeat(Math.max(0, innerW - 19))));
   console.log(o('  │'));
-  console.log(o('  │ ') + chalk.bold(s.objective));
+  console.log(o('  │ ') + chalk.bold(s.objective.slice(0, innerW - 2)));
   console.log(o('  │'));
   console.log(o('  │ ') + `${statusIcon} ${s.id.slice(0, 8)}  ${s.agent || chalk.dim('unknown')}  ${dur(s.started_at, s.ended_at)}`);
   console.log(o('  │'));
@@ -1935,7 +1993,7 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
   const totalCost = events.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
 
   console.log(o('  │ ') + chalk.bold('Stats'));
-  console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+  console.log(o('  │ ') + chalk.dim('─'.repeat(Math.max(10, innerW - 4))));
   const driftStr = s.final_drift_score != null
     ? (s.final_drift_score >= 70 ? chalk.green : s.final_drift_score >= 40 ? chalk.yellow : chalk.red)(`${s.final_drift_score.toFixed(0)}/100`)
     : chalk.dim('—');
@@ -1960,7 +2018,7 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
   }
   const sortedFiles = Object.entries(fileMap).sort((a, b) => b[1].cost - a[1].cost);
   console.log(o('  │ ') + chalk.bold(`Files (${sortedFiles.length})`));
-  console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+  console.log(o('  │ ') + chalk.dim('─'.repeat(Math.max(10, innerW - 4))));
   if (sortedFiles.length === 0) {
     console.log(o('  │ ') + chalk.dim('  No file changes'));
   } else {
@@ -1986,7 +2044,7 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
       byModel[key].calls++;
     }
     console.log(o('  │ ') + chalk.bold(`LLM Calls (${llmEvents.length})`));
-    console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+    console.log(o('  │ ') + chalk.dim('─'.repeat(Math.max(10, innerW - 4))));
     for (const [model, data] of Object.entries(byModel)) {
       console.log(o('  │ ') + `  ${chalk.magenta('⚡')} ${model}  ${data.calls} calls  ${data.tokens.toLocaleString()} tok  ${chalk.yellow('$' + data.cost.toFixed(4))}`);
     }
@@ -1996,13 +2054,15 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
   // ─── Drift History ───
   if (drifts.length > 0) {
     console.log(o('  │ ') + chalk.bold(`Drift (${drifts.length} checks)`));
-    console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+    console.log(o('  │ ') + chalk.dim('─'.repeat(Math.max(10, innerW - 4))));
     for (const snap of drifts.slice(-10)) {
       const time = new Date(snap.created_at).toLocaleTimeString();
       const score = snap.score;
       const color = score >= 70 ? chalk.green : score >= 40 ? chalk.yellow : chalk.red;
       const bar = color('█'.repeat(Math.round(score / 5))) + chalk.dim('░'.repeat(20 - Math.round(score / 5)));
-      console.log(o('  │ ') + `  ${chalk.dim(time)} ${bar} ${color(score.toFixed(0).padStart(3) + '/100')} ${chalk.dim(snap.reason || '')}`);
+      const maxReason = Math.max(10, innerW - 42);
+      const reason = (snap.reason || '').slice(0, maxReason);
+      console.log(o('  │ ') + `  ${chalk.dim(time)} ${bar} ${color(score.toFixed(0).padStart(3) + '/100')} ${chalk.dim(reason)}`);
     }
     if (drifts.length > 10) console.log(o('  │ ') + chalk.dim(`  ... ${drifts.length - 10} earlier checks`));
     console.log(o('  │'));
@@ -2010,7 +2070,7 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
 
   // ─── Recent Events ───
   console.log(o('  │ ') + chalk.bold(`Timeline (last 15)`));
-  console.log(o('  │ ') + chalk.dim('─'.repeat(45)));
+  console.log(o('  │ ') + chalk.dim('─'.repeat(Math.max(10, innerW - 4))));
   const typeIcons: Record<string, string> = {
     command: chalk.blue('$'), file_write: chalk.green('✎'), file_delete: chalk.red('✗'),
     file_read: chalk.dim('◉'), llm_call: chalk.magenta('⚡'), api_call: chalk.cyan('→'),
@@ -2026,12 +2086,13 @@ async function cmdInspect(dbPath: string, args: string): Promise<void> {
     else if (e.type === 'llm_call') summary = `${e.parsed.provider}/${e.parsed.model}`;
     else if (e.type === 'error') summary = String(e.parsed.message || e.parsed.error || 'error');
     const cost = e.cost_usd > 0 ? chalk.yellow(` $${e.cost_usd.toFixed(4)}`) : '';
-    console.log(o('  │ ') + `  ${chalk.dim(time)} ${icon} ${summary.slice(0, 50)}${cost}`);
+    const maxSummary = Math.max(15, innerW - 22);
+    console.log(o('  │ ') + `  ${chalk.dim(time)} ${icon} ${summary.slice(0, maxSummary)}${cost}`);
   }
   if (events.length > 15) console.log(o('  │ ') + chalk.dim(`  ... ${events.length - 15} earlier events`));
 
   console.log(o('  │'));
-  console.log(o('  └──────────────────────────────────────────────────'));
+  console.log(o('  └' + '─'.repeat(innerW)));
   console.log('');
 }
 
@@ -2794,7 +2855,7 @@ async function cmdTasks(cwd: string, args: string): Promise<void> {
     if (!journal) { console.log(chalk.dim('  No journal yet. Tasks will be logged here after execution.')); return; }
     console.log('');
     console.log(`  ${o.bold('Task Journal')} ${chalk.dim('(agent memory)')}`);
-    console.log(chalk.dim('  ─'.repeat(25)));
+    console.log(chalk.dim('  ' + hr('─', 4)));
     console.log(journal);
     return;
   }
@@ -2812,7 +2873,7 @@ async function cmdTasks(cwd: string, args: string): Promise<void> {
 
   console.log('');
   console.log(`  ${o.bold('Tasks')} ${chalk.dim(`(${tasks.length})`)}`);
-  console.log(chalk.dim('  ─'.repeat(25)));
+  console.log(chalk.dim('  ' + hr('─', 4)));
 
   const statusIcon: Record<string, string> = {
     pending: chalk.yellow('⏳'),
@@ -2869,7 +2930,7 @@ async function cmdRemote(cwd: string): Promise<void> {
 
   console.log('');
   console.log(`  ${o.bold('Hawkeye Remote')}`);
-  console.log(chalk.dim('  ─'.repeat(25)));
+  console.log(chalk.dim('  ' + hr('─', 4)));
 
   // 1. Check/start serve
   let servePort = 0;
@@ -3185,6 +3246,7 @@ async function sessionMenu(s: SessionRow, dbPath: string, cwd: string): Promise<
         agent: s.agent || 'claude-code',
         model: s.model || 'claude-sonnet-4-6',
         workingDir: cwd,
+        developer: getDeveloperName(),
       },
       totalCostUsd: 0,
       totalTokens: 0,

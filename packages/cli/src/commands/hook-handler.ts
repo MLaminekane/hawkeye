@@ -17,6 +17,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSyn
 import { createHash, randomUUID } from 'node:crypto';
 import { Storage, scoreHeuristic, slidingDriftScore, scanContent } from '@hawkeye/core';
 import type { TraceEvent, EventType, DriftFlag } from '@hawkeye/core';
+import { getDeveloperName } from '../config.js';
 
 // ── Cost estimation ──
 // Claude Code primarily uses Claude models. Default to sonnet pricing.
@@ -304,6 +305,7 @@ function getOrCreateSession(
         agent: 'claude-code',
         model: DEFAULT_MODEL,
         workingDir: process.cwd(),
+        developer: getDeveloperName(),
       },
       totalCostUsd: 0,
       totalTokens: 0,

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync, openSync } from 'node:fs';
 import { ReadStream } from 'node:tty';
 import chalk from 'chalk';
-import { createRecorder, type DriftCheckResult, type GuardrailViolation, type GuardrailRuleConfig } from '@hawkeye/core';
+import { createRecorder, Logger, type DriftCheckResult, type GuardrailViolation, type GuardrailRuleConfig } from '@hawkeye/core';
 import { RecordOverlay } from './record-overlay.js';
 import { loadConfig, getDefaultConfig, type WebhookSettings } from '../config.js';
 
@@ -50,6 +50,11 @@ export const recordCommand = new Command('record')
     const cwd = process.cwd();
     const hawkDir = join(cwd, '.hawkeye');
     const dbPath = join(hawkDir, 'traces.db');
+
+    // Suppress verbose INFO logs — show only warnings/errors (clean output like Claude Code)
+    if (!process.env.HAWKEYE_LOG_LEVEL) {
+      Logger.setGlobalLevel('warn');
+    }
 
     // Auto-create .hawkeye + config + DB if they don't exist (zero-config)
     if (!existsSync(hawkDir)) {
@@ -335,17 +340,6 @@ export const recordCommand = new Command('record')
     });
 
     recorder.start();
-
-    const driftStatus = options.drift !== false ? chalk.green('on') : chalk.dim('off');
-    const guardStatus = options.guardrails !== false ? chalk.green('on') : chalk.dim('off');
-
-    console.log(chalk.green('● Recording started'));
-    console.log(chalk.dim(`  Session:    ${recorder.sessionId}`));
-    console.log(chalk.dim(`  Objective:  ${options.objective}`));
-    console.log(chalk.dim(`  Agent:      ${agent}`));
-    console.log(chalk.dim(`  Drift:      ${driftStatus}  Guardrails: ${guardStatus}`));
-    console.log('');
-
     overlay.start();
 
     // Write the network preload script for child process interception
@@ -468,7 +462,6 @@ function getEventSummary(event: import('@hawkeye/core').TraceEvent): string {
 function detectAgent(command: string): string {
   const lower = command.toLowerCase();
   if (lower.includes('claude')) return 'claude-code';
-  if (lower.includes('cursor')) return 'cursor';
   if (lower.includes('copilot')) return 'copilot';
   if (lower.includes('autogpt') || lower.includes('auto-gpt')) return 'autogpt';
   if (lower.includes('crewai')) return 'crewai';
