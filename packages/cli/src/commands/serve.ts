@@ -98,7 +98,8 @@ export const serveCommand = new Command('serve')
     // Resolve dashboard dist directory
     // Try two locations: (1) bundled inside CLI package (npm install), (2) monorepo sibling (dev)
     const currentDir = fileURLToPath(new URL('.', import.meta.url));
-    const bundledDashboard = join(currentDir, '..', 'dashboard');
+    // currentDir = dist/commands/ → go up 2 levels for package root
+    const bundledDashboard = join(currentDir, '..', '..', 'dashboard');
     const monorepoSibling = join(currentDir, '..', '..', '..', 'dashboard', 'dist');
     const dashboardDist = existsSync(bundledDashboard) ? bundledDashboard : monorepoSibling;
 
