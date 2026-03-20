@@ -59,6 +59,14 @@ npx hawkeye-ai
 brew install MLaminekane/hawkeye/hawkeye-ai
 ```
 
+### Vercel Agent Skill
+
+Install as a skill for any AI coding agent (Claude Code, Cursor, Gemini CLI, GitHub Copilot, and 30+ more):
+
+```bash
+npx skills add MLaminekane/hawkeye
+```
+
 ### From source
 
 ```bash
