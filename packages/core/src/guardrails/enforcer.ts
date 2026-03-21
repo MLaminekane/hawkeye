@@ -17,21 +17,29 @@ export interface GuardrailEnforcer {
 
 function matchesGlob(filePath: string, pattern: string): boolean {
   // Simple glob matching: supports * and **
-  const regex = pattern
-    .replace(/\./g, '\\.')
-    .replace(/\*\*/g, '{{GLOBSTAR}}')
-    .replace(/\*/g, '[^/]*')
-    .replace(/\{\{GLOBSTAR\}\}/g, '.*');
-  return new RegExp(`(^|/)${regex}$`).test(filePath);
+  try {
+    const regex = pattern
+      .replace(/\./g, '\\.')
+      .replace(/\*\*/g, '{{GLOBSTAR}}')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\{\{GLOBSTAR\}\}/g, '.*');
+    return new RegExp(`(^|/)${regex}$`).test(filePath);
+  } catch {
+    return false;
+  }
 }
 
 function matchesCommandPattern(fullCommand: string, pattern: string): boolean {
   // Support wildcard * in command patterns
   if (pattern.includes('*')) {
-    const regex = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*/g, '.*');
-    return new RegExp(regex, 'i').test(fullCommand);
+    try {
+      const regex = pattern
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*');
+      return new RegExp(regex, 'i').test(fullCommand);
+    } catch {
+      return false;
+    }
   }
   return fullCommand.toLowerCase().includes(pattern.toLowerCase());
 }
