@@ -17,19 +17,6 @@ export interface SessionData {
   developer: string | null;
 }
 
-export interface DeveloperAnalyticsData {
-  developer: string;
-  total_sessions: number;
-  completed_sessions: number;
-  aborted_sessions: number;
-  total_actions: number;
-  total_cost_usd: number;
-  total_tokens: number;
-  avg_drift_score: number;
-  first_session: string | null;
-  last_session: string | null;
-}
-
 export interface EventData {
   id: string;
   session_id: string;
@@ -117,6 +104,45 @@ export interface SettingsData {
   };
 }
 
+export interface ImpactPreviewData {
+  timestamp: string;
+  sessionId: string;
+  toolName: string;
+  toolInput: { command?: string; file_path?: string };
+  impact: {
+    risk: 'low' | 'medium' | 'high' | 'critical';
+    summary: string;
+    details: string[];
+    affectedFiles: number;
+    affectedLines: number;
+    gitTracked: boolean;
+    uncommittedChanges: boolean;
+    category: string;
+  };
+}
+
+export interface PolicyRule {
+  name: string;
+  description?: string;
+  type: string;
+  enabled: boolean;
+  action: 'warn' | 'block';
+  config: Record<string, unknown>;
+}
+
+export interface PolicyData {
+  version: '1';
+  name: string;
+  description?: string;
+  rules: PolicyRule[];
+}
+
+export interface PolicyValidationError {
+  rule: string;
+  field: string;
+  message: string;
+}
+
 export interface GlobalStatsData {
   total_sessions: number;
   active_sessions: number;
@@ -197,8 +223,17 @@ export const api = {
   clearTaskJournal: () =>
     postJson<{ ok: boolean }>(`${API_BASE}/tasks/journal/clear`, {}),
 
-  getDevAnalytics: () =>
-    fetchJson<DeveloperAnalyticsData[]>(`${API_BASE}/analytics/developers`),
+  getLastImpact: () =>
+    fetchJson<ImpactPreviewData | null>(`${API_BASE}/impact`),
+
+  getInterceptions: () =>
+    fetchJson<{ blocks: EventData[]; pendingReviews: Array<{ id: string; timestamp: string; sessionId: string; command: string; matchedPattern: string }> }>(`${API_BASE}/interceptions`),
+
+  getPolicies: () =>
+    fetchJson<PolicyData | null>(`${API_BASE}/policies`),
+
+  savePolicies: (policy: PolicyData) =>
+    postJson<{ ok: boolean; errors?: PolicyValidationError[] }>(`${API_BASE}/policies`, policy),
 };
 
 // ─── WebSocket client ────────────────────────────────────────
@@ -215,7 +250,9 @@ export type WsMessage =
   | { type: 'task_cancelled'; task: TaskData }
   | { type: 'task_running'; task: TaskData }
   | { type: 'task_completed'; task: TaskData }
-  | { type: 'task_failed'; task: TaskData };
+  | { type: 'task_failed'; task: TaskData }
+  | { type: 'impact_preview'; timestamp: string; sessionId: string; toolName: string; toolInput: Record<string, unknown>; impact: ImpactPreviewData['impact'] }
+  | { type: 'action_stream'; sessionId: string; event: EventData; risk: 'safe' | 'low' | 'medium' | 'high' | 'critical' };
 
 type WsListener = (msg: WsMessage) => void;
 

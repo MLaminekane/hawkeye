@@ -6,27 +6,8 @@ import { ReadStream } from 'node:tty';
 import chalk from 'chalk';
 import { createRecorder, Logger, type DriftCheckResult, type GuardrailViolation, type GuardrailRuleConfig } from '@mklamine/hawkeye-core';
 import { RecordOverlay } from './record-overlay.js';
-import { loadConfig, getDefaultConfig, type WebhookSettings } from '../config.js';
-
-function fireWebhooks(
-  webhooks: WebhookSettings[],
-  eventType: string,
-  payload: Record<string, unknown>,
-): void {
-  for (const wh of webhooks) {
-    if (!wh.enabled) continue;
-    if (wh.events.length > 0 && !wh.events.includes(eventType)) continue;
-    fetch(wh.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event: eventType,
-        timestamp: new Date().toISOString(),
-        ...payload,
-      }),
-    }).catch(() => {});
-  }
-}
+import { loadConfig, getDefaultConfig } from '../config.js';
+import { fireWebhooks } from '../webhooks.js';
 
 export const recordCommand = new Command('record')
   .alias('watch')

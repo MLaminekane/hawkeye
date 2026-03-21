@@ -91,6 +91,10 @@ hawkeye end <session-id>      # End a recording session
 hawkeye replay <session-id>   # Replay session events in terminal
 hawkeye export <session-id>   # Export session as JSON
 hawkeye serve                 # Launch dashboard on http://localhost:4242
+hawkeye report                # Morning report of recent sessions
+hawkeye report --llm --json   # With LLM post-mortem, JSON output
+hawkeye arena -t "task" -a claude,aider  # Agent Arena: compare agents head-to-head
+hawkeye arena --list           # View past arena results
 ```
 
 ### Status Check
@@ -205,32 +209,40 @@ The dashboard provides:
 
 ## Overnight / Background Agent Use
 
-For running agents unattended:
+Use `hawkeye overnight` for unattended runs with automatic safety guardrails:
 
 ```bash
-# Start the dashboard + daemon
+# Start overnight mode with $5 budget (serves dashboard + daemon + strict guardrails)
+hawkeye overnight --budget 5
+
+# With an initial task and remote access
+hawkeye overnight --budget 10 --task "Fix all lint errors" --tunnel
+
+# With LLM post-mortem on shutdown
+hawkeye overnight --budget 5 --report-llm
+
+# Generate a morning report separately
+hawkeye report                          # Sessions since overnight.json or 8h ago
+hawkeye report --since 2026-03-19T00:00 # Specific time range
+hawkeye report --llm --webhook          # With post-mortem + webhook notification
+```
+
+Overnight mode automatically:
+- Applies cost limits, file protection, command blocking, auto-pause on critical drift
+- Backs up your config and restores it on shutdown
+- Generates a morning report on Ctrl+C with per-session stats, drift, errors
+- Fires `overnight_report`, `session_complete`, and `task_complete` webhooks
+
+For manual setup without `overnight`:
+
+```bash
+# Start the dashboard + daemon separately
 hawkeye serve &
 hawkeye daemon
 
 # Or use the remote mode (includes Cloudflare tunnel for mobile access)
 hawkeye remote
 ```
-
-Recommended guardrails for overnight runs:
-```json
-{
-  "guardrails": [
-    { "type": "cost_limit", "maxCostPerSession": 10.00, "maxCostPerHour": 3.00, "action": "block" },
-    { "type": "command_block", "pattern": "git push|rm -rf|docker rm|DROP|TRUNCATE", "action": "block" },
-    { "type": "file_protect", "pattern": ".env*", "action": "block" },
-    { "type": "review_gate", "pattern": "deploy|publish|release", "action": "block" }
-  ],
-  "drift": {
-    "enabled": true,
-    "autoPause": true,
-    "thresholds": { "warning": 50, "critical": 30 }
-  }
-}
 ```
 
 ## MCP Tools Reference (Agent Self-Awareness)

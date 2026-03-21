@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, type SettingsData } from '../api';
+import { api, type SettingsData, type PolicyData, type PolicyRule as PolicyRuleType } from '../api';
 
 interface GuardrailRule {
   name: string;
@@ -101,10 +101,15 @@ export function SettingsPage() {
   const [webhooks, setWebhooks] = useState<WebhookSetting[]>([]);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [providerModels, setProviderModels] = useState<Record<string, string[]>>({});
+  const [policy, setPolicy] = useState<PolicyData | null>(null);
+  const [policyStatus, setPolicyStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [policyErrors, setPolicyErrors] = useState<string[]>([]);
+  const [editingRule, setEditingRule] = useState<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [loadError, setLoadError] = useState('');
   const loaded = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const policySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Preserve fields the UI doesn't edit (recording, dashboard)
   const preservedFields = useRef<Pick<import('../api').SettingsData, 'recording' | 'dashboard'>>({});
 
@@ -125,6 +130,8 @@ export function SettingsPage() {
       setLoadError('Could not load settings from server');
       loaded.current = true;
     });
+
+    api.getPolicies().then((p) => { if (p) setPolicy(p); }).catch(() => {});
   };
 
   useEffect(() => {
@@ -159,6 +166,29 @@ export function SettingsPage() {
     }, 600);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
   }, [driftConfig, rules, webhooks, apiKeys]);
+
+  // Auto-save policy with debounce
+  useEffect(() => {
+    if (!loaded.current || !policy) return;
+    if (policySaveTimer.current) clearTimeout(policySaveTimer.current);
+    policySaveTimer.current = setTimeout(async () => {
+      setPolicyStatus('saving');
+      setPolicyErrors([]);
+      try {
+        const result = await api.savePolicies(policy);
+        if (result.errors && result.errors.length > 0) {
+          setPolicyErrors(result.errors.map((e) => `${e.rule}.${e.field}: ${e.message}`));
+          setPolicyStatus('error');
+        } else {
+          setPolicyStatus('saved');
+          setTimeout(() => setPolicyStatus('idle'), 1500);
+        }
+      } catch {
+        setPolicyStatus('error');
+      }
+    }, 600);
+    return () => { if (policySaveTimer.current) clearTimeout(policySaveTimer.current); };
+  }, [policy]);
 
   // When provider changes, auto-select first model for that provider
   const handleProviderChange = (newProvider: string) => {
@@ -321,6 +351,16 @@ export function SettingsPage() {
         </div>
       </div>
 
+      {/* Policy Engine */}
+      <PolicySection
+        policy={policy}
+        setPolicy={setPolicy}
+        policyStatus={policyStatus}
+        policyErrors={policyErrors}
+        editingRule={editingRule}
+        setEditingRule={setEditingRule}
+      />
+
       {/* Webhooks */}
       <div className="mt-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
         <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
@@ -480,5 +520,514 @@ function describeRule(rule: GuardrailRule): string {
       return `Detects prompt injection (scope: ${c.scope || 'input'})`;
     }
     default: return '';
+  }
+}
+
+// ─── Policy Rule Types ──────────────────────────────────────────
+
+const POLICY_RULE_TYPES = [
+  { value: 'file_protect', label: 'File Protect', description: 'Block writes to sensitive files' },
+  { value: 'command_block', label: 'Command Block', description: 'Block dangerous shell commands' },
+  { value: 'cost_limit', label: 'Cost Limit', description: 'Cap session spending' },
+  { value: 'token_limit', label: 'Token Limit', description: 'Cap token usage per session' },
+  { value: 'directory_scope', label: 'Directory Scope', description: 'Restrict access to directories' },
+  { value: 'network_lock', label: 'Network Lock', description: 'Control allowed/blocked hosts' },
+  { value: 'review_gate', label: 'Review Gate', description: 'Require human approval for commands' },
+  { value: 'impact_threshold', label: 'Impact Threshold', description: 'Block high-impact actions' },
+] as const;
+
+function defaultConfigForType(type: string): Record<string, unknown> {
+  switch (type) {
+    case 'file_protect': return { paths: ['.env', '*.pem', '*.key'] };
+    case 'command_block': return { patterns: ['rm -rf /'] };
+    case 'cost_limit': return { maxUsdPerSession: 10, maxUsdPerHour: 5 };
+    case 'token_limit': return { maxTokensPerSession: 500000 };
+    case 'directory_scope': return { blockedDirs: ['/etc', '/usr', '~/.ssh'] };
+    case 'network_lock': return { allowedHosts: [], blockedHosts: [] };
+    case 'review_gate': return { patterns: ['npm publish', 'docker push'] };
+    case 'impact_threshold': return { blockAbove: 'critical', warnAbove: 'high' };
+    default: return {};
+  }
+}
+
+function describePolicyRule(rule: PolicyRuleType): string {
+  const c = rule.config;
+  switch (rule.type) {
+    case 'file_protect': return Array.isArray(c.paths) ? (c.paths as string[]).join(', ') : '';
+    case 'command_block': return Array.isArray(c.patterns) ? (c.patterns as string[]).join(', ') : '';
+    case 'cost_limit': return `$${c.maxUsdPerSession ?? '?'}/session${c.maxUsdPerHour ? `, $${c.maxUsdPerHour}/hour` : ''}`;
+    case 'token_limit': return `${((c.maxTokensPerSession as number) || 0).toLocaleString()} tokens/session`;
+    case 'directory_scope': {
+      const blocked = (c.blockedDirs as string[]) || [];
+      const allowed = (c.allowedDirs as string[]) || [];
+      if (blocked.length > 0) return `Blocked: ${blocked.join(', ')}`;
+      if (allowed.length > 0) return `Allowed: ${allowed.join(', ')}`;
+      return 'No directories configured';
+    }
+    case 'network_lock': {
+      const allowed = (c.allowedHosts as string[]) || [];
+      const blocked = (c.blockedHosts as string[]) || [];
+      if (allowed.length > 0) return `Allowed: ${allowed.join(', ')}`;
+      if (blocked.length > 0) return `Blocked: ${blocked.join(', ')}`;
+      return 'No hosts configured';
+    }
+    case 'review_gate': return Array.isArray(c.patterns) ? (c.patterns as string[]).join(', ') : '';
+    case 'impact_threshold': return `Block: ${c.blockAbove || '-'}, Warn: ${c.warnAbove || '-'}`;
+    default: return '';
+  }
+}
+
+// ─── Policy Section Component ───────────────────────────────────
+
+function PolicySection({
+  policy,
+  setPolicy,
+  policyStatus,
+  policyErrors,
+  editingRule,
+  setEditingRule,
+}: {
+  policy: PolicyData | null;
+  setPolicy: (p: PolicyData | null) => void;
+  policyStatus: string;
+  policyErrors: string[];
+  editingRule: number | null;
+  setEditingRule: (i: number | null) => void;
+}) {
+  const initPolicy = () => {
+    setPolicy({
+      version: '1',
+      name: 'project',
+      description: 'Project security policy',
+      rules: [
+        {
+          name: 'protect-secrets',
+          description: 'Block writes to sensitive files',
+          type: 'file_protect',
+          enabled: true,
+          action: 'block',
+          config: { paths: ['.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519'] },
+        },
+        {
+          name: 'no-destructive-commands',
+          description: 'Block dangerous shell commands',
+          type: 'command_block',
+          enabled: true,
+          action: 'block',
+          config: { patterns: ['rm -rf /', 'rm -rf ~', 'sudo rm', 'DROP TABLE', 'curl * | bash'] },
+        },
+        {
+          name: 'block-high-impact',
+          description: 'Block actions with critical impact score',
+          type: 'impact_threshold',
+          enabled: true,
+          action: 'block',
+          config: { blockAbove: 'critical', warnAbove: 'high' },
+        },
+      ],
+    });
+  };
+
+  const updateRule = (index: number, partial: Partial<PolicyRuleType>) => {
+    if (!policy) return;
+    setPolicy({
+      ...policy,
+      rules: policy.rules.map((r, i) => i === index ? { ...r, ...partial } : r),
+    });
+  };
+
+  const removeRule = (index: number) => {
+    if (!policy) return;
+    setPolicy({
+      ...policy,
+      rules: policy.rules.filter((_, i) => i !== index),
+    });
+    if (editingRule === index) setEditingRule(null);
+  };
+
+  const addRule = () => {
+    if (!policy) return;
+    const newRule: PolicyRuleType = {
+      name: `rule-${policy.rules.length + 1}`,
+      description: '',
+      type: 'command_block',
+      enabled: true,
+      action: 'block',
+      config: defaultConfigForType('command_block'),
+    };
+    setPolicy({ ...policy, rules: [...policy.rules, newRule] });
+    setEditingRule(policy.rules.length);
+  };
+
+  return (
+    <div className="mt-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
+      <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-4 sm:px-5 py-3">
+        <div className="flex items-center gap-3">
+          <h2 className="font-display text-base font-semibold text-hawk-text">Policy Engine</h2>
+          <span className="rounded bg-hawk-orange/15 px-1.5 py-0.5 font-mono text-[10px] text-hawk-orange">
+            .hawkeye/policies.yml
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {policyStatus === 'saving' && (
+            <span className="font-mono text-[10px] text-hawk-text3 animate-pulse">Saving...</span>
+          )}
+          {policyStatus === 'saved' && (
+            <span className="font-mono text-[10px] text-hawk-green">Saved</span>
+          )}
+          {policyStatus === 'error' && (
+            <span className="font-mono text-[10px] text-hawk-red">Error</span>
+          )}
+        </div>
+      </div>
+
+      {!policy ? (
+        <div className="px-5 py-8 text-center">
+          <p className="font-mono text-sm text-hawk-text3 mb-1">No policies.yml found</p>
+          <p className="font-mono text-[10px] text-hawk-text3/60 mb-4">
+            Policies are declarative security rules you can share across projects and teams.
+          </p>
+          <button
+            onClick={initPolicy}
+            className="rounded-lg bg-hawk-orange/15 border border-hawk-orange/30 px-4 py-2 font-mono text-xs text-hawk-orange hover:bg-hawk-orange/25 transition-colors"
+          >
+            Initialize policies.yml
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* Policy metadata */}
+          <div className="px-4 sm:px-5 py-3 border-b border-hawk-border-subtle bg-hawk-surface2/30">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex-1">
+                <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Name</label>
+                <input
+                  type="text"
+                  value={policy.name}
+                  onChange={(e) => setPolicy({ ...policy, name: e.target.value })}
+                  className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+                />
+              </div>
+              <div className="flex-[2]">
+                <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Description</label>
+                <input
+                  type="text"
+                  value={policy.description || ''}
+                  onChange={(e) => setPolicy({ ...policy, description: e.target.value })}
+                  placeholder="Describe this policy set..."
+                  className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Validation errors */}
+          {policyErrors.length > 0 && (
+            <div className="mx-4 sm:mx-5 mt-3 rounded-lg border border-hawk-red/30 bg-hawk-red/10 px-4 py-2">
+              {policyErrors.map((err, i) => (
+                <p key={i} className="font-mono text-[10px] text-hawk-red">{err}</p>
+              ))}
+            </div>
+          )}
+
+          {/* Policy rules */}
+          <div className="divide-y divide-hawk-border-subtle">
+            {policy.rules.map((rule, i) => (
+              <div key={i} className="px-4 sm:px-5 py-4 transition-colors hover:bg-hawk-surface2/35">
+                <div className="flex items-start gap-3">
+                  <Toggle enabled={rule.enabled} onToggle={() => updateRule(i, { enabled: !rule.enabled })} />
+
+                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setEditingRule(editingRule === i ? null : i)}>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="font-mono text-sm text-hawk-text font-semibold">{rule.name}</span>
+                      <span className="rounded bg-hawk-surface3 px-1.5 py-0.5 font-mono text-[10px] text-hawk-text3">
+                        {rule.type}
+                      </span>
+                      {rule.description && (
+                        <span className="hidden sm:inline font-mono text-[10px] text-hawk-text3/60">{rule.description}</span>
+                      )}
+                    </div>
+                    <div className="font-mono text-[10px] text-hawk-text3 truncate">
+                      {describePolicyRule(rule)}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => updateRule(i, { action: rule.action === 'block' ? 'warn' : 'block' })}
+                    className={`shrink-0 rounded px-2 py-1 font-mono text-[10px] font-bold uppercase ${rule.action === 'block'
+                      ? 'bg-hawk-red/15 text-hawk-red'
+                      : 'bg-hawk-amber/15 text-hawk-amber'
+                    }`}
+                  >
+                    {rule.action}
+                  </button>
+
+                  <button
+                    onClick={() => setEditingRule(editingRule === i ? null : i)}
+                    className="shrink-0 rounded px-1.5 py-1 font-mono text-[10px] text-hawk-text3 hover:text-hawk-text transition-colors"
+                  >
+                    {editingRule === i ? '▲' : '▼'}
+                  </button>
+                </div>
+
+                {/* Expanded editor */}
+                {editingRule === i && (
+                  <div className="mt-3 ml-0 sm:ml-12 space-y-3 rounded-lg border border-hawk-border-subtle bg-hawk-surface2/40 p-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Rule name</label>
+                        <input
+                          type="text"
+                          value={rule.name}
+                          onChange={(e) => updateRule(i, { name: e.target.value })}
+                          className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Type</label>
+                        <select
+                          value={rule.type}
+                          onChange={(e) => {
+                            const newType = e.target.value;
+                            updateRule(i, { type: newType, config: defaultConfigForType(newType) });
+                          }}
+                          className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+                        >
+                          {POLICY_RULE_TYPES.map((t) => (
+                            <option key={t.value} value={t.value}>{t.label} — {t.description}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Description</label>
+                      <input
+                        type="text"
+                        value={rule.description || ''}
+                        onChange={(e) => updateRule(i, { description: e.target.value })}
+                        placeholder="What this rule does..."
+                        className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40"
+                      />
+                    </div>
+
+                    {/* Type-specific config editors */}
+                    <PolicyConfigEditor rule={rule} onChange={(config) => updateRule(i, { config })} />
+
+                    <div className="flex justify-end pt-1">
+                      <button
+                        onClick={() => removeRule(i)}
+                        className="rounded px-2.5 py-1 font-mono text-[10px] text-hawk-red hover:bg-hawk-red/10 transition-colors"
+                      >
+                        Delete rule
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Add rule + summary */}
+          <div className="flex items-center justify-between border-t border-hawk-border-subtle px-4 sm:px-5 py-3 bg-hawk-surface2/30">
+            <div className="font-mono text-[10px] text-hawk-text3">
+              {policy.rules.filter((r) => r.enabled).length} of {policy.rules.length} rules enabled
+            </div>
+            <button
+              onClick={addRule}
+              className="rounded bg-hawk-surface3 px-2.5 py-1 font-mono text-[10px] text-hawk-text3 hover:text-hawk-text transition-colors"
+            >
+              + Add rule
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Policy Config Editor (type-specific) ───────────────────────
+
+function PolicyConfigEditor({
+  rule,
+  onChange,
+}: {
+  rule: PolicyRuleType;
+  onChange: (config: Record<string, unknown>) => void;
+}) {
+  const c = rule.config;
+
+  const updateList = (key: string, value: string) => {
+    onChange({ ...c, [key]: value.split(',').map((s) => s.trim()).filter(Boolean) });
+  };
+
+  const listValue = (key: string) => ((c[key] as string[]) || []).join(', ');
+
+  switch (rule.type) {
+    case 'file_protect':
+      return (
+        <div>
+          <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">
+            Protected file patterns (comma-separated)
+          </label>
+          <input
+            type="text"
+            value={listValue('paths')}
+            onChange={(e) => updateList('paths', e.target.value)}
+            placeholder=".env, *.pem, *.key, id_rsa"
+            className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40"
+          />
+        </div>
+      );
+
+    case 'command_block':
+    case 'review_gate':
+      return (
+        <div>
+          <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">
+            {rule.type === 'review_gate' ? 'Commands requiring approval' : 'Blocked command patterns'} (comma-separated)
+          </label>
+          <textarea
+            value={listValue('patterns')}
+            onChange={(e) => updateList('patterns', e.target.value)}
+            placeholder="rm -rf /, sudo rm, DROP TABLE, curl * | bash"
+            rows={2}
+            className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40 resize-y"
+          />
+        </div>
+      );
+
+    case 'cost_limit':
+      return (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Max $/session</label>
+            <input
+              type="number"
+              step="0.5"
+              value={c.maxUsdPerSession as number || ''}
+              onChange={(e) => onChange({ ...c, maxUsdPerSession: parseFloat(e.target.value) || 0 })}
+              className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+            />
+          </div>
+          <div>
+            <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Max $/hour</label>
+            <input
+              type="number"
+              step="0.5"
+              value={c.maxUsdPerHour as number || ''}
+              onChange={(e) => onChange({ ...c, maxUsdPerHour: parseFloat(e.target.value) || 0 })}
+              className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+            />
+          </div>
+        </div>
+      );
+
+    case 'token_limit':
+      return (
+        <div>
+          <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Max tokens/session</label>
+          <input
+            type="number"
+            step="10000"
+            value={c.maxTokensPerSession as number || ''}
+            onChange={(e) => onChange({ ...c, maxTokensPerSession: parseInt(e.target.value) || 0 })}
+            className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+          />
+        </div>
+      );
+
+    case 'directory_scope':
+      return (
+        <div>
+          <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">
+            Blocked directories (comma-separated)
+          </label>
+          <input
+            type="text"
+            value={listValue('blockedDirs')}
+            onChange={(e) => updateList('blockedDirs', e.target.value)}
+            placeholder="/etc, /usr, ~/.ssh, ~/.aws"
+            className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40"
+          />
+        </div>
+      );
+
+    case 'network_lock':
+      return (
+        <div className="space-y-3">
+          <div>
+            <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">
+              Allowed hosts (comma-separated, empty = allow all)
+            </label>
+            <input
+              type="text"
+              value={listValue('allowedHosts')}
+              onChange={(e) => updateList('allowedHosts', e.target.value)}
+              placeholder="api.openai.com, api.anthropic.com"
+              className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40"
+            />
+          </div>
+          <div>
+            <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">
+              Blocked hosts (comma-separated)
+            </label>
+            <input
+              type="text"
+              value={listValue('blockedHosts')}
+              onChange={(e) => updateList('blockedHosts', e.target.value)}
+              placeholder="evil.com, malware.net"
+              className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 placeholder:text-hawk-text3/40"
+            />
+          </div>
+        </div>
+      );
+
+    case 'impact_threshold':
+      return (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Block above</label>
+            <select
+              value={(c.blockAbove as string) || 'critical'}
+              onChange={(e) => onChange({ ...c, blockAbove: e.target.value })}
+              className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+            >
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="critical">Critical</option>
+            </select>
+          </div>
+          <div>
+            <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Warn above</label>
+            <select
+              value={(c.warnAbove as string) || 'high'}
+              onChange={(e) => onChange({ ...c, warnAbove: e.target.value })}
+              className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+            >
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="critical">Critical</option>
+            </select>
+          </div>
+        </div>
+      );
+
+    default:
+      return (
+        <div>
+          <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Config (JSON)</label>
+          <textarea
+            value={JSON.stringify(c, null, 2)}
+            onChange={(e) => {
+              try { onChange(JSON.parse(e.target.value)); } catch {}
+            }}
+            rows={4}
+            className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50 resize-y"
+          />
+        </div>
+      );
   }
 }

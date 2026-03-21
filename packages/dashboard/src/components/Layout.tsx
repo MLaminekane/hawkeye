@@ -1,5 +1,6 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import { hawkeyeWs } from '../api';
 
 function useTheme() {
   const [isDark, setIsDark] = useState(() => !document.documentElement.classList.contains('light'));
@@ -15,17 +16,52 @@ function useTheme() {
   return { isDark, toggle };
 }
 
+// Module-level so badge persists across navigations
+let globalBlockedCount = 0;
+
+function useFirewallBadge() {
+  const [blockedCount, setBlockedCount] = useState(globalBlockedCount);
+
+  useEffect(() => {
+    const unsub = hawkeyeWs.subscribe((msg) => {
+      if (msg.type === 'action_stream') {
+        if (msg.risk === 'critical' || msg.risk === 'high') {
+          globalBlockedCount++;
+          setBlockedCount(globalBlockedCount);
+        }
+      }
+      if (msg.type === 'impact_preview' && (msg.impact.risk === 'critical' || msg.impact.risk === 'high')) {
+        globalBlockedCount++;
+        setBlockedCount(globalBlockedCount);
+      }
+    });
+    return unsub;
+  }, []);
+
+  const clear = useCallback(() => {
+    globalBlockedCount = 0;
+    setBlockedCount(0);
+  }, []);
+
+  return { blockedCount, clear };
+}
+
 export function Layout() {
   const location = useLocation();
   const { isDark, toggle } = useTheme();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const { blockedCount, clear: clearBadge } = useFirewallBadge();
+
+  // Clear badge when viewing the firewall page
+  useEffect(() => {
+    if (location.pathname === '/firewall') clearBadge();
+  }, [location.pathname, clearBadge]);
 
   const navLinks = [
     { to: '/', label: 'Sessions' },
-    { to: '/live', label: 'Live' },
+    { to: '/firewall', label: 'Firewall' },
     { to: '/compare', label: 'Compare' },
     { to: '/tasks', label: 'Tasks' },
-    { to: '/analytics', label: 'Analytics' },
     { to: '/settings', label: 'Settings' },
   ];
 
@@ -53,13 +89,18 @@ export function Layout() {
               <Link
                 key={link.to}
                 to={link.to}
-                className={`rounded-lg px-3 py-1.5 transition-all hover:text-hawk-text ${
+                className={`relative rounded-lg px-3 py-1.5 transition-all hover:text-hawk-text ${
                   location.pathname === link.to
                     ? 'bg-hawk-surface2 text-hawk-orange shadow-sm'
                     : ''
                 }`}
               >
                 {link.label}
+                {link.to === '/firewall' && blockedCount > 0 && (
+                  <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[9px] font-bold text-white shadow-sm">
+                    {blockedCount > 99 ? '99+' : blockedCount}
+                  </span>
+                )}
               </Link>
             ))}
             <button
@@ -77,6 +118,15 @@ export function Layout() {
 
           {/* Mobile: burger menu */}
           <div className="flex items-center gap-2 md:hidden">
+            {/* Firewall badge for mobile */}
+            {blockedCount > 0 && (
+              <Link
+                to="/firewall"
+                className="flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[9px] font-bold text-white"
+              >
+                {blockedCount > 99 ? '99+' : blockedCount}
+              </Link>
+            )}
             <button
               onClick={toggle}
               className="shrink-0 rounded-lg p-1.5 text-hawk-text3 transition-colors hover:bg-hawk-surface2 hover:text-hawk-text"
@@ -110,13 +160,18 @@ export function Layout() {
                   key={link.to}
                   to={link.to}
                   onClick={() => setMobileMenuOpen(false)}
-                  className={`rounded-lg px-3 py-2.5 font-mono text-sm transition-all ${
+                  className={`flex items-center justify-between rounded-lg px-3 py-2.5 font-mono text-sm transition-all ${
                     location.pathname === link.to
                       ? 'bg-hawk-surface2 text-hawk-orange'
                       : 'text-hawk-text3 hover:bg-hawk-surface2 hover:text-hawk-text'
                   }`}
                 >
                   {link.label}
+                  {link.to === '/firewall' && blockedCount > 0 && (
+                    <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                      {blockedCount > 99 ? '99+' : blockedCount}
+                    </span>
+                  )}
                 </Link>
               ))}
             </div>

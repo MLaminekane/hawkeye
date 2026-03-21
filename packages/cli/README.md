@@ -32,7 +32,10 @@ Hawkeye is a **flight recorder** for AI agents. It captures every action an agen
 - **Session recording & replay** — Full timeline of every agent action with costs and metadata
 - **DriftDetect** — Real-time objective drift detection using heuristic + LLM scoring
 - **Guardrails** — File protection, command blocking, cost limits, token limits, directory scoping
-- **Visual dashboard** — Mobile-responsive web UI with session explorer, drift charts, and settings management
+- **Impact Preview** — Pre-execution risk analysis for every agent action (low/medium/high/critical)
+- **Live Firewall** — Real-time action stream with browser push notifications and badge counter
+- **Policy Engine** — Declarative `.hawkeye/policies.yml` for shareable, team-wide security rules
+- **Visual dashboard** — Mobile-responsive web UI with session explorer, drift charts, firewall, and settings management
 - **Remote tasks** — Submit prompts from your phone via dashboard, with image attachments, auto-approve, and persistent agent memory
 - **Interactive TUI** — Terminal-responsive CLI with arrow-key navigation and slash commands
 - **OpenTelemetry export** — Push traces to Grafana Tempo, Jaeger, Datadog, Honeycomb
@@ -149,6 +152,8 @@ Type `/` to open the command picker with arrow-key navigation and live filtering
 | `/delete`      | Delete a session                               |
 | `/tasks`       | List, create, clear remote tasks               |
 | `/tasks journal` | View agent memory (task history)             |
+| `/firewall`    | View recent interceptions and blocked actions  |
+| `/policy`      | Manage declarative security policies           |
 | `/remote`      | Launch serve + daemon + Cloudflare tunnel      |
 | `/remote stop` | Stop tunnel + daemon                           |
 | `/settings`    | Configure DriftDetect, Guardrails, API keys    |
@@ -217,6 +222,43 @@ Run the task daemon — polls `.hawkeye/tasks.json` for pending tasks and execut
 - **Conversation continuity**: uses `claude --continue` within 30-min windows
 - **Context injection**: enriches prompts with git status, recent commits, and task history
 - Works with any agent CLI, not just Claude
+
+### `hawkeye arena`
+
+```bash
+hawkeye arena -t "Add user auth" -a claude,aider --test "npm test"
+hawkeye arena --list
+```
+
+Agent Arena — pit AI agents against each other on the same task in isolated git worktrees. Scores by test pass, speed, code efficiency, and file focus. Results viewable in dashboard at `/arena`.
+
+### `hawkeye overnight`
+
+```bash
+hawkeye overnight [--budget 5] [--agent claude] [--task "prompt"] [--tunnel] [--port 4242] [--report-llm]
+```
+
+Run overnight mode — composes serve + daemon with strict guardrails for unattended agent runs. Applies cost limits, file protection, command blocking, and auto-pause on critical drift. Generates a morning report on Ctrl+C and restores config.
+
+### `hawkeye report`
+
+```bash
+hawkeye report [--since <iso>] [--json] [--llm] [--webhook]
+```
+
+Generate a morning report of recent sessions. Aggregates stats, drift, errors, and cost per session. Defaults to sessions since `overnight.json` startedAt or 8 hours ago.
+
+### `hawkeye policy`
+
+```bash
+hawkeye policy init [--force]      # Generate default policies.yml
+hawkeye policy check               # Validate policies.yml
+hawkeye policy show                # Display current policies
+hawkeye policy export [-o file]    # Export guardrails as YAML
+hawkeye policy import <file>       # Import a policies.yml
+```
+
+Declarative security policies in `.hawkeye/policies.yml` — shareable across projects and teams.
 
 ### `hawkeye export`
 
@@ -319,10 +361,18 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 - Select two sessions to compare side by side
 - Stats comparison (actions, cost, tokens, drift)
 
+### Firewall Page
+
+- **Live action stream** — Every agent action in real-time with risk classification
+- **Filters** — All / Risky Only / Blocked / Writes / Commands
+- **Browser notifications** — Push alerts when actions are blocked or critical
+- **Navbar badge** — Red counter for high/critical actions
+
 ### Settings Page
 
 - Configure DriftDetect (provider, model, thresholds, check frequency)
 - Manage guardrail rules (enable/disable, toggle warn/block)
+- **Policy Engine** — Initialize, edit, and manage `.hawkeye/policies.yml` with full CRUD for rules
 - Provider model selection with live lookup
 
 ### REST API
@@ -353,6 +403,10 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 | `/api/pending-reviews`            | GET    | List pending review gate items   |
 | `/api/review-approve`             | POST   | Approve a review gate item       |
 | `/api/review-deny`                | POST   | Deny a review gate item          |
+| `/api/policies`                   | GET    | Get current policies.yml         |
+| `/api/policies`                   | POST   | Save policies (server-validated) |
+| `/api/impact`                     | GET    | Last impact preview              |
+| `/api/interceptions`              | GET    | Recent blocks + pending reviews  |
 
 ## DriftDetect
 
@@ -400,6 +454,7 @@ Guardrails are evaluated **synchronously before** events are persisted. Violatio
 | `directory_scope` | Restrict agent to specific directories | `allowedDirs`, `blockedDirs`          |
 | `network_lock`    | Allow/block specific API hostnames     | `allowedHosts`, `blockedHosts`        |
 | `review_gate`     | Require human approval for commands    | `patterns: string[]` (regex patterns) |
+| `impact_threshold`| Block actions above a risk level       | `blockAbove`, `warnAbove` (low/medium/high/critical) |
 
 Example configuration (via `/settings` in TUI or dashboard):
 
@@ -471,7 +526,9 @@ Hawkeye is designed to run locally. The dashboard server binds to `localhost` an
 | **POST body limit** | 5 MB max — oversized requests are destroyed (prevents DoS) |
 | **Path traversal** | Static file serving and attachment endpoints verify resolved paths stay within their root |
 | **No command injection** | All git operations use `execFile()` with argument arrays, never shell strings |
-| **Config file permissions** | `.hawkeye/config.json` written with `0o600` (owner-only) to protect API keys |
+| **Config file permissions** | `.hawkeye/config.json` and `policies.yml` written with `0o600` (owner-only) to protect API keys |
+| **Policy validation** | `POST /api/policies` validates schema before writing — rejects invalid rules |
+| **Impact analysis** | Pre-execution risk scoring blocks critical actions before they run |
 | **Concurrent write safety** | Hook handler uses exclusive lockfile for `hook-sessions.json` writes |
 
 ### API Keys

@@ -284,6 +284,19 @@ export class Storage {
     }
   }
 
+  getRecentBlocks(limit = 50): EventRow[] {
+    try {
+      return this.db
+        .prepare(
+          `SELECT * FROM events WHERE type IN ('guardrail_block', 'guardrail_trigger')
+           ORDER BY timestamp DESC LIMIT ?`,
+        )
+        .all(limit) as EventRow[];
+    } catch {
+      return [];
+    }
+  }
+
   getNextSequence(sessionId: string): number {
     const row = this.db
       .prepare('SELECT COALESCE(MAX(sequence), 0) as max_seq FROM events WHERE session_id = ?')
@@ -410,19 +423,41 @@ export class Storage {
 
   getGlobalStats(): Result<GlobalStats> {
     try {
+      // Use a CTE that computes live stats for active sessions from events table,
+      // since sessions table only updates cost/tokens/actions on session end.
       const row = this.db.prepare(`
+        WITH session_stats AS (
+          SELECT
+            s.id,
+            s.status,
+            s.final_drift_score,
+            s.started_at,
+            CASE WHEN s.status = 'recording' AND s.total_cost_usd = 0
+              THEN COALESCE((SELECT SUM(e.cost_usd) FROM events e WHERE e.session_id = s.id), 0)
+              ELSE s.total_cost_usd
+            END as real_cost,
+            CASE WHEN s.status = 'recording' AND s.total_tokens = 0
+              THEN COALESCE((SELECT COUNT(*) FROM events e WHERE e.session_id = s.id), 0)
+              ELSE s.total_tokens
+            END as real_tokens,
+            CASE WHEN s.status = 'recording' AND s.total_actions = 0
+              THEN COALESCE((SELECT COUNT(*) FROM events e WHERE e.session_id = s.id), 0)
+              ELSE s.total_actions
+            END as real_actions
+          FROM sessions s
+        )
         SELECT
           COUNT(*) as total_sessions,
           SUM(CASE WHEN status = 'recording' THEN 1 ELSE 0 END) as active_sessions,
           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_sessions,
           SUM(CASE WHEN status = 'aborted' THEN 1 ELSE 0 END) as aborted_sessions,
-          COALESCE(SUM(total_actions), 0) as total_actions,
-          COALESCE(SUM(total_cost_usd), 0) as total_cost_usd,
+          COALESCE(SUM(real_actions), 0) as total_actions,
+          COALESCE(SUM(real_cost), 0) as total_cost_usd,
           COALESCE(AVG(CASE WHEN final_drift_score IS NOT NULL THEN final_drift_score END), 0) as avg_drift_score,
-          COALESCE(SUM(total_tokens), 0) as total_tokens,
+          COALESCE(SUM(real_tokens), 0) as total_tokens,
           MIN(started_at) as first_session,
           MAX(started_at) as last_session
-        FROM sessions
+        FROM session_stats
       `).get() as GlobalStats;
       return { ok: true, value: row };
     } catch (e) {

@@ -13,11 +13,15 @@
 
 import { Command } from 'commander';
 import { join, extname } from 'node:path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { Storage, scoreHeuristic, slidingDriftScore, scanContent } from '@mklamine/hawkeye-core';
 import type { TraceEvent, EventType, DriftFlag } from '@mklamine/hawkeye-core';
 import { getDeveloperName } from '../config.js';
+import { analyzeImpact, formatImpactPreview, shouldBlockAction, shouldWarnAction } from '../impact.js';
+import type { ImpactPreview } from '../impact.js';
+import { loadPolicy, policyToGuardrailConfig } from '../policy.js';
 
 // ── Cost estimation ──
 // Claude Code primarily uses Claude models. Default to sonnet pricing.
@@ -43,6 +47,141 @@ function estimateLlmCost(
     Object.entries(COST_PER_1M).find(([k]) => model.startsWith(k))?.[1] ||
     COST_PER_1M[DEFAULT_MODEL];
   return (inputTokens * costs.input + outputTokens * costs.output) / 1_000_000;
+}
+
+// ── Claude Code JSONL reader — real token usage ──
+
+interface ClaudeCodeUsageResult {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreateTokens: number;
+  cacheReadTokens: number;
+  model: string;
+  messageId: string | null;
+  newOffset: number;
+}
+
+/**
+ * Read real token usage from Claude Code's JSONL conversation files.
+ * Claude Code writes every API response (with full usage data) to:
+ *   ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl
+ *
+ * Reads from `fromOffset` to end-of-file for efficiency (avoids re-parsing
+ * the entire file on each hook invocation). Returns the delta usage since
+ * the last read plus the latest assistant message ID (to deduplicate
+ * multi-tool responses from a single API call).
+ */
+function readClaudeCodeUsage(
+  claudeSessionId: string,
+  fromOffset: number,
+): ClaudeCodeUsageResult | null {
+  const cwd = process.cwd();
+  // Claude Code encodes the project path by replacing / with -
+  const encodedCwd = cwd.replace(/\//g, '-');
+  const projectDir = join(homedir(), '.claude', 'projects', encodedCwd);
+  const jsonlPath = join(projectDir, `${claudeSessionId}.jsonl`);
+
+  if (!existsSync(jsonlPath)) return null;
+
+  try {
+    const fd = openSync(jsonlPath, 'r');
+    const stats = fstatSync(fd);
+
+    if (stats.size <= fromOffset) {
+      closeSync(fd);
+      return null;
+    }
+
+    const readSize = stats.size - fromOffset;
+    const buffer = Buffer.alloc(readSize);
+    readSync(fd, buffer, 0, readSize, fromOffset);
+    closeSync(fd);
+
+    const text = buffer.toString('utf8');
+    const lines = text.split('\n').filter((l) => l.trim());
+
+    // Claude Code writes streaming updates — same message ID appears multiple
+    // times (partial then final). Deduplicate by message ID, keeping last entry.
+    const byMsgId = new Map<
+      string,
+      { input: number; output: number; cacheCreate: number; cacheRead: number; model: string }
+    >();
+    let lastMsgId: string | null = null;
+    let model = DEFAULT_MODEL;
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === 'assistant' && entry.message?.usage) {
+          const u = entry.message.usage;
+          const msgId = entry.message.id || entry.uuid || `anon-${byMsgId.size}`;
+          model = entry.message.model || model;
+          lastMsgId = msgId;
+          // Overwrite — last entry for this message has final token counts
+          byMsgId.set(msgId, {
+            input: u.input_tokens ?? 0,
+            output: u.output_tokens ?? 0,
+            cacheCreate: u.cache_creation_input_tokens ?? 0,
+            cacheRead: u.cache_read_input_tokens ?? 0,
+            model: entry.message.model || model,
+          });
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    // Sum across deduplicated messages
+    let totalInput = 0;
+    let totalOutput = 0;
+    let totalCacheCreate = 0;
+    let totalCacheRead = 0;
+    for (const v of byMsgId.values()) {
+      totalInput += v.input;
+      totalOutput += v.output;
+      totalCacheCreate += v.cacheCreate;
+      totalCacheRead += v.cacheRead;
+    }
+
+    return {
+      inputTokens: totalInput,
+      outputTokens: totalOutput,
+      cacheCreateTokens: totalCacheCreate,
+      cacheReadTokens: totalCacheRead,
+      model,
+      messageId: lastMsgId,
+      newOffset: stats.size,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compute accurate cost including Anthropic cache pricing:
+ * - Regular input tokens: full input rate
+ * - Cache write tokens: 1.25x input rate
+ * - Cache read tokens: 0.1x input rate
+ * - Output tokens: full output rate
+ */
+function computeRealCost(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  cacheCreateTokens: number,
+  cacheReadTokens: number,
+): number {
+  const costs =
+    COST_PER_1M[model] ||
+    Object.entries(COST_PER_1M).find(([k]) => model.startsWith(k))?.[1] ||
+    COST_PER_1M[DEFAULT_MODEL];
+  return (
+    (inputTokens * costs.input +
+      cacheCreateTokens * costs.input * 1.25 +
+      cacheReadTokens * costs.input * 0.1 +
+      outputTokens * costs.output) /
+    1_000_000
+  );
 }
 
 // ── File utilities ──
@@ -202,6 +341,36 @@ function loadGuardrailConfig(): GuardrailConfig {
     process.stderr.write(`hawkeye: failed to load guardrail config: ${String(e)}\n`);
   }
 
+  // Load policies.yml (takes precedence — merges with config.json guardrails)
+  try {
+    const policy = loadPolicy(process.cwd());
+    if (policy) {
+      const pc = policyToGuardrailConfig(policy);
+      if (pc.protectedFiles.length > 0) {
+        // Merge: add policy paths to existing
+        for (const p of pc.protectedFiles) {
+          if (!defaults.protectedFiles.includes(p)) defaults.protectedFiles.push(p);
+        }
+      }
+      if (pc.dangerousCommands.length > 0) {
+        for (const p of pc.dangerousCommands) {
+          if (!defaults.dangerousCommands.includes(p)) defaults.dangerousCommands.push(p);
+        }
+      }
+      if (pc.blockedDirs.length > 0) {
+        for (const p of pc.blockedDirs) {
+          if (!defaults.blockedDirs.includes(p)) defaults.blockedDirs.push(p);
+        }
+      }
+      if (pc.reviewGatePatterns.length > 0) {
+        for (const p of pc.reviewGatePatterns) {
+          if (!defaults.reviewGatePatterns.includes(p)) defaults.reviewGatePatterns.push(p);
+        }
+      }
+      if (pc.networkLock) defaults.networkLock = pc.networkLock;
+    }
+  } catch {}
+
   return defaults;
 }
 
@@ -239,6 +408,10 @@ interface HookSession {
   totalCostUsd: number;
   driftScores: number[];
   model: string;
+  /** Byte offset into Claude Code's JSONL file — read from here to get new usage data */
+  lastJsonlOffset?: number;
+  /** Last processed assistant message ID to avoid double-counting multi-tool responses */
+  lastProcessedMsgId?: string;
 }
 
 function getHawkDir(): string {
@@ -406,6 +579,7 @@ function updateSessionTracking(
   claudeSessionId: string,
   costUsd: number,
   driftScore?: number,
+  jsonlTracking?: { lastJsonlOffset: number; lastProcessedMsgId?: string },
 ): void {
   const sessions = loadSessions();
   const session = sessions[claudeSessionId];
@@ -416,6 +590,12 @@ function updateSessionTracking(
   session.lastActivityAt = new Date().toISOString();
   if (driftScore !== undefined) {
     session.driftScores.push(driftScore);
+  }
+  if (jsonlTracking) {
+    session.lastJsonlOffset = jsonlTracking.lastJsonlOffset;
+    if (jsonlTracking.lastProcessedMsgId) {
+      session.lastProcessedMsgId = jsonlTracking.lastProcessedMsgId;
+    }
   }
   saveSessions(sessions);
 }
@@ -1168,6 +1348,95 @@ export const hookHandlerCommand = new Command('hook-handler')
             process.exit(2);
           }
 
+          // ── Impact Preview (pre-execution analysis) ──
+          const impact = analyzeImpact(toolName, toolInput);
+          if (impact) {
+            // Always output the impact preview to stderr (visible in terminal)
+            process.stderr.write(formatImpactPreview(impact) + '\n');
+
+            // Write impact data to a temp file so the dashboard can pick it up via WebSocket
+            try {
+              const impactFile = join(getHawkDir(), 'last-impact.json');
+              writeFileSync(impactFile, JSON.stringify({
+                timestamp: new Date().toISOString(),
+                sessionId: claudeSessionId,
+                toolName,
+                toolInput: { command: toolInput.command, file_path: toolInput.file_path || toolInput.path },
+                impact,
+              }));
+            } catch {}
+
+            // Determine block threshold from policy (default: block critical)
+            let blockThreshold: string = 'critical';
+            try {
+              const policy = loadPolicy(process.cwd());
+              if (policy) {
+                const pc = policyToGuardrailConfig(policy);
+                if (pc.impactThreshold?.blockAbove) blockThreshold = pc.impactThreshold.blockAbove;
+              }
+            } catch {}
+
+            const riskLevels = ['low', 'medium', 'high', 'critical'];
+            const impactLevel = riskLevels.indexOf(impact.risk);
+            const thresholdLevel = riskLevels.indexOf(blockThreshold);
+            const shouldBlock = impactLevel >= thresholdLevel && thresholdLevel >= 0;
+
+            if (shouldBlock) {
+              // Critical risk → block and require approval
+              const session = getOrCreateSession(claudeSessionId, storage, hookData.objective);
+              const seq = storage.getNextSequence(session.hawkeyeSessionId);
+              const eventId = randomUUID();
+
+              storage.insertEvent({
+                id: eventId,
+                sessionId: session.hawkeyeSessionId,
+                timestamp: new Date(),
+                sequence: seq,
+                type: 'guardrail_block' as EventType,
+                data: {
+                  ruleName: 'impact_preview',
+                  severity: 'block' as const,
+                  description: `Impact Preview blocked: ${impact.summary}`,
+                  blockedAction: `${toolName}: ${String(toolInput.command || toolInput.file_path || '').slice(0, 200)}`,
+                  impactPreview: {
+                    risk: impact.risk,
+                    summary: impact.summary,
+                    details: impact.details,
+                    affectedFiles: impact.affectedFiles,
+                    affectedLines: impact.affectedLines,
+                    category: impact.category,
+                  },
+                } as unknown as TraceEvent['data'],
+                durationMs: 0,
+                costUsd: 0,
+              });
+
+              storage.insertGuardrailViolation(session.hawkeyeSessionId, eventId, {
+                ruleName: 'impact_preview',
+                severity: 'block',
+                description: `${impact.risk.toUpperCase()} risk: ${impact.summary}`,
+                actionTaken: 'blocked',
+              });
+
+              if (config.webhooks.length > 0) {
+                fireWebhooks(config.webhooks, 'impact_block', {
+                  sessionId: session.hawkeyeSessionId,
+                  risk: impact.risk,
+                  summary: impact.summary,
+                  details: impact.details,
+                  category: impact.category,
+                });
+              }
+
+              process.stdout.write(JSON.stringify({
+                decision: 'block',
+                reason: `Hawkeye Impact Preview: ${impact.risk.toUpperCase()} risk — ${impact.summary}. ${impact.details.join('. ')}`,
+              }));
+              storage.close();
+              process.exit(2);
+            }
+          }
+
           // Allow the action
           storage.close();
           process.exit(0);
@@ -1195,20 +1464,64 @@ export const hookHandlerCommand = new Command('hook-handler')
           const data = buildEventData(toolName, toolInput, toolOutput, type);
           const eventId = randomUUID();
 
-          // ── LLM cost estimation ──
-          // Each Claude Code tool use involves at least one LLM call.
-          // Estimate tokens from tool input/output sizes.
-          const inputText = JSON.stringify(toolInput);
-          const outputText = toolOutput || '';
+          // ── LLM token & cost tracking ──
+          // Read real token usage from Claude Code's JSONL conversation files.
+          // Falls back to heuristic estimation if JSONL is unavailable.
+          const jsonlUsage = readClaudeCodeUsage(
+            claudeSessionId,
+            session.lastJsonlOffset || 0,
+          );
 
-          // Use explicit token counts from hook data if available (newer Claude Code versions)
-          const inputTokens =
-            hookData.input_tokens || estimateTokens(inputText) + 500; // +500 for system prompt overhead
-          const outputTokens =
-            hookData.output_tokens || estimateTokens(outputText) + 50;
+          let inputTokens: number;
+          let outputTokens: number;
+          let cacheCreateTokens = 0;
+          let cacheReadTokens = 0;
+          let model: string;
+          let costUsd: number;
+          let usageSource: 'real' | 'estimated';
 
-          const model = hookData.model || session.model || DEFAULT_MODEL;
-          const costUsd = estimateLlmCost(model, inputTokens, outputTokens);
+          if (jsonlUsage && (jsonlUsage.inputTokens > 0 || jsonlUsage.outputTokens > 0)) {
+            // Real usage from Claude Code JSONL
+            // Check if this is the same API response as the last tool use
+            // (one response can trigger multiple tool uses — avoid double-counting)
+            if (jsonlUsage.messageId && jsonlUsage.messageId === session.lastProcessedMsgId) {
+              // Same API call as previous tool use — cost already attributed
+              inputTokens = 0;
+              outputTokens = 0;
+              costUsd = 0;
+            } else {
+              inputTokens = jsonlUsage.inputTokens;
+              outputTokens = jsonlUsage.outputTokens;
+              cacheCreateTokens = jsonlUsage.cacheCreateTokens;
+              cacheReadTokens = jsonlUsage.cacheReadTokens;
+              costUsd = computeRealCost(
+                jsonlUsage.model,
+                inputTokens,
+                outputTokens,
+                cacheCreateTokens,
+                cacheReadTokens,
+              );
+            }
+            model = jsonlUsage.model;
+            usageSource = 'real';
+
+            // Update session tracking
+            session.lastJsonlOffset = jsonlUsage.newOffset;
+            if (jsonlUsage.messageId) {
+              session.lastProcessedMsgId = jsonlUsage.messageId;
+            }
+          } else {
+            // Fallback: estimate from tool input/output sizes
+            const inputText = JSON.stringify(toolInput);
+            const outputText = toolOutput || '';
+            inputTokens =
+              hookData.input_tokens || estimateTokens(inputText) + 500;
+            outputTokens =
+              hookData.output_tokens || estimateTokens(outputText) + 50;
+            model = hookData.model || session.model || DEFAULT_MODEL;
+            costUsd = estimateLlmCost(model, inputTokens, outputTokens);
+            usageSource = 'estimated';
+          }
 
           // Insert the tool action event
           storage.insertEvent({
@@ -1222,7 +1535,8 @@ export const hookHandlerCommand = new Command('hook-handler')
             costUsd,
           });
 
-          // Also insert a synthetic llm_call event to track token usage
+          // Insert an llm_call event to track token usage
+          const totalPromptTokens = inputTokens + cacheCreateTokens + cacheReadTokens;
           const llmSeq = storage.getNextSequence(session.hawkeyeSessionId);
           storage.insertEvent({
             id: randomUUID(),
@@ -1233,11 +1547,14 @@ export const hookHandlerCommand = new Command('hook-handler')
             data: {
               provider: 'anthropic',
               model,
-              promptTokens: inputTokens,
+              promptTokens: totalPromptTokens,
               completionTokens: outputTokens,
-              totalTokens: inputTokens + outputTokens,
+              totalTokens: totalPromptTokens + outputTokens,
               costUsd,
               latencyMs: hookData.duration_ms || 0,
+              cacheCreateTokens,
+              cacheReadTokens,
+              usageSource,
             } as unknown as TraceEvent['data'],
             durationMs: hookData.duration_ms || 0,
             costUsd,
@@ -1344,11 +1661,17 @@ export const hookHandlerCommand = new Command('hook-handler')
             }
           }
 
-          // Update session tracking
+          // Update session tracking (including JSONL offset for real token tracking)
           updateSessionTracking(
             claudeSessionId,
             costUsd,
             drift?.score,
+            jsonlUsage
+              ? {
+                  lastJsonlOffset: jsonlUsage.newOffset,
+                  lastProcessedMsgId: jsonlUsage.messageId || undefined,
+                }
+              : undefined,
           );
 
           storage.close();

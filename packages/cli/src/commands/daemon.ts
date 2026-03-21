@@ -17,6 +17,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawn, execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import chalk from 'chalk';
+import { loadConfig } from '../config.js';
+import { fireWebhooks } from '../webhooks.js';
 
 const o = chalk.hex('#ff5f1f');
 
@@ -315,6 +317,22 @@ async function runDaemon(agentCmd: string, intervalSec: number, cwd: string): Pr
       const diffAfter = getGitDiffStat(cwd);
       const diffChanged = diffAfter !== diffBefore ? diffAfter : '';
       appendToJournal(cwd, { ...pending, status, completedAt, output: result.output.slice(0, 500), error: result.exitCode !== 0 ? result.output.slice(0, 500) : undefined }, diffChanged);
+
+      // Fire task_complete webhook
+      const cfg = loadConfig(cwd);
+      if (cfg.webhooks && cfg.webhooks.length > 0) {
+        const durationSeconds = pending.startedAt
+          ? Math.round((Date.now() - new Date(pending.startedAt).getTime()) / 1000)
+          : 0;
+        fireWebhooks(cfg.webhooks, 'task_complete', {
+          taskId: pending.id,
+          prompt: pending.prompt,
+          status,
+          exitCode: result.exitCode,
+          durationSeconds,
+          outputSummary: result.output.slice(0, 500),
+        });
+      }
 
       if (status === 'completed') {
         console.log(`  ${chalk.green('✓')} Task ${o.bold(shortId)} completed`);

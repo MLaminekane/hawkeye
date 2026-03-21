@@ -9,6 +9,8 @@ import { randomUUID } from 'node:crypto';
 import { Storage } from '@mklamine/hawkeye-core';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, getDefaultConfig, PROVIDER_MODELS, getDeveloperName } from '../config.js';
+import { fireWebhooks } from '../webhooks.js';
+import { loadPolicy, savePolicy, validatePolicy, generateTemplate, configToPolicy, type PolicyFile } from '../policy.js';
 import { generatePdfBuffer } from './export.js';
 import { loadTasks, saveTasks, createTask, readJournal, clearJournal, type Task } from './daemon.js';
 // ─── Request Validation ───────────────────────────────────────
@@ -201,6 +203,23 @@ export const serveCommand = new Command('serve')
             storage.endSession(s.id, 'completed');
             broadcast({ type: 'session_end', session: { id: s.id, status: 'completed', reason: 'inactivity' } });
             console.log(chalk.dim(`  Auto-closed inactive session ${s.id.slice(0, 8)}`));
+
+            // Fire session_complete webhook
+            const cfg = loadConfig(cwd);
+            if (cfg.webhooks && cfg.webhooks.length > 0) {
+              const startMs = new Date(s.started_at).getTime();
+              const durationMinutes = Math.round((now - startMs) / 60000);
+              fireWebhooks(cfg.webhooks, 'session_complete', {
+                sessionId: s.id,
+                objective: s.objective,
+                status: 'completed',
+                durationMinutes,
+                totalCostUsd: s.total_cost_usd,
+                totalActions: s.total_actions,
+                finalDriftScore: s.final_drift_score,
+                reason: 'inactivity',
+              });
+            }
           }
         }
       } catch {}
@@ -221,6 +240,13 @@ export const serveCommand = new Command('serve')
           sessionEventCounts.set(s.id, eventsResult.value.length);
           for (const e of newEvents) {
             broadcast({ type: 'event', sessionId: s.id, event: e });
+            // Also broadcast to the Firewall live stream with risk classification
+            broadcast({
+              type: 'action_stream',
+              sessionId: s.id,
+              event: e,
+              risk: classifyEventRisk(e as any),
+            });
           }
           // Broadcast drift updates
           const driftResult = storage.getDriftSnapshots(s.id);
@@ -353,6 +379,25 @@ export const serveCommand = new Command('serve')
       });
     } catch {}
 
+    // Watch for impact preview updates from hook-handler
+    const impactDir = join(cwd, '.hawkeye');
+    const impactPath = join(impactDir, 'last-impact.json');
+    let lastImpactMtime = 0;
+    try {
+      const hawkDirWatcher = watch(impactDir, { recursive: false }, (_event, filename) => {
+        if (filename === 'last-impact.json') {
+          try {
+            const stat = statSync(impactPath);
+            if (stat.mtimeMs <= lastImpactMtime) return; // Already processed
+            lastImpactMtime = stat.mtimeMs;
+            const impactData = JSON.parse(readFileSync(impactPath, 'utf-8'));
+            broadcast({ type: 'impact_preview', ...impactData });
+          } catch {}
+        }
+      });
+      hawkDirWatcher.unref?.();
+    } catch {}
+
     // Graceful shutdown
     function shutdown(signal: string) {
       console.log(chalk.dim(`\n  Received ${signal}, shutting down...`));
@@ -375,6 +420,62 @@ export const serveCommand = new Command('serve')
       process.stderr.write(`hawkeye serve: unhandled rejection: ${String(reason)}\n`);
     });
   });
+
+// ── Risk classification for the live action stream ──
+
+function classifyEventRisk(event: { type: string; data: string; cost_usd: number; [k: string]: unknown }): 'safe' | 'low' | 'medium' | 'high' | 'critical' {
+  // Guardrail blocks are always critical/high
+  if (event.type === 'guardrail_block' || event.type === 'guardrail_trigger') {
+    try {
+      const d = JSON.parse(event.data);
+      if (d.impactPreview?.risk) return d.impactPreview.risk;
+    } catch {}
+    return 'critical';
+  }
+
+  // Errors are medium
+  if (event.type === 'error') return 'medium';
+
+  // Read operations are safe
+  if (event.type === 'file_read') return 'safe';
+
+  // File writes — check for sensitive patterns
+  if (event.type === 'file_write') {
+    try {
+      const d = JSON.parse(event.data);
+      const path = String(d.path || '');
+      if (/\.env|\.pem|\.key|\.secret|config\.(json|ya?ml)|migrations?\/|\.github\/workflows/.test(path)) {
+        return 'medium';
+      }
+    } catch {}
+    return 'low';
+  }
+
+  // Commands — check for risky patterns
+  if (event.type === 'command') {
+    try {
+      const d = JSON.parse(event.data);
+      const cmd = String(d.command || '');
+      if (/\brm\b.*-r|git\s+push.*--force|git\s+reset\s+--hard|git\s+clean\s+-f/.test(cmd)) return 'high';
+      if (/\bgit\s+push\b/.test(cmd)) return 'low';
+      if (/\bnpm\s+publish\b/.test(cmd)) return 'high';
+      if (d.exitCode && d.exitCode !== 0) return 'medium';
+    } catch {}
+    return 'safe';
+  }
+
+  // Git operations
+  if (event.type === 'git_push') return 'low';
+  if (event.type === 'git_commit') return 'safe';
+
+  // LLM calls — cost-based
+  if (event.type === 'llm_call') {
+    if (event.cost_usd > 0.5) return 'medium';
+    return 'safe';
+  }
+
+  return 'safe';
+}
 
 function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: string, cwd?: string): void {
   res.setHeader('Content-Type', 'application/json');
@@ -524,6 +625,14 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
       return;
     }
 
+    // GET /api/policies — Load policies.yml
+    if (url === '/api/policies') {
+      const policy = loadPolicy(cwd || process.cwd());
+      res.writeHead(200);
+      res.end(JSON.stringify(policy || null));
+      return;
+    }
+
     // GET /api/compare?ids=id1,id2,id3
     const compareMatch = url.match(/^\/api\/compare\?(.*)$/);
     if (compareMatch) {
@@ -548,19 +657,6 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
     // GET /api/stats — Global statistics
     if (url === '/api/stats') {
       const result = storage.getGlobalStats();
-      if (result.ok) {
-        res.writeHead(200);
-        res.end(JSON.stringify(result.value));
-      } else {
-        res.writeHead(500);
-        res.end(JSON.stringify({ error: result.error.message }));
-      }
-      return;
-    }
-
-    // GET /api/analytics/developers — Cross-developer analytics
-    if (url === '/api/analytics/developers') {
-      const result = storage.getDevAnalytics();
       if (result.ok) {
         res.writeHead(200);
         res.end(JSON.stringify(result.value));
@@ -622,6 +718,34 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
       } catch {}
       res.writeHead(200);
       res.end(JSON.stringify(pending));
+      return;
+    }
+
+    // GET /api/impact — Get last impact preview
+    if (url === '/api/impact') {
+      const impFile = join(cwd || process.cwd(), '.hawkeye', 'last-impact.json');
+      let impact = null;
+      try {
+        if (existsSync(impFile)) {
+          impact = JSON.parse(readFileSync(impFile, 'utf-8'));
+        }
+      } catch {}
+      res.writeHead(200);
+      res.end(JSON.stringify(impact));
+      return;
+    }
+
+    // GET /api/interceptions — Get recent guardrail blocks + impact blocks (last 50)
+    if (url === '/api/interceptions') {
+      const events = storage.getRecentBlocks(50);
+      // Also append any pending reviews
+      const pendingFile = join(cwd || process.cwd(), '.hawkeye', 'pending-reviews.json');
+      let pending: unknown[] = [];
+      try {
+        if (existsSync(pendingFile)) pending = JSON.parse(readFileSync(pendingFile, 'utf-8'));
+      } catch {}
+      res.writeHead(200);
+      res.end(JSON.stringify({ blocks: events, pendingReviews: pending }));
       return;
     }
 
@@ -866,6 +990,21 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         }
         const cfgPath = join(cwd, '.hawkeye', 'config.json');
         writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // POST /api/policies — Save policies.yml
+      if (url === '/api/policies') {
+        const policy = JSON.parse(body) as PolicyFile;
+        const errors = validatePolicy(policy);
+        if (errors.length > 0) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Validation failed', errors }));
+          return;
+        }
+        savePolicy(cwd, policy);
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
         return;

@@ -16,6 +16,7 @@ import {
   getDeveloperName,
 } from './config.js';
 import { loadTasks, createTask, saveTasks, readJournal, clearJournal, type Task } from './commands/daemon.js';
+import { loadPolicy, savePolicy, generateTemplate, validatePolicy, policyExists, getPolicyPath, configToPolicy, policyToYaml } from './policy.js';
 
 const VERSION = '0.1.0';
 
@@ -71,6 +72,10 @@ const COMMANDS: SlashCommand[] = [
   { name: 'kill', desc: 'Kill hawkeye background processes' },
   { name: 'settings', desc: 'Configure Hawkeye' },
   { name: 'tasks', desc: 'List & submit remote tasks' },
+  { name: 'firewall', desc: 'Show recent interceptions & impact previews' },
+  { name: 'policy', desc: 'Manage security policies (init/check/show)' },
+  { name: 'overnight', desc: 'Run overnight mode (guardrails + morning report)' },
+  { name: 'report', desc: 'Generate morning report' },
   { name: 'remote', desc: 'Launch serve + daemon + tunnel (mobile access)' },
   { name: 'remote stop', desc: 'Stop tunnel + daemon' },
   { name: 'serve', desc: 'Open dashboard :4242' },
@@ -557,6 +562,14 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     await cmdSettings(cwd);
   } else if (c === 'tasks') {
     await cmdTasks(cwd, args);
+  } else if (c === 'firewall') {
+    await cmdFirewall(dbPath);
+  } else if (c === 'policy') {
+    await cmdPolicy(cwd, args);
+  } else if (c === 'overnight') {
+    await cmdOvernight(cwd, args);
+  } else if (c === 'report') {
+    await cmdReport(cwd, args);
   } else if (c === 'remote') {
     if (args.trim() === 'stop') {
       await cmdRemoteStop(cwd);
@@ -1705,6 +1718,146 @@ function revertSingleEvent(
     return { ok: true, path: filePath, method: 'git-checkout' };
   } catch (err) {
     return { ok: false, error: `git checkout failed: ${String(err)}` };
+  }
+}
+
+async function cmdPolicy(cwd: string, args: string): Promise<void> {
+  const sub = args.trim().toLowerCase() || 'show';
+
+  if (sub === 'init') {
+    if (policyExists(cwd)) {
+      console.log(chalk.yellow('  policies.yml already exists.'));
+      const path = getPolicyPath(cwd);
+      console.log(chalk.dim(`  ${path}`));
+      return;
+    }
+    const config = loadConfig(cwd);
+    let policy;
+    if (config.guardrails && config.guardrails.length > 0) {
+      policy = configToPolicy(config as any);
+      policy.name = 'project';
+      policy.description = 'Converted from config.json guardrails';
+      console.log(o('  ✓ Converted existing guardrails to policies.yml'));
+    } else {
+      policy = generateTemplate();
+      console.log(o('  ✓ Generated default policies.yml'));
+    }
+    savePolicy(cwd, policy);
+    console.log(chalk.dim(`  ${getPolicyPath(cwd)}`));
+    const enabled = policy.rules.filter((r) => r.enabled);
+    console.log(`  ${chalk.green(String(enabled.length))} rules enabled`);
+    return;
+  }
+
+  if (sub === 'check') {
+    if (!policyExists(cwd)) {
+      console.log(chalk.yellow('  No policies.yml. Run /policy init first.'));
+      return;
+    }
+    const policy = loadPolicy(cwd);
+    if (!policy) {
+      console.log(chalk.red('  ✗ Failed to parse policies.yml'));
+      return;
+    }
+    const errors = validatePolicy(policy);
+    if (errors.length === 0) {
+      const enabled = policy.rules.filter((r) => r.enabled);
+      console.log(o(`  ✓ Valid — ${enabled.length} rules enabled`));
+      for (const rule of enabled) {
+        const action = rule.action === 'block' ? chalk.red('block') : chalk.yellow('warn');
+        console.log(`  ${chalk.green('●')} ${rule.name} → ${action}`);
+      }
+    } else {
+      console.log(chalk.red(`  ✗ ${errors.length} error${errors.length !== 1 ? 's' : ''}:`));
+      for (const err of errors) {
+        console.log(`    ${chalk.red('✗')} ${err.rule}.${err.field}: ${err.message}`);
+      }
+    }
+    return;
+  }
+
+  if (sub === 'export') {
+    const config = loadConfig(cwd);
+    const policy = configToPolicy(config as any);
+    console.log(policyToYaml(policy));
+    return;
+  }
+
+  // Default: show
+  if (!policyExists(cwd)) {
+    console.log(chalk.dim('  No policies.yml found.'));
+    console.log(chalk.dim('  Run /policy init to create one, or configure guardrails in /settings.'));
+    return;
+  }
+
+  const policy = loadPolicy(cwd);
+  if (!policy) {
+    console.log(chalk.red('  ✗ Failed to parse policies.yml'));
+    return;
+  }
+
+  console.log();
+  console.log(o(`  ${policy.name}`));
+  if (policy.description) console.log(chalk.dim(`  ${policy.description}`));
+  console.log(hr());
+
+  for (const rule of policy.rules) {
+    const status = rule.enabled ? chalk.green('●') : chalk.dim('○');
+    const action = rule.action === 'block' ? chalk.red('BLOCK') : chalk.yellow('WARN');
+    console.log(`  ${status} ${chalk.bold(rule.name)} [${chalk.dim(rule.type)}] → ${action}`);
+    if (rule.description) console.log(`    ${chalk.dim(rule.description)}`);
+  }
+  console.log();
+  console.log(chalk.dim('  Commands: /policy init | check | export'));
+}
+
+async function cmdFirewall(dbPath: string): Promise<void> {
+  const storage = new Storage(dbPath);
+  try {
+    const blocks = storage.getRecentBlocks(20);
+    if (blocks.length === 0) {
+      console.log(chalk.dim('  No interceptions recorded yet.'));
+      console.log(chalk.dim('  Impact previews appear when the agent attempts risky actions.'));
+      return;
+    }
+
+    const riskColor: Record<string, (s: string) => string> = {
+      critical: chalk.red,
+      high: chalk.hex('#ff8c00'),
+      medium: chalk.yellow,
+      low: chalk.green,
+    };
+
+    console.log();
+    console.log(o('  Firewall Interceptions'));
+    console.log(hr());
+
+    for (const block of blocks) {
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(block.data); } catch {}
+
+      const impact = data.impactPreview as Record<string, unknown> | undefined;
+      const risk = (impact?.risk as string) || 'high';
+      const colorFn = riskColor[risk] || chalk.yellow;
+      const time = new Date(block.timestamp).toLocaleString();
+      const desc = String(data.description || '').slice(0, 100);
+      const action = String(data.blockedAction || '').slice(0, 80);
+      const rule = String(data.ruleName || 'guardrail');
+
+      console.log(`  ${colorFn('●')} ${colorFn(risk.toUpperCase().padEnd(8))} ${chalk.dim(time)}`);
+      console.log(`    ${desc}`);
+      if (action) console.log(`    ${chalk.dim(action)}`);
+      if (impact?.details) {
+        for (const d of impact.details as string[]) {
+          console.log(`    ${chalk.dim('·')} ${chalk.dim(d)}`);
+        }
+      }
+      console.log(`    ${chalk.dim(`rule: ${rule}  session: ${block.session_id.slice(0, 8)}`)}`);
+      console.log();
+    }
+    console.log(chalk.dim(`  ${blocks.length} interception${blocks.length !== 1 ? 's' : ''} shown. Open dashboard /firewall for live view.`));
+  } finally {
+    storage.close();
   }
 }
 
@@ -2897,6 +3050,14 @@ async function cmdTasks(cwd: string, args: string): Promise<void> {
 
 async function rawPromptSingle(label: string): Promise<string> {
   process.stdout.write(label);
+
+  // Ensure stdin is in raw mode and resumed (main prompt loop pauses + disables raw mode before command execution)
+  const wasRaw = process.stdin.isRaw;
+  if (!wasRaw && typeof process.stdin.setRawMode === 'function') {
+    process.stdin.setRawMode(true);
+  }
+  process.stdin.resume();
+
   return new Promise<string>((resolve) => {
     let buf = '';
     const onData = (data: Buffer) => {
@@ -2904,6 +3065,10 @@ async function rawPromptSingle(label: string): Promise<string> {
       if (ch === '\r' || ch === '\n') {
         process.stdout.write('\n');
         process.stdin.removeListener('data', onData);
+        // Restore previous raw mode state
+        if (!wasRaw && typeof process.stdin.setRawMode === 'function') {
+          process.stdin.setRawMode(false);
+        }
         resolve(buf);
       } else if (ch === '\x7f' || ch === '\b') {
         if (buf.length > 0) {
@@ -2911,6 +3076,10 @@ async function rawPromptSingle(label: string): Promise<string> {
           process.stdout.write('\b \b');
         }
       } else if (ch === '\x03') {
+        process.stdin.removeListener('data', onData);
+        if (!wasRaw && typeof process.stdin.setRawMode === 'function') {
+          process.stdin.setRawMode(false);
+        }
         resolve('');
       } else if (ch >= ' ') {
         buf += ch;
@@ -2919,6 +3088,82 @@ async function rawPromptSingle(label: string): Promise<string> {
     };
     process.stdin.on('data', onData);
   });
+}
+
+// ─── Overnight + Report commands ─────────────────────────────
+
+async function cmdOvernight(cwd: string, args: string): Promise<void> {
+  const { spawn: spawnProc } = await import('node:child_process');
+
+  console.log('');
+  console.log(chalk.dim('  Launching overnight mode in a new process...'));
+  console.log(chalk.dim('  (TUI event loop would conflict — running as background process)'));
+  console.log('');
+
+  const cmdArgs = [process.argv[1], 'overnight'];
+  if (args.trim()) {
+    cmdArgs.push(...args.trim().split(/\s+/));
+  }
+
+  const child = spawnProc(process.execPath, cmdArgs, {
+    cwd,
+    stdio: 'inherit',
+    detached: false,
+    env: { ...process.env },
+  });
+
+  await new Promise<void>((resolve) => {
+    child.on('close', () => resolve());
+    child.on('error', (err) => {
+      console.log(`  ${chalk.red('✗')} Failed to start overnight mode: ${err.message}`);
+      resolve();
+    });
+  });
+}
+
+async function cmdReport(cwd: string, args: string): Promise<void> {
+  const { generateMorningReport, renderTerminalReport } = await import('./commands/report.js');
+  const { existsSync: exists, readFileSync: readFile } = await import('node:fs');
+
+  // Parse --since, --json, --llm from args
+  const parts = args.trim().split(/\s+/);
+  let since = '';
+  let json = false;
+  let llm = false;
+
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] === '--since' && parts[i + 1]) {
+      since = parts[++i];
+    } else if (parts[i] === '--json') {
+      json = true;
+    } else if (parts[i] === '--llm') {
+      llm = true;
+    }
+  }
+
+  if (!since) {
+    const overnightFile = join(cwd, '.hawkeye', 'overnight.json');
+    if (exists(overnightFile)) {
+      try {
+        const data = JSON.parse(readFile(overnightFile, 'utf-8'));
+        if (data.startedAt) since = data.startedAt;
+      } catch {}
+    }
+    if (!since) {
+      since = new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString();
+    }
+  }
+
+  console.log('');
+  console.log(chalk.dim('  Generating report...'));
+
+  const report = await generateMorningReport(cwd, since, { runPostMortem: llm });
+
+  if (json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    renderTerminalReport(report);
+  }
 }
 
 // ─── Remote command (serve + daemon + tunnel) ──────────────

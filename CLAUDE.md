@@ -4,19 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Hawkeye is an open-source observability and security tool for AI agents (Claude Code, Cursor, AutoGPT, CrewAI, Aider, etc.). It acts as a "flight recorder" that logs every action an agent performs, enables visual session replay, and includes **DriftDetect** (real-time objective drift detection) and **Guardrails** (file protection, command blocking, cost limits).
+Hawkeye is an open-source observability and security tool for AI agents (Claude Code, Cursor, AutoGPT, CrewAI, Aider, etc.). It acts as a "flight recorder" that logs every action an agent performs, enables visual session replay, and includes **DriftDetect** (real-time objective drift detection), **Guardrails** (file protection, command blocking, cost limits), **Impact Preview** (pre-execution risk analysis), **Live Firewall** (real-time action stream with browser notifications), and **Policy Engine** (declarative `.hawkeye/policies.yml`).
 
 ## Architecture
 
 TypeScript monorepo using pnpm workspaces + Turborepo:
 
 - `packages/core` — Node.js SDK: recorder engine, interceptors (terminal, filesystem, network, LLM), SQLite storage, DriftDetect engine, guardrails enforcer
-- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`. Interactive TUI via raw-mode stdin with slash command picker.
+- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`, `overnight`, `report`, `arena`, `policy`. Interactive TUI via raw-mode stdin with slash command picker.
 - `packages/dashboard` — React 19 + Vite + Tailwind CSS + Recharts web UI served by `hawkeye serve` on port 4242. Mobile responsive.
 
 ### Data Flow
 
-Interceptors capture events → Recorder evaluates guardrails (sync, blocking) → persists to SQLite → triggers drift check (async, non-blocking). The CLI's `serve` command exposes a REST API (`/api/sessions`, `/api/sessions/:id/events`, `/api/sessions/:id/drift`, `/api/sessions/:id/pause`, `/api/sessions/:id/resume`, `/api/sessions/:id/end`, `/api/sessions/:id/cost-by-file`, `/api/compare?ids=id1,id2`, `/api/settings`, `/api/providers`, `/api/ingest`, `/api/stats`, `/api/revert`, `/api/tasks`, `/api/tasks/journal`, `/api/pending-reviews`, `/api/review-approve`, `/api/review-deny`) and serves the dashboard as static files. The server **auto-reloads** on `pnpm build` — it watches `dist/` and restarts itself when compiled files change.
+Interceptors capture events → Recorder evaluates guardrails (sync, blocking) → persists to SQLite → triggers drift check (async, non-blocking). The CLI's `serve` command exposes a REST API (`/api/sessions`, `/api/sessions/:id/events`, `/api/sessions/:id/drift`, `/api/sessions/:id/pause`, `/api/sessions/:id/resume`, `/api/sessions/:id/end`, `/api/sessions/:id/cost-by-file`, `/api/compare?ids=id1,id2`, `/api/settings`, `/api/providers`, `/api/policies`, `/api/ingest`, `/api/stats`, `/api/revert`, `/api/tasks`, `/api/tasks/journal`, `/api/pending-reviews`, `/api/review-approve`, `/api/review-deny`, `/api/impact`, `/api/interceptions`) and serves the dashboard as static files. The server **auto-reloads** on `pnpm build` — it watches `dist/` and restarts itself when compiled files change.
 
 ### Network Interception (Child Process)
 
@@ -163,7 +163,61 @@ SQLite via `better-sqlite3` with WAL mode. Schema in `packages/core/src/storage/
 
 ## Guardrails
 
-Rules evaluated synchronously before event persistence. Rule types: `file_protect` (glob patterns), `command_block` (regex patterns), `cost_limit` (per-session and per-hour), `token_limit`, `directory_scope`, `network_lock` (allowed/blocked hostnames for API calls), `review_gate` (command patterns requiring human approval). Actions: `warn` or `block`. Blocked events are persisted as `guardrail_trigger` type. Rule definitions in `packages/core/src/guardrails/rules.ts`.
+Rules evaluated synchronously before event persistence. Rule types: `file_protect` (glob patterns), `command_block` (regex patterns), `cost_limit` (per-session and per-hour), `token_limit`, `directory_scope`, `network_lock` (allowed/blocked hostnames for API calls), `review_gate` (command patterns requiring human approval), `impact_threshold` (block/warn above risk level). Actions: `warn` or `block`. Blocked events are persisted as `guardrail_trigger` type. Rule definitions in `packages/core/src/guardrails/rules.ts`.
+
+## Impact Preview
+
+`packages/cli/src/impact.ts` — Pre-execution risk analysis engine. Every agent action is analyzed BEFORE execution via the hook-handler's PreToolUse phase. Computes risk level (low/medium/high/critical) based on command patterns (rm, git push --force, DROP TABLE, curl|bash, npm publish), file sensitivity (.env, .pem, .key), and git status. Outputs formatted preview to stderr and writes `last-impact.json` for the dashboard. Critical-risk actions are blocked (configurable via `impact_threshold` policy rule). The dashboard's Firewall page shows the live action stream via WebSocket `action_stream` messages, with browser push notifications for blocked/critical actions.
+
+## Policy Engine
+
+Declarative security policies in `.hawkeye/policies.yml` (YAML format). Shareable across projects and teams.
+
+- `packages/cli/src/policy.ts` — Core: schema types, YAML parser/serializer, validator, template generator, config↔policy converters
+- `packages/cli/src/commands/policy.ts` — CLI: `hawkeye policy init|check|show|export|import`
+- Dashboard Settings page has full CRUD for policy rules (add/remove/edit/toggle)
+- `loadGuardrailConfig()` in hook-handler merges policies.yml rules with config.json guardrails
+- `POST /api/policies` validates schema server-side before writing
+- Policy file written with `0o600` permissions
+
+Rule types: `file_protect`, `command_block`, `cost_limit`, `token_limit`, `directory_scope`, `network_lock`, `review_gate`, `impact_threshold`.
+
+## Overnight Mode
+
+`hawkeye overnight` composes serve + daemon + strict guardrails into a single command for unattended runs:
+
+1. Backs up config to `.hawkeye/overnight-config-backup.json`
+2. Applies strict guardrails: cost limit (from `--budget`), file_protect for sensitive files, command_block enabled, drift `autoPause: true`
+3. Writes `.hawkeye/overnight.json` with state (startedAt, budget, agent, port)
+4. Spawns serve + daemon (detached), optional cloudflare tunnel (`--tunnel`), optional initial task (`--task`)
+5. Blocks on Ctrl+C → generates morning report, fires `overnight_report` webhook, restores config backup, kills daemon/tunnel
+
+`hawkeye report` generates a standalone morning report: `--since <iso>`, `--json`, `--llm` (post-mortem per session), `--webhook`. Defaults to reading `startedAt` from `overnight.json` or 8h ago.
+
+## Agent Arena
+
+`hawkeye arena` pits multiple AI agents against each other on the same task using isolated git worktrees:
+
+1. Validates agent commands exist in PATH
+2. Creates git worktrees per agent (`.hawkeye/arena-<id>/<agent>/`) for isolation
+3. Runs all agents in parallel with configurable timeout (default 30min)
+4. After each finishes: captures git diff stats, optionally runs test command
+5. Scores contestants: tests pass (50pts), speed (20pts), code efficiency (15pts), file focus (10pts), completion (5pts)
+6. Prints leaderboard, saves results to `.hawkeye/arenas.json`
+
+Known agents: `claude` (`claude -p`), `aider` (`aider --message --yes`), `codex` (`codex -q`). Custom agents supported.
+
+Dashboard: `/arena` page shows all arena results with expandable leaderboard tables. API: `GET /api/arenas`, `GET /api/arenas/:id`.
+
+## Webhooks
+
+Shared `fireWebhooks()` utility in `packages/cli/src/webhooks.ts`. Five webhook event types:
+
+- `drift_critical` — fired by record.ts when drift score drops to critical
+- `guardrail_block` — fired by record.ts when a guardrail blocks an action
+- `session_complete` — fired by serve.ts auto-close on 30min inactivity
+- `task_complete` — fired by daemon.ts after each task finishes (completed or failed)
+- `overnight_report` — fired by overnight.ts / report.ts with full report payload
 
 ## Design System (Dashboard)
 
@@ -188,6 +242,14 @@ Rules evaluated synchronously before event persistence. Rule types: `file_protec
 | `packages/core/src/llm/providers.ts`        | LLM provider factory — Ollama, Anthropic, OpenAI, DeepSeek, Mistral, Google   |
 | `packages/core/src/llm/post-mortem.ts`      | Post-mortem prompt template and JSON response parser                          |
 | `packages/dashboard/src/pages/TasksPage.tsx` | Remote tasks page — image upload, auto-approve, journal viewer               |
+| `packages/cli/src/commands/overnight.ts`    | Overnight orchestrator — serve + daemon + strict guardrails + morning report  |
+| `packages/cli/src/commands/report.ts`       | Morning report generator — aggregates sessions, drift, errors, post-mortem   |
+| `packages/cli/src/webhooks.ts`              | Shared `fireWebhooks()` utility used by record, serve, daemon, overnight     |
+| `packages/cli/src/commands/arena.ts`        | Agent Arena — git worktrees, parallel execution, scoring, leaderboard        |
+| `packages/cli/src/impact.ts`               | Impact Preview engine — risk analysis, command patterns, file sensitivity    |
+| `packages/cli/src/policy.ts`               | Policy Engine — YAML schema, parser, validator, template, converters         |
+| `packages/cli/src/commands/policy.ts`      | Policy CLI — init, check, show, export, import subcommands                   |
+| `packages/dashboard/src/pages/InterceptionPage.tsx` | Firewall page — live action stream, risk classification, notifications |
 
 ## MCP Server
 
