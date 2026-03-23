@@ -46,6 +46,8 @@ Hawkeye is a **flight recorder** for AI agents. It captures every action an agen
 - **Interactive TUI** — Terminal-responsive CLI with arrow-key navigation and slash commands
 - **OpenTelemetry export** — Push traces to Grafana Tempo, Jaeger, Datadog, Honeycomb
 - **Universal ingestion API** — Accept events from any source (MCP servers, custom tools)
+- **GitHub PR Integration** — Automatic Check Run + PR comment with drift, risk, cost, flags, and replay link on every AI-generated PR
+- **GitHub Action** — `MLaminekane/hawkeye@v1` reusable action for CI/CD pipelines
 - **MCP server** — 38 tools for agent self-awareness, intelligence, and cross-session analysis
 - **Multi-agent support** — Claude Code (hooks), Aider, Open Interpreter, AutoGPT, CrewAI, Codex, or any custom command
 
@@ -219,6 +221,53 @@ hawkeye autocorrect history             # View past corrections
 ```
 
 Autonomous control layer — Hawkeye doesn't just observe, it autonomously corrects agent behavior when drift, errors, or cost issues are detected. Actions include file rollback, session pause, hint injection to MCP-aware agents, and pattern blocking.
+
+### `hawkeye ci`
+
+```bash
+hawkeye ci --pr 42                        # Post report to PR #42 (auto-detect session + repo)
+hawkeye ci --pr 42 --session abc123       # Specify session explicitly
+hawkeye ci --markdown                     # Output raw markdown (no GitHub API)
+hawkeye ci --json                         # Output structured JSON
+hawkeye ci --no-check --pr 42             # Comment only, no Check Run
+```
+
+Post a session observability report to a GitHub PR. Creates a **Check Run** (pass/fail) and a **PR comment** with drift score, risk level, cost, sensitive files, dangerous commands, guardrail violations, and a replay link.
+
+Auto-detects repository from git remote, commit SHA from HEAD, and session from the current branch. Requires `GITHUB_TOKEN` environment variable.
+
+| Option                  | Description                                | Default        |
+| ----------------------- | ------------------------------------------ | -------------- |
+| `--pr <number>`         | PR number to comment on                    |                |
+| `--repo <owner/repo>`   | GitHub repository                          | auto-detect    |
+| `--sha <commit>`        | Commit SHA for Check Run                   | HEAD           |
+| `--session <id>`        | Session ID or prefix                       | auto from branch |
+| `--dashboard-url <url>` | Dashboard URL for replay links             |                |
+| `--fail-on-critical`    | Exit code 1 on critical risk               | `true`         |
+| `--json`                | Output as JSON (no GitHub calls)           |                |
+| `--markdown`            | Output raw markdown (no GitHub calls)      |                |
+
+#### GitHub Action
+
+```yaml
+# .github/workflows/hawkeye.yml
+name: Hawkeye Report
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  hawkeye:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: MLaminekane/hawkeye@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
 
 ### `hawkeye compare <id1> <id2>`
 

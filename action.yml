@@ -1,0 +1,75 @@
+name: 'Hawkeye AI Agent Report'
+description: 'Post AI agent session observability report to GitHub PRs — drift, risk, cost, flags, and replay links'
+author: 'MLaminekane'
+
+branding:
+  icon: 'eye'
+  color: 'orange'
+
+inputs:
+  session-id:
+    description: 'Hawkeye session ID (auto-detects from branch if omitted)'
+    required: false
+  fail-on-critical:
+    description: 'Fail the check if risk is critical'
+    required: false
+    default: 'true'
+  post-comment:
+    description: 'Post a PR comment with the report'
+    required: false
+    default: 'true'
+  post-check:
+    description: 'Create a GitHub Check Run'
+    required: false
+    default: 'true'
+  dashboard-url:
+    description: 'Hawkeye dashboard URL for replay links'
+    required: false
+  github-token:
+    description: 'GitHub token for API calls (defaults to the workflow token)'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Hawkeye
+      shell: bash
+      run: npm install -g hawkeye-ai@latest
+
+    - name: Run Hawkeye CI
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        ARGS=""
+        if [ -n "${{ inputs.session-id }}" ]; then
+          ARGS="$ARGS --session ${{ inputs.session-id }}"
+        fi
+        if [ "${{ inputs.fail-on-critical }}" = "false" ]; then
+          ARGS="$ARGS --no-fail-on-critical"
+        fi
+        if [ "${{ inputs.post-comment }}" = "false" ]; then
+          ARGS="$ARGS --no-comment"
+        fi
+        if [ "${{ inputs.post-check }}" = "false" ]; then
+          ARGS="$ARGS --no-check"
+        fi
+        if [ -n "${{ inputs.dashboard-url }}" ]; then
+          ARGS="$ARGS --dashboard-url ${{ inputs.dashboard-url }}"
+        fi
+
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        if [ -n "$PR_NUMBER" ]; then
+          ARGS="$ARGS --pr $PR_NUMBER"
+        fi
+
+        ARGS="$ARGS --repo ${{ github.repository }}"
+        ARGS="$ARGS --sha ${{ github.event.pull_request.head.sha || github.sha }}"
+
+        hawkeye ci $ARGS

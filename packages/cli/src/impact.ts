@@ -102,7 +102,7 @@ function expandPath(p: string): string {
 }
 
 // Sensitive file patterns that increase risk
-const SENSITIVE_PATTERNS = [
+export const SENSITIVE_PATTERNS = [
   /\.env($|\.)/,
   /\.pem$/, /\.key$/, /\.p12$/, /\.pfx$/,
   /id_rsa/, /id_ed25519/, /\.ssh\//,
@@ -116,7 +116,7 @@ const SENSITIVE_PATTERNS = [
   /Cargo\.lock$/, /go\.sum$/,
 ];
 
-function isSensitiveFile(filePath: string): boolean {
+export function isSensitiveFile(filePath: string): boolean {
   return SENSITIVE_PATTERNS.some((p) => p.test(filePath));
 }
 

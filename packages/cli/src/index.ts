@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import { analyzeCommand } from './commands/analyze.js';
 import { approveCommand } from './commands/approve.js';
 import { autocorrectCommand } from './commands/autocorrect.js';
+import { ciCommand } from './commands/ci.js';
 import { initCommand } from './commands/init.js';
 import { compareCommand } from './commands/compare.js';
 import { daemonCommand } from './commands/daemon.js';
@@ -33,7 +34,7 @@ import { startInteractive } from './interactive.js';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const packageJson = JSON.parse(readFileSync(join(currentDir, '..', 'package.json'), 'utf8')) as { version?: string };
-const cliVersion = packageJson.version ?? '0.1.13';
+const cliVersion = packageJson.version ?? '0.2.0';
 
 const program = new Command();
 const compareCommands = (left: Command, right: Command) => left.name().localeCompare(right.name());
@@ -47,6 +48,7 @@ program
   analyzeCommand,
   approveCommand,
   autocorrectCommand,
+  ciCommand,
   compareCommand,
   daemonCommand,
   endCommand,

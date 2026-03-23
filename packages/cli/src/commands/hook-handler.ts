@@ -13,6 +13,7 @@
 
 import { Command } from 'commander';
 import { join, extname } from 'node:path';
+import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -26,6 +27,18 @@ import { loadPolicy, policyToGuardrailConfig } from '../policy.js';
 // ── Cost estimation ──
 // Claude Code primarily uses Claude models. Default to sonnet pricing.
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
+
+function getGitBranch(): string | undefined {
+  try {
+    return execSync('git rev-parse --abbrev-ref HEAD', {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
 const COST_PER_1M: Record<string, { input: number; output: number }> = {
   'claude-sonnet-4-6': { input: 3, output: 15 },
   'claude-opus-4-6': { input: 5, output: 25 },
@@ -546,6 +559,7 @@ function getOrCreateSession(
         agent: 'claude-code',
         model: DEFAULT_MODEL,
         workingDir: process.cwd(),
+        gitBranch: getGitBranch(),
         developer: getDeveloperName(),
       },
       totalCostUsd: 0,

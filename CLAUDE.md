@@ -11,7 +11,7 @@ Hawkeye is an open-source observability and security tool for AI agents (Claude 
 TypeScript monorepo using pnpm workspaces + Turborepo:
 
 - `packages/core` — Node.js SDK: recorder engine, interceptors (terminal, filesystem, network, LLM), SQLite storage, DriftDetect engine, guardrails enforcer, RCA engine, Memory Diff engine
-- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`, `overnight`, `report`, `policy`, `analyze`, `memory`, `autocorrect`, `swarm`. Interactive TUI via raw-mode stdin with slash command picker.
+- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`, `overnight`, `report`, `policy`, `analyze`, `memory`, `autocorrect`, `swarm`, `ci`. Interactive TUI via raw-mode stdin with slash command picker.
 - `packages/dashboard` — React 19 + Vite + Tailwind CSS + Recharts web UI served by `hawkeye serve` on port 4242. Mobile responsive.
 
 ### Data Flow
@@ -354,6 +354,19 @@ Scope is enforced at two levels:
 
 After all agents complete, Hawkeye compares file lists to detect overlaps. Conflicts scored by severity (config/lock files = critical, more agents = worse, modify+delete = worse). Merge order optimized to minimize conflicts (agents with fewer conflicts merge first).
 
+## GitHub PR Integration
+
+`hawkeye ci` posts session observability reports to GitHub PRs as Check Runs and comments.
+
+- **Report generation**: `packages/cli/src/commands/ci-report.ts` — `generateCIReport()` produces markdown with metrics table, flags (sensitive files, dangerous commands, failed commands, guardrail violations), drift trajectory, cost-by-file, and files changed
+- **CLI command**: `packages/cli/src/commands/ci.ts` — auto-detects repo/SHA/branch, finds session by branch match, posts via GitHub API (native `fetch`, no Octokit)
+- **GitHub Action**: `action.yml` at repo root — `MLaminekane/hawkeye@v1` composite action
+- **Idempotent comments**: Uses `<!-- hawkeye-ci-report -->` HTML marker to update existing comments instead of duplicating
+- **Check Run**: `hawkeye/safety` check with pass/fail based on risk level (critical = fail)
+- **Risk assessment**: critical (drift < 30 OR guardrail blocks OR 3+ dangerous commands), high (drift < 50 OR 5+ errors), medium (drift < 70 OR any errors/sensitive files), low
+- **Session auto-detection**: matches `git_branch` in session metadata to current branch, falls back to most recent session
+- **Branch capture**: hook-handler now includes `gitBranch` in session metadata at creation time (via `execSync('git rev-parse --abbrev-ref HEAD')`)
+
 ## Webhooks
 
 Shared `fireWebhooks()` utility in `packages/cli/src/webhooks.ts`. Seven webhook event types:
@@ -393,6 +406,8 @@ Shared `fireWebhooks()` utility in `packages/cli/src/webhooks.ts`. Seven webhook
 | `packages/cli/src/commands/overnight.ts`    | Overnight orchestrator — serve + daemon + strict guardrails + morning report  |
 | `packages/cli/src/commands/report.ts`       | Morning report generator — aggregates sessions, drift, errors, post-mortem   |
 | `packages/cli/src/webhooks.ts`              | Shared `fireWebhooks()` utility used by record, serve, daemon, overnight     |
+| `packages/cli/src/commands/ci.ts`           | GitHub PR integration — Check Run + comment, auto-detect session/repo       |
+| `packages/cli/src/commands/ci-report.ts`    | CI markdown report generator — risk, flags, drift, cost-by-file             |
 | `packages/cli/src/commands/arena.ts`        | Agent Arena (not registered as CLI command — code exists but not wired)       |
 | `packages/cli/src/impact.ts`               | Impact Preview engine — risk analysis, command patterns, file sensitivity    |
 | `packages/cli/src/policy.ts`               | Policy Engine — YAML schema, parser, validator, template, converters         |
