@@ -518,7 +518,10 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 ### Agents Control Room
 
 - **Spawn agents** directly from the dashboard — choose agent CLI (claude, aider, codex), assign role (lead/worker/reviewer), set permissions (full access/supervised/default), add personality
-- **Live monitoring** — Real-time output streaming, session linking with drift/cost/action stats, follow-up messages
+- **Live monitoring** — Real-time output streaming, session linking with drift/cost/action stats
+- **Conversation continuity** — Follow-up messages continue the same conversation (`claude --continue`), same agent ID, same session — no duplicate sessions
+- **Live permission change** — Click the permission badge on any agent card to switch between Full Access / Supervised / Restricted at any time
+- **CI Report per agent** — Generate a full CI report (risk, flags, cost, drift) directly from an agent card with one click, copy markdown to clipboard
 - **Permission levels** — Full access (skip confirmation prompts), supervised (Hawkeye guardrails enforce limits), default (agent runtime defaults)
 - **Persistent agents** — Agents survive server restarts via file-backed persistence (`.hawkeye/agents.json`)
 - **Session integration** — Each spawned agent is automatically linked to its Hawkeye session for full observability

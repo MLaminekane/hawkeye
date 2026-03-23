@@ -55,6 +55,8 @@ export function SessionDetailPage() {
   const [rcaResult, setRcaResult] = useState<RcaResult | null>(null);
   const [rcaLoading, setRcaLoading] = useState(false);
   const [incidentLoading, setIncidentLoading] = useState(false);
+  const [ciReport, setCiReport] = useState<{ markdown: string; risk: string; passed: boolean; flags: string[] } | null>(null);
+  const [ciReportLoading, setCiReportLoading] = useState(false);
   const playTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const navigate = useNavigate();
 
@@ -226,6 +228,19 @@ export function SessionDetailPage() {
     }
   }, [session, rcaLoading]);
 
+  const handleCIReport = useCallback(async () => {
+    if (!session || ciReportLoading) return;
+    setCiReportLoading(true);
+    try {
+      const result = await api.getCIReport(session.id);
+      setCiReport(result);
+    } catch {
+      // silent
+    } finally {
+      setCiReportLoading(false);
+    }
+  }, [session, ciReportLoading]);
+
   // Events visible in replay mode (up to replayIndex)
   const visibleEvents = useMemo(() => {
     if (!replayMode) return events;
@@ -392,6 +407,13 @@ export function SessionDetailPage() {
                 className="rounded-[16px] border border-hawk-orange/30 bg-hawk-orange/10 px-3 py-1.5 font-mono text-[10px] text-hawk-orange hover:bg-hawk-orange/20 transition-colors disabled:opacity-50"
               >
                 {rcaLoading ? 'Analyzing...' : 'Analyze'}
+              </button>
+              <button
+                onClick={handleCIReport}
+                disabled={ciReportLoading}
+                className="rounded-[16px] border border-hawk-orange/30 bg-hawk-orange/10 px-3 py-1.5 font-mono text-[10px] text-hawk-orange hover:bg-hawk-orange/20 transition-colors disabled:opacity-50"
+              >
+                {ciReportLoading ? 'Generating...' : 'CI Report'}
               </button>
               {isRecording && (
                 <button
@@ -689,6 +711,63 @@ export function SessionDetailPage() {
                 </ol>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── CI Report ─── */}
+      {ciReport && (
+        <div className="mb-6 overflow-hidden rounded-[20px] border border-hawk-border-subtle bg-hawk-surface/72">
+          <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-bg/35 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <h2 className="font-display text-base font-semibold text-hawk-text">CI Report</h2>
+              <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                ciReport.passed ? 'bg-hawk-green/15 text-hawk-green' : 'bg-hawk-red/15 text-hawk-red'
+              }`}>
+                {ciReport.passed ? 'passed' : 'failed'}
+              </span>
+              <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                ciReport.risk === 'critical' ? 'bg-hawk-red/15 text-hawk-red' :
+                ciReport.risk === 'high' ? 'bg-hawk-amber/15 text-hawk-amber' :
+                ciReport.risk === 'medium' ? 'bg-blue-500/15 text-blue-400' :
+                'bg-hawk-green/15 text-hawk-green'
+              }`}>
+                {ciReport.risk} risk
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(ciReport.markdown);
+                }}
+                className="rounded-[12px] border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1 font-mono text-[10px] text-hawk-text3 hover:text-hawk-orange hover:border-hawk-orange/30 transition-colors"
+              >
+                Copy Markdown
+              </button>
+              <button onClick={() => setCiReport(null)} className="text-hawk-text3 hover:text-hawk-text text-xs">✕</button>
+            </div>
+          </div>
+
+          <div className="px-4 py-4 space-y-3">
+            {/* Flags */}
+            {ciReport.flags.length > 0 && (
+              <div>
+                <div className="font-mono text-[10px] uppercase tracking-wider text-hawk-orange mb-1">Flags</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {ciReport.flags.map((flag, i) => (
+                    <span key={i} className="rounded-full bg-hawk-amber/15 border border-hawk-amber/30 px-2 py-0.5 font-mono text-[10px] text-hawk-amber">
+                      {flag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Markdown Preview */}
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-wider text-hawk-orange mb-1">Report Preview</div>
+              <pre className="max-h-[400px] overflow-auto rounded-lg bg-hawk-bg/60 border border-hawk-border-subtle p-3 font-mono text-xs text-hawk-text2 whitespace-pre-wrap">{ciReport.markdown}</pre>
+            </div>
           </div>
         </div>
       )}

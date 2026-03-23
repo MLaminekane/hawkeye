@@ -12,6 +12,7 @@ import { loadConfig, getDefaultConfig, PROVIDER_MODELS, getDeveloperName } from 
 import { fireWebhooks } from '../webhooks.js';
 import { loadPolicy, savePolicy, validatePolicy, generateTemplate, configToPolicy, type PolicyFile } from '../policy.js';
 import { generatePdfBuffer } from './export.js';
+import { generateCIReport } from './ci-report.js';
 import { loadTasks, saveTasks, createTask, readJournal, clearJournal, type Task } from './daemon.js';
 import { runSwarm, setSwarmBroadcast } from './swarm.js';
 import { validateSwarmConfig, generateSwarmTemplate } from '@mklamine/hawkeye-core';
@@ -1021,6 +1022,48 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
       } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Analysis failed' }));
+      }
+      return;
+    }
+
+    // GET /api/sessions/:id/ci-report
+    const ciMatch = url.match(/^\/api\/sessions\/([^/]+)\/ci-report$/);
+    if (ciMatch) {
+      const sResult = storage.getSession(ciMatch[1]);
+      if (!sResult.ok || !sResult.value) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Session not found' }));
+        return;
+      }
+      const sess = sResult.value;
+      try {
+        const evResult = storage.getEvents(sess.id);
+        const statsResult = storage.getSessionStats(sess.id);
+        const driftResult = storage.getDriftSnapshots(sess.id);
+        const violResult = storage.getViolations(sess.id);
+        const costResult = storage.getCostByFile(sess.id);
+
+        const report = generateCIReport({
+          session: sess,
+          events: evResult.ok ? evResult.value : [],
+          stats: statsResult.ok ? statsResult.value : { total_events: 0, command_count: 0, file_count: 0, llm_count: 0, api_count: 0, git_count: 0, error_count: 0, guardrail_count: 0, total_cost_usd: 0, total_duration_ms: 0 },
+          driftSnapshots: driftResult.ok ? driftResult.value : [],
+          violations: violResult.ok ? violResult.value : [],
+          costByFile: costResult.ok ? costResult.value : [],
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          markdown: report.markdown,
+          risk: report.overallRisk,
+          passed: report.passed,
+          flags: report.flags,
+          sensitiveFiles: report.sensitiveFiles,
+          dangerousCommands: report.dangerousCommands,
+          failedCommands: report.failedCommands,
+        }));
+      } catch (err: unknown) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Report generation failed' }));
       }
       return;
     }
@@ -2266,21 +2309,122 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         return;
       }
 
-      // POST /api/agents/:id/message — Send a follow-up prompt to a completed agent
+      // POST /api/agents/:id/permissions — Change agent permission level
+      const permAgentMatch = url.match(/^\/api\/agents\/([^/]+)\/permissions$/);
+      if (permAgentMatch) {
+        const agent = liveAgents.get(permAgentMatch[1]);
+        if (!agent) { res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return; }
+        const p = JSON.parse(body);
+        const valid: PermissionLevel[] = ['default', 'full', 'supervised'];
+        if (!p.permissions || !valid.includes(p.permissions)) {
+          res.writeHead(400); res.end(JSON.stringify({ error: 'permissions must be one of: default, full, supervised' })); return;
+        }
+        agent.permissions = p.permissions;
+        persistAgents(cwd);
+        broadcast({ type: 'agent_permissions', agentId: agent.id, permissions: agent.permissions });
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, agent }));
+        return;
+      }
+
+      // POST /api/agents/:id/message — Send a follow-up to an agent (continues same session)
       const msgAgentMatch = url.match(/^\/api\/agents\/([^/]+)\/message$/);
       if (msgAgentMatch) {
-        const prevAgent = liveAgents.get(msgAgentMatch[1]);
-        if (!prevAgent) { res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return; }
+        const agent = liveAgents.get(msgAgentMatch[1]);
+        if (!agent) { res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return; }
         const p = JSON.parse(body);
         if (!p.message) { res.writeHead(400); res.end(JSON.stringify({ error: 'message required' })); return; }
-        // Create a follow-up prompt with context from previous work
-        const followUp = `You previously worked on this task:\n"${prevAgent.prompt}"\n\nFiles you changed: ${prevAgent.filesChanged.join(', ') || 'none'}\n\nNew instruction: ${p.message}`;
-        const newAgent = spawnLiveAgent(prevAgent.name, prevAgent.command, followUp, cwd, broadcast, prevAgent.role, prevAgent.personality, storage, prevAgent.permissions);
-        // Remove old agent
-        liveAgents.delete(prevAgent.id);
-        persistAgents(cwd);
-        res.writeHead(200);
-        res.end(JSON.stringify({ ok: true, agent: newAgent }));
+
+        // If agent is still running, can't send follow-up
+        if (agent.status === 'running') {
+          res.writeHead(400); res.end(JSON.stringify({ error: 'Agent is still running. Wait for completion or stop it first.' })); return;
+        }
+
+        // Continue the same agent — use --continue for Claude to keep the same conversation
+        const agentName = agent.command.trim().split(/\s+/)[0]?.split('/').pop() || agent.command;
+        const isClaude = agentName === 'claude';
+
+        const extraArgs: string[] = [];
+        if (agent.permissions === 'full') {
+          extraArgs.push('--dangerously-skip-permissions');
+        }
+
+        const { cmd, args } = buildAgentInvocation(agent.command, p.message, {
+          continueConversation: isClaude, // --continue for Claude = same session
+          extraArgs,
+        });
+
+        // Update agent state — keep same ID, same sessionId, accumulate stats
+        agent.status = 'running';
+        agent.finishedAt = null;
+        agent.exitCode = null;
+        agent.prompt = p.message; // update prompt to latest follow-up
+
+        try {
+          const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+          agent.pid = child.pid || null;
+          agentProcesses.set(agent.id, child);
+
+          broadcast({ type: 'agent_spawned', agent: { id: agent.id, name: agent.name, command: agent.command, prompt: p.message, status: 'running' } });
+          persistAgents(cwd);
+
+          child.stdout?.on('data', (data: Buffer) => {
+            const chunk = data.toString();
+            agent.output += chunk;
+            if (agent.output.length > 50000) agent.output = agent.output.slice(-40000);
+            broadcast({ type: 'agent_output', agentId: agent.id, chunk: chunk.slice(0, 2000) });
+          });
+
+          child.stderr?.on('data', (data: Buffer) => {
+            const chunk = data.toString();
+            agent.output += chunk;
+            if (agent.output.length > 50000) agent.output = agent.output.slice(-40000);
+          });
+
+          child.on('error', (err) => {
+            agent.status = 'failed';
+            agent.finishedAt = new Date().toISOString();
+            agent.output += `\nError: ${err.message}`;
+            agentProcesses.delete(agent.id);
+            broadcast({ type: 'agent_complete', agentId: agent.id, status: 'failed', error: err.message });
+            persistAgents(cwd);
+          });
+
+          child.on('close', (code) => {
+            agent.status = code === 0 ? 'completed' : 'failed';
+            agent.exitCode = code;
+            agent.finishedAt = new Date().toISOString();
+            agentProcesses.delete(agent.id);
+
+            // Update files changed (cumulative)
+            if (agent.initialHash) {
+              try {
+                const diff = execSync(`git diff --name-only ${agent.initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+                agent.filesChanged = diff ? diff.split('\n') : agent.filesChanged;
+                const stat = execSync(`git diff --stat ${agent.initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 });
+                const addMatch = stat.match(/(\d+) insertions?/);
+                const delMatch = stat.match(/(\d+) deletions?/);
+                if (addMatch) agent.linesAdded = parseInt(addMatch[1], 10);
+                if (delMatch) agent.linesRemoved = parseInt(delMatch[1], 10);
+              } catch {}
+            }
+
+            broadcast({
+              type: 'agent_complete', agentId: agent.id, status: agent.status,
+              exitCode: code ?? undefined, filesChanged: agent.filesChanged,
+            });
+            persistAgents(cwd);
+          });
+
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, agent }));
+        } catch (spawnErr) {
+          agent.status = 'failed';
+          agent.finishedAt = new Date().toISOString();
+          persistAgents(cwd);
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: `Failed to spawn follow-up: ${String(spawnErr)}` }));
+        }
         return;
       }
 

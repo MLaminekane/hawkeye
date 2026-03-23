@@ -79,6 +79,7 @@ const COMMANDS: SlashCommand[] = [
   { name: 'analyze', desc: 'Root cause analysis — find why a session failed' },
   { name: 'memory', desc: 'Memory diff — what an agent remembers across sessions' },
   { name: 'autocorrect', desc: 'Autonomous control — auto-correct agent behavior' },
+  { name: 'ci', desc: 'Post session report to GitHub PR (Check Run + comment)' },
   { name: 'swarm', desc: 'Multi-agent orchestration — list/show/init swarm runs' },
   { name: 'policy', desc: 'Manage security policies (init/check/show)' },
   { name: 'overnight', desc: 'Run overnight mode (guardrails + morning report)' },
@@ -577,6 +578,8 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     await cmdMemory(dbPath, cwd, args);
   } else if (c === 'autocorrect') {
     await cmdAutocorrect(dbPath, cwd, args);
+  } else if (c === 'ci') {
+    await cmdCI(dbPath, cwd, args);
   } else if (c === 'swarm') {
     await cmdSwarm(dbPath, cwd, args);
   } else if (c === 'policy') {
@@ -2173,6 +2176,89 @@ async function cmdAutocorrect(dbPath: string, cwd: string, args: string): Promis
   }
 
   console.log(chalk.gray('  Usage: /autocorrect [enable|disable|status|history|clear]'));
+}
+
+async function cmdCI(dbPath: string, cwd: string, args: string): Promise<void> {
+  const argParts = args.trim();
+  const hr2 = hr();
+  console.log(o('\n  🦅 GitHub PR Report'));
+  console.log(chalk.gray('  ─────────────────────────────────────'));
+
+  if (!existsSync(dbPath)) {
+    console.log(chalk.red('  No sessions found.'));
+    return;
+  }
+
+  const storage = new Storage(dbPath);
+  try {
+    const { generateCIReport } = await import('./commands/ci-report.js');
+
+    // Parse session arg or auto-detect
+    let session: SessionRow | undefined;
+    if (argParts) {
+      const r = storage.getSession(argParts);
+      if (r.ok && r.value) {
+        session = r.value;
+      } else {
+        // Try prefix match
+        const all = storage.listSessions({ limit: 50 });
+        if (all.ok && all.value) {
+          session = all.value.find((s) => s.id.startsWith(argParts));
+        }
+      }
+      if (!session) {
+        console.log(chalk.red(`  Session not found: ${argParts}`));
+        return;
+      }
+    } else {
+      // Use most recent session
+      const all = storage.listSessions({ limit: 10 });
+      if (!all.ok || !all.value?.length) {
+        console.log(chalk.red('  No sessions found.'));
+        return;
+      }
+      session = all.value[0];
+    }
+
+    console.log(chalk.gray('  Session: ') + chalk.white(session.id.slice(0, 8)) + chalk.gray(` — "${session.objective}"`));
+
+    const evResult = storage.getEvents(session.id);
+    const events = evResult.ok ? evResult.value : [];
+    const statsResult = storage.getSessionStats(session.id);
+    const stats = statsResult.ok ? statsResult.value
+      : { total_events: 0, command_count: 0, file_count: 0, llm_count: 0, api_count: 0, git_count: 0, error_count: 0, guardrail_count: 0, total_cost_usd: 0, total_duration_ms: 0 };
+    const driftResult = storage.getDriftSnapshots(session.id);
+    const driftSnapshots = driftResult.ok ? driftResult.value : [];
+    const violResult = storage.getViolations(session.id);
+    const violations = violResult.ok ? violResult.value : [];
+    const costResult = storage.getCostByFile(session.id);
+    const costByFile = costResult.ok ? costResult.value : [];
+
+    const report = generateCIReport({ session, events, stats, driftSnapshots, violations, costByFile });
+
+    // Display summary
+    const drift = session.final_drift_score;
+    const driftColor = drift === null ? chalk.gray : drift >= 70 ? chalk.green : drift >= 40 ? chalk.yellow : chalk.red;
+    console.log(chalk.gray('  Risk:    ') + (report.overallRisk === 'critical' ? chalk.red(report.overallRisk) : report.overallRisk === 'high' ? chalk.hex('#ff8c00')(report.overallRisk) : report.overallRisk === 'medium' ? chalk.yellow(report.overallRisk) : chalk.green(report.overallRisk)));
+    console.log(chalk.gray('  Drift:   ') + driftColor(drift !== null ? `${drift}/100` : 'N/A'));
+    console.log(chalk.gray('  Cost:    ') + chalk.white(`$${session.total_cost_usd.toFixed(2)}`));
+    console.log(chalk.gray('  Actions: ') + chalk.white(`${session.total_actions}`));
+
+    if (report.flags.length > 0) {
+      console.log('');
+      for (const flag of report.flags) {
+        console.log(`  ${flag}`);
+      }
+    }
+
+    console.log(chalk.gray('\n  To post to GitHub:'));
+    console.log(chalk.white(`    hawkeye ci --pr <number> --session ${session.id.slice(0, 8)}`));
+    console.log(chalk.gray('\n  Preview markdown:'));
+    console.log(chalk.white(`    hawkeye ci --markdown --session ${session.id.slice(0, 8)}`));
+    console.log(`\n${hr2}\n`);
+  } finally {
+    storage.close();
+  }
 }
 
 async function cmdSwarm(dbPath: string, cwd: string, args: string): Promise<void> {

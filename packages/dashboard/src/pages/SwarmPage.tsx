@@ -416,10 +416,26 @@ export default function SwarmPage() {
   const [actingAgentId, setActingAgentId] = useState<string | null>(null);
 
   const [agentEvents, setAgentEvents] = useState<Record<string, AgentEventData[]>>({});
+  const [permDropdownId, setPermDropdownId] = useState<string | null>(null);
+  const [updatingPermId, setUpdatingPermId] = useState<string | null>(null);
+  const [ciReportAgentId, setCiReportAgentId] = useState<string | null>(null);
+  const [ciReportData, setCiReportData] = useState<{ markdown: string; risk: string; passed: boolean; flags: string[] } | null>(null);
+  const [ciReportLoading, setCiReportLoading] = useState(false);
 
   const outputRefs = useRef<Map<string, HTMLPreElement>>(new Map());
   const pollingTargetsRef = useRef<Array<{ id: string; sessionId: string }>>([]);
   const [, setClockTick] = useState(0);
+
+  // Close permission dropdown on outside click
+  useEffect(() => {
+    if (!permDropdownId) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-perm-dropdown]')) setPermDropdownId(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [permDropdownId]);
 
   const load = useCallback(async () => {
     try {
@@ -716,6 +732,36 @@ export default function SwarmPage() {
     }
   }, []);
 
+  const handleChangePermissions = useCallback(async (agentId: string, newPerm: 'default' | 'full' | 'supervised') => {
+    setUpdatingPermId(agentId);
+    try {
+      await api.updateAgentPermissions(agentId, newPerm);
+      // Update local state
+      setAgents((prev) => prev.map((a) => a.id === agentId ? { ...a, permissions: newPerm } : a));
+      setPermDropdownId(null);
+      setNotice({ type: 'success', text: `Permissions updated to ${newPerm}.` });
+    } catch {
+      setNotice({ type: 'error', text: 'Unable to update permissions.' });
+    } finally {
+      setUpdatingPermId(null);
+    }
+  }, []);
+
+  const handleCIReport = useCallback(async (agentId: string, sessionId: string) => {
+    if (ciReportLoading) return;
+    setCiReportLoading(true);
+    setCiReportAgentId(agentId);
+    try {
+      const result = await api.getCIReport(sessionId);
+      setCiReportData(result);
+    } catch {
+      setNotice({ type: 'error', text: 'Unable to generate CI report for this agent.' });
+      setCiReportAgentId(null);
+    } finally {
+      setCiReportLoading(false);
+    }
+  }, [ciReportLoading]);
+
   const handleSendMessage = useCallback(
     async (id: string) => {
       const message = messageDrafts[id]?.trim();
@@ -981,15 +1027,15 @@ export default function SwarmPage() {
                   </div>
                 </div>
 
-                <div>
+                <div className="lg:col-span-2">
                   <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">
                     Permissions
                   </div>
-                  <div className="space-y-2">
+                  <div className="grid grid-cols-3 gap-2">
                     {([
-                      { value: 'full' as const, label: 'Full Access', summary: 'Agent can read and write any file without asking. Best for trusted tasks.', badgeClass: 'text-green-500', borderClass: 'border-green-500/30', surfaceClass: 'from-green-500/20 via-green-500/7 to-transparent' },
-                      { value: 'supervised' as const, label: 'Supervised', summary: 'Hawkeye guardrails control dangerous actions. Agent works within policy rules.', badgeClass: 'text-amber-500', borderClass: 'border-amber-500/30', surfaceClass: 'from-amber-500/20 via-amber-500/7 to-transparent' },
-                      { value: 'default' as const, label: 'Restricted', summary: 'Agent uses default runtime permissions. May fail on writes if not pre-approved.', badgeClass: 'text-red-400', borderClass: 'border-red-500/30', surfaceClass: 'from-red-500/20 via-red-500/7 to-transparent' },
+                      { value: 'full' as const, label: 'Full Access', summary: 'Read & write any file without asking.', badgeClass: 'text-green-500', borderClass: 'border-green-500/30', surfaceClass: 'from-green-500/20 via-green-500/7 to-transparent' },
+                      { value: 'supervised' as const, label: 'Supervised', summary: 'Guardrails control dangerous actions.', badgeClass: 'text-amber-500', borderClass: 'border-amber-500/30', surfaceClass: 'from-amber-500/20 via-amber-500/7 to-transparent' },
+                      { value: 'default' as const, label: 'Restricted', summary: 'Default runtime permissions only.', badgeClass: 'text-red-400', borderClass: 'border-red-500/30', surfaceClass: 'from-red-500/20 via-red-500/7 to-transparent' },
                     ]).map((option) => {
                       const isSelected = permissions === option.value;
                       return (
@@ -997,23 +1043,21 @@ export default function SwarmPage() {
                           key={option.value}
                           type="button"
                           onClick={() => setPermissions(option.value)}
-                          className={`w-full rounded-[16px] border bg-gradient-to-br p-2 text-left transition-all ${
+                          className={`flex h-full min-h-[124px] flex-col justify-between rounded-[16px] border bg-gradient-to-br p-2.5 text-left transition-all ${
                             isSelected
                               ? `${option.borderClass} ${option.surfaceClass} shadow-[0_18px_40px_-30px_rgba(0,0,0,0.95)]`
                               : 'border-hawk-border-subtle from-hawk-bg/40 via-hawk-bg/25 to-transparent hover:border-hawk-border'
                           }`}
                         >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] ${option.badgeClass}`}>
-                              {option.label}
-                            </div>
-                            {isSelected && (
-                              <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text3">
-                                selected
-                              </span>
-                            )}
+                          <div className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] ${option.badgeClass}`}>
+                            {option.label}
                           </div>
-                          <div className="mt-1.5 text-[11px] leading-4 text-hawk-text2 sm:text-xs sm:leading-5">{option.summary}</div>
+                          <div className="mt-3 text-[11px] leading-5 text-hawk-text2 sm:text-xs">
+                            {option.summary}
+                          </div>
+                          {isSelected && (
+                            <div className="mt-2 text-center font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text3">selected</div>
+                          )}
                         </button>
                       );
                     })}
@@ -1256,16 +1300,48 @@ export default function SwarmPage() {
                           <span className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] ${commandOption.borderClass} ${commandOption.badgeClass}`}>
                             {commandOption.label}
                           </span>
-                          {agent.permissions === 'full' && (
-                            <span className="rounded-full border border-green-500/30 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-green-500">
-                              Full Access
-                            </span>
-                          )}
-                          {agent.permissions === 'supervised' && (
-                            <span className="rounded-full border border-amber-500/30 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-amber-500">
-                              Supervised
-                            </span>
-                          )}
+                          <div className="relative" data-perm-dropdown>
+                            <button
+                              type="button"
+                              onClick={() => setPermDropdownId(permDropdownId === agent.id ? null : agent.id)}
+                              disabled={updatingPermId === agent.id}
+                              className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors cursor-pointer disabled:opacity-50 ${
+                                agent.permissions === 'full'
+                                  ? 'border-green-500/30 text-green-500 hover:bg-green-500/10'
+                                  : agent.permissions === 'supervised'
+                                  ? 'border-amber-500/30 text-amber-500 hover:bg-amber-500/10'
+                                  : 'border-red-500/30 text-red-400 hover:bg-red-500/10'
+                              }`}
+                              title="Click to change permissions"
+                            >
+                              {agent.permissions === 'full' ? 'Full Access' : agent.permissions === 'supervised' ? 'Supervised' : 'Restricted'}
+                              <span className="ml-1 text-[8px]">▼</span>
+                            </button>
+                            {permDropdownId === agent.id && (
+                              <div className="absolute left-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-[14px] border border-hawk-border-subtle bg-hawk-surface shadow-xl">
+                                {([
+                                  { value: 'full' as const, label: 'Full Access', desc: 'Skip all permission checks', cls: 'text-green-500' },
+                                  { value: 'supervised' as const, label: 'Supervised', desc: 'Hawkeye guardrails active', cls: 'text-amber-500' },
+                                  { value: 'default' as const, label: 'Restricted', desc: 'Default runtime permissions', cls: 'text-red-400' },
+                                ]).map((opt) => (
+                                  <button
+                                    key={opt.value}
+                                    type="button"
+                                    onClick={() => void handleChangePermissions(agent.id, opt.value)}
+                                    className={`flex w-full flex-col px-3 py-2 text-left transition-colors hover:bg-hawk-orange/10 ${
+                                      agent.permissions === opt.value ? 'bg-hawk-bg/60' : ''
+                                    }`}
+                                  >
+                                    <span className={`font-mono text-[11px] font-bold uppercase tracking-[0.12em] ${opt.cls}`}>
+                                      {opt.label}
+                                      {agent.permissions === opt.value && <span className="ml-1 text-hawk-text3">✓</span>}
+                                    </span>
+                                    <span className="text-[10px] text-hawk-text3">{opt.desc}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
                         </div>
                         <p className="mt-1.5 max-w-2xl text-sm leading-5 text-hawk-text2 line-clamp-3">
                           {agent.prompt.length > 200 ? agent.prompt.slice(0, 200) + '...' : agent.prompt}
@@ -1481,7 +1557,68 @@ export default function SwarmPage() {
                         Full session
                       </Link>
                     )}
+
+                    {sessionId && (
+                      <button
+                        type="button"
+                        onClick={() => void handleCIReport(agent.id, sessionId)}
+                        disabled={ciReportLoading && ciReportAgentId === agent.id}
+                        className="rounded-full border border-hawk-orange/30 bg-hawk-orange/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-orange transition-colors hover:bg-hawk-orange/20 disabled:opacity-50"
+                      >
+                        {ciReportLoading && ciReportAgentId === agent.id ? 'Generating...' : 'CI Report'}
+                      </button>
+                    )}
                   </div>
+
+                  {/* CI Report Panel */}
+                  {ciReportAgentId === agent.id && ciReportData && (
+                    <section className="mt-3 overflow-hidden rounded-[18px] border border-hawk-border-subtle bg-hawk-bg/72">
+                      <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-bg/35 px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">CI Report</span>
+                          <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                            ciReportData.passed ? 'bg-hawk-green/15 text-hawk-green' : 'bg-hawk-red/15 text-hawk-red'
+                          }`}>
+                            {ciReportData.passed ? 'passed' : 'failed'}
+                          </span>
+                          <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                            ciReportData.risk === 'critical' ? 'bg-hawk-red/15 text-hawk-red' :
+                            ciReportData.risk === 'high' ? 'bg-hawk-amber/15 text-hawk-amber' :
+                            ciReportData.risk === 'medium' ? 'bg-blue-500/15 text-blue-400' :
+                            'bg-hawk-green/15 text-hawk-green'
+                          }`}>
+                            {ciReportData.risk} risk
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void navigator.clipboard.writeText(ciReportData.markdown)}
+                            className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1 font-mono text-[10px] text-hawk-text3 transition-colors hover:text-hawk-orange hover:border-hawk-orange/30"
+                          >
+                            Copy
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setCiReportAgentId(null); setCiReportData(null); }}
+                            className="text-hawk-text3 hover:text-hawk-text text-xs"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                      {ciReportData.flags.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 px-3 pt-2">
+                          {ciReportData.flags.map((flag, i) => (
+                            <span key={i} className="rounded-full bg-hawk-amber/15 border border-hawk-amber/30 px-2 py-0.5 font-mono text-[10px] text-hawk-amber">
+                              {flag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <pre className="max-h-[300px] overflow-auto p-3 font-mono text-[11px] leading-5 text-hawk-text2 whitespace-pre-wrap">{ciReportData.markdown}</pre>
+                    </section>
+                  )}
 
                   {showingOutput && output && (
                     <section className="mt-3 rounded-[18px] border border-hawk-border-subtle bg-hawk-bg/72 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">

@@ -580,6 +580,11 @@ export const api = {
   clearActiveCorrection: () =>
     postJson<{ ok: boolean }>(`${API_BASE}/autocorrect/clear`, {}),
 
+  // ─── CI Report ───
+
+  getCIReport: (sessionId: string) =>
+    fetchJson<{ markdown: string; risk: string; passed: boolean; flags: string[]; sensitiveFiles: string[]; dangerousCommands: string[]; failedCommands: string[] }>(`${API_BASE}/sessions/${sessionId}/ci-report`),
+
   // ─── Swarm ───
 
   listSwarms: (limit = 20) =>
@@ -634,6 +639,9 @@ export const api = {
 
   sendAgentMessage: (id: string, message: string) =>
     postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/${id}/message`, { message }),
+
+  updateAgentPermissions: (id: string, permissions: PermissionLevel) =>
+    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/${id}/permissions`, { permissions }),
 };
 
 // ─── WebSocket client ────────────────────────────────────────
