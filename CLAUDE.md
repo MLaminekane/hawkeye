@@ -11,7 +11,7 @@ Hawkeye is an open-source observability and security tool for AI agents (Claude 
 TypeScript monorepo using pnpm workspaces + Turborepo:
 
 - `packages/core` — Node.js SDK: recorder engine, interceptors (terminal, filesystem, network, LLM), SQLite storage, DriftDetect engine, guardrails enforcer, RCA engine, Memory Diff engine
-- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`, `overnight`, `report`, `arena`, `policy`, `analyze`, `memory`, `autocorrect`, `swarm`. Interactive TUI via raw-mode stdin with slash command picker.
+- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`, `overnight`, `report`, `policy`, `analyze`, `memory`, `autocorrect`, `swarm`. Interactive TUI via raw-mode stdin with slash command picker.
 - `packages/dashboard` — React 19 + Vite + Tailwind CSS + Recharts web UI served by `hawkeye serve` on port 4242. Mobile responsive.
 
 ### Data Flow
@@ -281,21 +281,6 @@ Rule types: `file_protect`, `command_block`, `cost_limit`, `token_limit`, `direc
 
 `hawkeye report` generates a standalone morning report: `--since <iso>`, `--json`, `--llm` (post-mortem per session), `--webhook`. Defaults to reading `startedAt` from `overnight.json` or 8h ago.
 
-## Agent Arena
-
-`hawkeye arena` pits multiple AI agents against each other on the same task using isolated git worktrees:
-
-1. Validates agent commands exist in PATH
-2. Creates git worktrees per agent (`.hawkeye/arena-<id>/<agent>/`) for isolation
-3. Runs all agents in parallel with configurable timeout (default 30min)
-4. After each finishes: captures git diff stats, optionally runs test command
-5. Scores contestants: tests pass (50pts), speed (20pts), code efficiency (15pts), file focus (10pts), completion (5pts)
-6. Prints leaderboard, saves results to `.hawkeye/arenas.json`
-
-Known agents: `claude` (`claude -p`), `aider` (`aider --message --yes`), `codex` (`codex -q`). Custom agents supported.
-
-Dashboard: `/arena` page shows all arena results with expandable leaderboard tables. API: `GET /api/arenas`, `GET /api/arenas/:id`.
-
 ## Multi-agent Orchestration (Swarm)
 
 `hawkeye swarm` coordinates multiple AI agents working on subtasks in parallel, each in an isolated git worktree with enforced scope boundaries.
@@ -408,7 +393,7 @@ Shared `fireWebhooks()` utility in `packages/cli/src/webhooks.ts`. Seven webhook
 | `packages/cli/src/commands/overnight.ts`    | Overnight orchestrator — serve + daemon + strict guardrails + morning report  |
 | `packages/cli/src/commands/report.ts`       | Morning report generator — aggregates sessions, drift, errors, post-mortem   |
 | `packages/cli/src/webhooks.ts`              | Shared `fireWebhooks()` utility used by record, serve, daemon, overnight     |
-| `packages/cli/src/commands/arena.ts`        | Agent Arena — git worktrees, parallel execution, scoring, leaderboard        |
+| `packages/cli/src/commands/arena.ts`        | Agent Arena (not registered as CLI command — code exists but not wired)       |
 | `packages/cli/src/impact.ts`               | Impact Preview engine — risk analysis, command patterns, file sensitivity    |
 | `packages/cli/src/policy.ts`               | Policy Engine — YAML schema, parser, validator, template, converters         |
 | `packages/cli/src/commands/policy.ts`      | Policy CLI — init, check, show, export, import subcommands                   |

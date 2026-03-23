@@ -41,7 +41,6 @@ Hawkeye is a **flight recorder** for AI agents. It captures every action an agen
 - **Memory Diff** — Cross-session agent memory tracking, hallucination detection, cumulative knowledge view
 - **Live Agent Spawning** — Spawn, monitor, and control AI agents directly from the dashboard with role assignment, permission levels, and real-time session linking
 - **Multi-agent Orchestration (Swarm)** — Coordinate multiple AI agents on parallel tasks with isolated worktrees, scope enforcement, dependency ordering, conflict detection, and merge strategies
-- **Agent Arena** — Pit multiple AI agents against the same task in isolated git worktrees with automated scoring
 - **Visual dashboard** — Mobile-responsive web UI with session explorer, drift charts, firewall, agents control room, memory viewer, and settings management
 - **Remote tasks** — Submit prompts from your phone via dashboard, with image attachments, auto-approve, and persistent agent memory
 - **Interactive TUI** — Terminal-responsive CLI with arrow-key navigation and slash commands
@@ -157,81 +156,77 @@ Launch the interactive mode by running `hawkeye` with no subcommand:
 
 Type `/` to open the command picker with arrow-key navigation and live filtering:
 
-| Command        | Description                                    |
-| -------------- | ---------------------------------------------- |
-| `/new`         | New session — pick agent, model, objective     |
-| `/sessions`    | List & manage recorded sessions                |
-| `/active`      | Show current recording                         |
-| `/stats`       | Session statistics                             |
-| `/end`         | End active sessions                            |
-| `/restart`     | Restart a session (with picker)                |
-| `/delete`      | Delete a session                               |
-| `/tasks`       | List, create, clear remote tasks               |
-| `/tasks journal` | View agent memory (task history)             |
-| `/firewall`    | View recent interceptions and blocked actions  |
-| `/analyze`     | Root cause analysis — find why a session failed |
-| `/policy`      | Manage declarative security policies           |
-| `/arena`       | Agent Arena — pit agents against each other     |
-| `/swarm`       | Multi-agent orchestration with isolated worktrees|
-| `/memory`      | Cross-session agent memory & hallucination check|
-| `/autocorrect` | Enable/disable autonomous correction engine    |
-| `/overnight`   | Run overnight mode (guardrails + morning report)|
-| `/report`      | Generate morning report of recent sessions     |
-| `/remote`      | Launch serve + daemon + Cloudflare tunnel      |
-| `/remote stop` | Stop tunnel + daemon                           |
-| `/settings`    | Configure DriftDetect, Guardrails, API keys    |
-| `/serve`       | Open the web dashboard                         |
-| `/mcp`         | Show MCP server setup instructions             |
-| `/revert`      | Revert file changes from a session             |
-| `/init`        | Initialize Hawkeye                             |
-| `/clear`       | Clear screen                                   |
-| `/quit`        | Exit                                           |
+| Command          | Description                                      |
+| ---------------- | ------------------------------------------------ |
+| `/active`        | Show current recording                           |
+| `/analyze`       | Root cause analysis — find why a session failed   |
+| `/approve`       | Approve pending review gate actions               |
+| `/attach`        | Launch agent on active session                    |
+| `/autocorrect`   | Autonomous control — auto-correct agent behavior  |
+| `/clear`         | Clear screen                                      |
+| `/compare`       | Compare sessions side by side                     |
+| `/delete`        | Delete a session                                  |
+| `/end`           | End active sessions                               |
+| `/export`        | Export session as JSON                             |
+| `/firewall`      | Show recent interceptions & impact previews        |
+| `/init`          | Initialize Hawkeye                                |
+| `/inspect`       | Detailed session inspection                       |
+| `/kill`          | Kill hawkeye background processes                 |
+| `/mcp`           | Show MCP server setup instructions                |
+| `/memory`        | Memory diff — agent memory across sessions         |
+| `/new`           | New session (pick agent + objective)               |
+| `/overnight`     | Run overnight mode (guardrails + morning report)   |
+| `/policy`        | Manage security policies (init/check/show)         |
+| `/purge`         | Delete ALL sessions (including old)                |
+| `/quit`          | Exit                                               |
+| `/remote`        | Launch serve + daemon + Cloudflare tunnel          |
+| `/remote stop`   | Stop tunnel + daemon                               |
+| `/replay`        | Replay a session (interactive)                     |
+| `/report`        | Generate morning report                            |
+| `/restart`       | Restart a session                                  |
+| `/revert`        | Revert file changes from a session                 |
+| `/serve`         | Open dashboard on :4242                            |
+| `/sessions`      | List & manage sessions                             |
+| `/settings`      | Configure DriftDetect, Guardrails, API keys        |
+| `/stats`         | Session or global statistics                       |
+| `/swarm`         | Multi-agent orchestration — list/show/init swarms  |
+| `/tasks`         | List & submit remote tasks                         |
+| `/watch`         | Live event stream (tail -f style)                  |
 
 ## CLI Commands
 
-### `hawkeye init`
-
-Initialize Hawkeye in the current directory. Creates `.hawkeye/` directory and config files.
-
-### `hawkeye record`
+### `hawkeye analyze <session-id>`
 
 ```bash
-hawkeye record -o <objective> [options] -- <command...>
+hawkeye analyze <session-id>          # Heuristic root cause analysis
+hawkeye analyze <session-id> --llm    # Enhanced with LLM analysis
+hawkeye analyze <session-id> --json   # Machine-readable output
 ```
 
-| Option            | Description                             |
-| ----------------- | --------------------------------------- |
-| `-o, --objective` | Session objective **(required)**        |
-| `-a, --agent`     | Agent name (auto-detected from command) |
-| `-m, --model`     | Model name                              |
-| `--no-drift`      | Disable DriftDetect                     |
-| `--no-guardrails` | Disable guardrails                      |
+Automatic root cause analysis: identifies the primary error, builds the causal chain, detects error patterns, analyzes drift trajectory, and generates fix suggestions.
 
-### `hawkeye sessions`
+### `hawkeye approve`
+
+Approve pending review gate actions from the CLI.
+
+### `hawkeye autocorrect`
 
 ```bash
-hawkeye sessions [-n 10] [-s recording|completed|aborted]
+hawkeye autocorrect enable [--dry-run]  # Enable autonomous correction
+hawkeye autocorrect disable             # Disable autocorrect
+hawkeye autocorrect status              # Show current status and config
+hawkeye autocorrect history             # View past corrections
 ```
 
-### `hawkeye stats <session-id>`
+Autonomous control layer — Hawkeye doesn't just observe, it autonomously corrects agent behavior when drift, errors, or cost issues are detected. Actions include file rollback, session pause, hint injection to MCP-aware agents, and pattern blocking.
 
-Display statistics for a session (accepts ID prefix).
-
-### `hawkeye replay <session-id>`
+### `hawkeye compare <id1> <id2>`
 
 ```bash
-hawkeye replay <session-id> [--speed 2] [--no-delay]
+hawkeye compare <session1> <session2>
 ```
 
-Replay a session action-by-action with timing.
-
-### `hawkeye serve`
-
-```bash
-hawkeye serve [-p 4242]
-```
-
-Launch the web dashboard on `http://localhost:4242`. Auto-reloads after `pnpm build` — watches `dist/` and restarts the server when compiled files change.
+Compare two sessions side by side — stats, drift, cost, tokens, and actions.
 
 ### `hawkeye daemon`
 
@@ -246,29 +241,61 @@ Run the task daemon — polls `.hawkeye/tasks.json` for pending tasks and execut
 - **Context injection**: enriches prompts with git status, recent commits, and task history
 - Works with any agent CLI, not just Claude
 
-### `hawkeye arena`
+### `hawkeye end`
 
 ```bash
-hawkeye arena -t "Add user auth with JWT" -a claude,aider
-hawkeye arena -t "Fix lint errors" -a claude,codex --test "npm test"
-hawkeye arena --list
+hawkeye end [-s <session-id>] [--all] [--status completed|aborted]
 ```
 
-Agent Arena — pit multiple AI agents against the same task in isolated git worktrees:
+### `hawkeye export`
 
-- Each agent gets its own branch and worktree (no conflicts)
-- All agents run in parallel with live terminal progress
-- Optional test validation (`--test "npm test"`)
-- Composite scoring: tests (50pts), speed (20pts), efficiency (15pts), focus (10pts), completion (5pts)
-- Results saved and viewable in the dashboard at `/arena`
+```bash
+hawkeye export <session-id> [-f json|html] [-o report.html]
+```
 
-| Option         | Description                                | Default  |
-| -------------- | ------------------------------------------ | -------- |
-| `-t, --task`   | The task for agents to complete            | required |
-| `-a, --agents` | Comma-separated agent list                 | required |
-| `--test`       | Test command to validate results           |          |
-| `--timeout`    | Timeout per agent in seconds               | `1800`   |
-| `--list`       | List past arena results                    |          |
+### `hawkeye hooks`
+
+```bash
+hawkeye hooks install [--local] [--guardrails-only]
+hawkeye hooks uninstall [--local]
+hawkeye hooks status
+```
+
+### `hawkeye init`
+
+Initialize Hawkeye in the current directory. Creates `.hawkeye/` directory and config files.
+
+### `hawkeye inspect <session-id>`
+
+Detailed session inspection — shows events, cost per file, drift snapshots, and guardrail violations.
+
+### `hawkeye mcp`
+
+Start the MCP (Model Context Protocol) server over stdio. Agents connect automatically.
+
+```bash
+hawkeye mcp [--db <path>]
+```
+
+### `hawkeye memory`
+
+```bash
+hawkeye memory [session]              # Extract memories from a session
+hawkeye memory diff <s1> <s2>         # Compare what agent remembers between sessions
+hawkeye memory cumulative             # Aggregate knowledge across all sessions
+hawkeye memory hallucinations         # Detect contradictions and recurring errors
+```
+
+Cross-session agent memory tracking. Extracts structured knowledge (file patterns, error lessons, tool patterns, decisions) from session events, compares what agents learned/forgot across sessions, and detects hallucinations.
+
+### `hawkeye otel-export`
+
+```bash
+hawkeye otel-export <session-id> [-o traces.json]
+hawkeye otel-export <session-id> --endpoint https://tempo.example.com/v1/traces
+```
+
+Export as OTLP JSON traces. Compatible with Grafana Tempo, Jaeger, Datadog, Honeycomb.
 
 ### `hawkeye overnight`
 
@@ -293,6 +320,40 @@ Run overnight mode — composes serve + daemon with strict guardrails for unatte
 | `--port`        | Dashboard port                            | `4242`   |
 | `--report-llm`  | Run LLM post-mortem per session on shutdown|         |
 
+### `hawkeye policy`
+
+```bash
+hawkeye policy init [--force]      # Generate default policies.yml (or convert existing guardrails)
+hawkeye policy check               # Validate policies.yml
+hawkeye policy show                # Display current policies
+hawkeye policy export [-o file]    # Export guardrails as YAML
+hawkeye policy import <file>       # Import a policies.yml
+```
+
+Declarative security policies in `.hawkeye/policies.yml` — shareable across projects and teams. The hook-handler automatically loads and merges policy rules with config.json guardrails.
+
+### `hawkeye record`
+
+```bash
+hawkeye record -o <objective> [options] -- <command...>
+```
+
+| Option            | Description                             |
+| ----------------- | --------------------------------------- |
+| `-o, --objective` | Session objective **(required)**        |
+| `-a, --agent`     | Agent name (auto-detected from command) |
+| `-m, --model`     | Model name                              |
+| `--no-drift`      | Disable DriftDetect                     |
+| `--no-guardrails` | Disable guardrails                      |
+
+### `hawkeye replay <session-id>`
+
+```bash
+hawkeye replay <session-id> [--speed 2] [--no-delay]
+```
+
+Replay a session action-by-action with timing.
+
 ### `hawkeye report`
 
 ```bash
@@ -308,49 +369,39 @@ Generate a morning report of recent sessions. Aggregates stats, drift, errors, a
 | `--llm`     | Include LLM-powered post-mortem per session                    |                                      |
 | `--webhook` | Fire `overnight_report` webhook with the report                |                                      |
 
-### `hawkeye analyze <session-id>`
+### `hawkeye restart`
 
 ```bash
-hawkeye analyze <session-id>          # Heuristic root cause analysis
-hawkeye analyze <session-id> --llm    # Enhanced with LLM analysis
-hawkeye analyze <session-id> --json   # Machine-readable output
+hawkeye restart [session-id] [-o <objective>] [-a <agent>] [-m <model>]
 ```
 
-Automatic root cause analysis: identifies the primary error, builds the causal chain, detects error patterns, analyzes drift trajectory, and generates fix suggestions.
+Restart a session — inherits objective, agent, and model from the original if not overridden. Interactive picker when no ID is given.
 
-### `hawkeye policy`
+### `hawkeye revert`
 
 ```bash
-hawkeye policy init [--force]      # Generate default policies.yml (or convert existing guardrails)
-hawkeye policy check               # Validate policies.yml
-hawkeye policy show                # Display current policies
-hawkeye policy export [-o file]    # Export guardrails as YAML
-hawkeye policy import <file>       # Import a policies.yml
+hawkeye revert <session-id> <file-path>
 ```
 
-Declarative security policies in `.hawkeye/policies.yml` — shareable across projects and teams. The hook-handler automatically loads and merges policy rules with config.json guardrails.
+Revert a file to its pre-session state using git.
 
-### `hawkeye memory`
+### `hawkeye serve`
 
 ```bash
-hawkeye memory [session]              # Extract memories from a session
-hawkeye memory diff <s1> <s2>         # Compare what agent remembers between sessions
-hawkeye memory cumulative             # Aggregate knowledge across all sessions
-hawkeye memory hallucinations         # Detect contradictions and recurring errors
+hawkeye serve [-p 4242]
 ```
 
-Cross-session agent memory tracking. Extracts structured knowledge (file patterns, error lessons, tool patterns, decisions) from session events, compares what agents learned/forgot across sessions, and detects hallucinations.
+Launch the web dashboard on `http://localhost:4242`. Auto-reloads after `pnpm build` — watches `dist/` and restarts the server when compiled files change.
 
-### `hawkeye autocorrect`
+### `hawkeye sessions`
 
 ```bash
-hawkeye autocorrect enable [--dry-run]  # Enable autonomous correction
-hawkeye autocorrect disable             # Disable autocorrect
-hawkeye autocorrect status              # Show current status and config
-hawkeye autocorrect history             # View past corrections
+hawkeye sessions [-n 10] [-s recording|completed|aborted]
 ```
 
-Autonomous control layer — Hawkeye doesn't just observe, it autonomously corrects agent behavior when drift, errors, or cost issues are detected. Actions include file rollback, session pause, hint injection to MCP-aware agents, and pattern blocking.
+### `hawkeye stats <session-id>`
+
+Display statistics for a session (accepts ID prefix).
 
 ### `hawkeye swarm`
 
@@ -361,51 +412,6 @@ hawkeye swarm list                    # List past swarm runs
 ```
 
 Coordinate multiple AI agents on parallel tasks. Each agent gets an isolated git worktree with enforced scope boundaries. Features dependency ordering (topological sort), file conflict detection, sequential/octopus merge strategies, and live terminal progress.
-
-### `hawkeye export`
-
-```bash
-hawkeye export <session-id> [-f json|html] [-o report.html]
-```
-
-### `hawkeye end`
-
-```bash
-hawkeye end [-s <session-id>] [--all] [--status completed|aborted]
-```
-
-### `hawkeye restart`
-
-```bash
-hawkeye restart [session-id] [-o <objective>] [-a <agent>] [-m <model>]
-```
-
-Restart a session — inherits objective, agent, and model from the original if not overridden. Interactive picker when no ID is given.
-
-### `hawkeye otel-export`
-
-```bash
-hawkeye otel-export <session-id> [-o traces.json]
-hawkeye otel-export <session-id> --endpoint https://tempo.example.com/v1/traces
-```
-
-Export as OTLP JSON traces. Compatible with Grafana Tempo, Jaeger, Datadog, Honeycomb.
-
-### `hawkeye hooks`
-
-```bash
-hawkeye hooks install [--local] [--guardrails-only]
-hawkeye hooks uninstall [--local]
-hawkeye hooks status
-```
-
-### `hawkeye mcp`
-
-Start the MCP (Model Context Protocol) server over stdio. Agents connect automatically.
-
-```bash
-hawkeye mcp [--db <path>]
-```
 
 Add to `.mcp.json` at project root for Claude Code:
 
@@ -479,11 +485,6 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 - **Memory Diff** — Compare what an agent remembered between two sessions (learned, forgotten, retained, evolved, contradicted)
 - **Hallucination Detection** — Cross-session analysis for recurring errors and contradicted facts
 
-### Arena Page
-
-- View all arena results with expandable leaderboard tables
-- Composite scoring breakdown per agent (tests, speed, efficiency, focus, completion)
-
 ### Swarm Page
 
 - List and detail view of multi-agent orchestration runs
@@ -532,8 +533,6 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 | `/api/tasks/journal`              | GET    | Read agent memory journal        |
 | `/api/tasks/journal/clear`        | POST   | Clear agent memory               |
 | `/api/tasks/attachments/:file`    | GET    | Serve task image attachments     |
-| `/api/arenas`                     | GET    | List arena results               |
-| `/api/arenas/:id`                 | GET    | Get arena details & leaderboard  |
 | `/api/pending-reviews`            | GET    | List pending review gate items   |
 | `/api/review-approve`             | POST   | Approve a review gate item       |
 | `/api/review-deny`                | POST   | Deny a review gate item          |
