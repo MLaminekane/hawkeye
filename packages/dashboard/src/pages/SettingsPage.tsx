@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, type SettingsData, type PolicyData, type PolicyRule as PolicyRuleType } from '../api';
+import { api, type PolicyData, type PolicyRule as PolicyRuleType } from '../api';
 
 interface GuardrailRule {
   name: string;
@@ -209,29 +209,72 @@ export function SettingsPage() {
   };
 
   const currentModels = providerModels[driftConfig.provider] || [];
+  const enabledRuleCount = rules.filter((rule) => rule.enabled).length;
+  const enabledWebhookCount = webhooks.filter((webhook) => webhook.enabled).length;
+  const populatedApiKeyCount = Object.values(apiKeys).filter(Boolean).length;
+  const enabledPolicyCount = policy?.rules.filter((rule) => rule.enabled).length || 0;
 
   return (
-    <div>
-      <div className="mb-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-        <div>
-          <h1 className="font-display text-xl sm:text-2xl font-bold text-hawk-text">Settings</h1>
-          <p className="text-sm text-hawk-text3 mt-1">Configure DriftDetect and Guardrails</p>
+    <div className="space-y-5">
+      <section className="relative overflow-hidden rounded-[22px] border border-hawk-border-subtle bg-hawk-surface/72 p-3.5 shadow-[0_28px_80px_-45px_rgba(0,0,0,0.95)] sm:p-4">
+        <div className="pointer-events-none absolute inset-0">
+          <div className="absolute -left-10 top-0 h-52 w-52 rounded-full bg-hawk-orange/10 blur-3xl" />
+          <div className="absolute right-[-30px] top-8 h-56 w-56 rounded-full bg-emerald-400/8 blur-3xl" />
+          <div className="absolute bottom-[-60px] left-1/3 h-52 w-52 rounded-full bg-cyan-400/8 blur-3xl" />
         </div>
-        <div className="flex items-center gap-2">
-          {saveStatus === 'saving' && (
-            <span className="rounded-lg border border-hawk-border-subtle bg-hawk-surface2 px-3 py-1.5 font-mono text-xs text-hawk-text3 animate-pulse">Saving...</span>
-          )}
-          {saveStatus === 'saved' && (
-            <span className="rounded-lg border border-hawk-green/30 bg-hawk-green/10 px-3 py-1.5 font-mono text-xs text-hawk-green">Saved</span>
-          )}
-          {saveStatus === 'error' && (
-            <span className="rounded-lg border border-hawk-red/30 bg-hawk-red/10 px-3 py-1.5 font-mono text-xs text-hawk-red">Save failed</span>
-          )}
+
+        <div className="relative grid gap-4 xl:grid-cols-[1.06fr_0.94fr]">
+          <div className="space-y-4">
+            <span className="inline-flex items-center gap-2 rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">
+              <span className={`inline-block h-2 w-2 rounded-full ${saveStatus === 'error' ? 'bg-hawk-red' : saveStatus === 'saving' ? 'bg-hawk-orange animate-pulse' : 'bg-hawk-green'}`} />
+              Settings
+            </span>
+
+            <div className="space-y-2">
+              <h1 className="font-display text-xl font-semibold tracking-tight text-hawk-text sm:text-2xl">
+                Control Center
+              </h1>
+              <p className="max-w-3xl text-sm leading-6 text-hawk-text2">
+                Configure DriftDetect, guardrails, policy rules, webhooks and API credentials from a single control surface.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <StatusPill label="Autosave" value={saveStatus === 'idle' ? 'ready' : saveStatus} tone={saveStatus === 'error' ? 'danger' : saveStatus === 'saved' ? 'good' : saveStatus === 'saving' ? 'accent' : 'muted'} />
+              <StatusPill label="Policy" value={policyStatus === 'idle' ? 'ready' : policyStatus} tone={policyStatus === 'error' ? 'danger' : policyStatus === 'saved' ? 'good' : policyStatus === 'saving' ? 'accent' : 'muted'} />
+              <StatusPill label="Drift" value={driftConfig.enabled ? 'enabled' : 'disabled'} tone={driftConfig.enabled ? 'good' : 'muted'} />
+            </div>
+
+            <div className="rounded-[16px] border border-hawk-border-subtle bg-hawk-bg/45 p-2.5">
+              <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-orange">
+                Current posture
+              </div>
+              <p className="mt-2 text-sm text-hawk-text2">
+                {enabledRuleCount} guardrails enabled, {enabledPolicyCount} declarative policy rules active, and {enabledWebhookCount} live webhook{enabledWebhookCount === 1 ? '' : 's'} ready to notify.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-2.5">
+              <OverviewStat label="Guardrails" value={`${enabledRuleCount}/${rules.length}`} meta="Enabled rules" tone="accent" />
+              <OverviewStat label="Policies" value={String(enabledPolicyCount)} meta="Active policy rules" tone="good" />
+              <OverviewStat label="Webhooks" value={String(enabledWebhookCount)} meta="Live endpoints" />
+              <OverviewStat label="API keys" value={String(populatedApiKeyCount)} meta="Configured providers" />
+            </div>
+
+            <div className="rounded-[16px] border border-hawk-border-subtle bg-hawk-bg/45 p-2.5">
+              <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text3">Sync notes</div>
+              <p className="mt-2 text-xs text-hawk-text2">
+                Changes autosave to <span className="font-mono text-hawk-orange">.hawkeye/config.json</span> and policy edits sync to <span className="font-mono text-hawk-orange">.hawkeye/policies.yml</span>.
+              </p>
+            </div>
+          </div>
         </div>
-      </div>
+      </section>
 
       {loadError && (
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-hawk-amber/30 bg-hawk-amber/10 px-4 py-2 font-mono text-xs text-hawk-amber">
+        <div className="flex items-center justify-between rounded-[16px] border border-hawk-amber/30 bg-hawk-amber/10 px-3 py-2.5 font-mono text-xs text-hawk-amber">
           <span>{loadError}</span>
           <button onClick={loadSettings} className="rounded bg-hawk-amber/20 px-3 py-1 text-hawk-amber transition-colors hover:bg-hawk-amber/30">
             Retry
@@ -240,14 +283,14 @@ export function SettingsPage() {
       )}
 
       {/* DriftDetect Config */}
-      <div className="mb-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
-        <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-4 sm:px-5 py-3">
+      <div className="overflow-hidden rounded-[20px] border border-hawk-border-subtle bg-hawk-surface/72">
+        <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-bg/35 px-4 sm:px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">DriftDetect</h2>
           <Toggle enabled={driftConfig.enabled} onToggle={() => { setDriftConfig((p) => ({ ...p, enabled: !p.enabled })); }} />
         </div>
 
         {driftConfig.enabled && (
-          <div className="p-4 sm:p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-3 p-3 sm:grid-cols-2 sm:p-4">
             <div>
               <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Provider</label>
               <select
@@ -315,14 +358,14 @@ export function SettingsPage() {
       </div>
 
       {/* Guardrails */}
-      <div className="overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
-        <div className="border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
+      <div className="overflow-hidden rounded-[20px] border border-hawk-border-subtle bg-hawk-surface/72">
+        <div className="border-b border-hawk-border-subtle bg-hawk-bg/35 px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">Guardrails</h2>
         </div>
 
         <div className="divide-y divide-hawk-border-subtle">
           {rules.map((rule, i) => (
-            <div key={rule.name} className="flex items-start gap-3 sm:gap-4 px-4 sm:px-5 py-4 transition-colors hover:bg-hawk-surface2/35">
+            <div key={rule.name} className="flex items-start gap-3 sm:gap-4 px-3 sm:px-4 py-3 transition-colors hover:bg-hawk-surface2/35">
               <Toggle enabled={rule.enabled} onToggle={() => toggleRule(i)} />
 
               <div className="flex-1 min-w-0">
@@ -362,8 +405,8 @@ export function SettingsPage() {
       />
 
       {/* Webhooks */}
-      <div className="mt-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
-        <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
+      <div className="overflow-hidden rounded-[20px] border border-hawk-border-subtle bg-hawk-surface/72">
+        <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-bg/35 px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">Webhooks</h2>
           <button
             onClick={() => { setWebhooks((prev) => [...prev, { enabled: true, url: '', events: ['drift_critical'] }]); }}
@@ -426,11 +469,11 @@ export function SettingsPage() {
       </div>
 
       {/* API Keys */}
-      <div className="mt-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
-        <div className="border-b border-hawk-border-subtle bg-hawk-surface2/75 px-5 py-3">
+      <div className="overflow-hidden rounded-[20px] border border-hawk-border-subtle bg-hawk-surface/72">
+        <div className="border-b border-hawk-border-subtle bg-hawk-bg/35 px-5 py-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">API Keys</h2>
         </div>
-        <div className="p-4 sm:p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-3 p-3 sm:grid-cols-2 sm:p-4">
           {(['anthropic', 'openai', 'deepseek', 'mistral', 'google'] as const).map((provider) => (
             <div key={provider}>
               <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">
@@ -454,7 +497,7 @@ export function SettingsPage() {
       </div>
 
       {/* Config file hint */}
-      <div className="mt-6 rounded-xl border border-hawk-border-subtle bg-hawk-surface2/55 p-3 sm:p-4">
+      <div className="rounded-[18px] border border-hawk-border-subtle bg-hawk-surface/72 p-3">
         <p className="font-mono text-xs text-hawk-text3">
           Settings are saved to{' '}
           <code className="text-hawk-orange">.hawkeye/config.json</code>{' '}
@@ -469,7 +512,7 @@ function Toggle({ enabled, onToggle }: { enabled: boolean; onToggle: () => void 
   return (
     <button
       onClick={onToggle}
-      className={`relative shrink-0 h-5 w-9 rounded-full transition-colors ${enabled ? 'bg-hawk-orange' : 'bg-hawk-surface3'}`}
+      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${enabled ? 'bg-hawk-orange' : 'bg-hawk-surface3'}`}
     >
       <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${enabled ? 'left-[18px]' : 'left-0.5'}`} />
     </button>
@@ -489,9 +532,62 @@ function Field({ label, value, onChange, type }: {
         type={type || 'text'}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded bg-hawk-surface2 border border-hawk-border px-3 py-1.5 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
+        className="w-full rounded-[14px] border border-hawk-border-subtle bg-hawk-bg/60 px-3 py-2 font-mono text-xs text-hawk-text outline-none focus:border-hawk-orange/50"
       />
     </div>
+  );
+}
+
+function OverviewStat({
+  label,
+  value,
+  meta,
+  tone = 'default',
+}: {
+  label: string;
+  value: string;
+  meta: string;
+  tone?: 'default' | 'accent' | 'good';
+}) {
+  const toneClass =
+    tone === 'accent'
+      ? 'text-hawk-orange'
+      : tone === 'good'
+        ? 'text-hawk-green'
+        : 'text-hawk-text';
+
+  return (
+    <div className="rounded-[16px] border border-hawk-border-subtle bg-hawk-bg/50 px-2.5 py-2">
+      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text3">{label}</div>
+      <div className={`mt-1 font-mono text-sm font-semibold ${toneClass}`}>{value}</div>
+      <div className="mt-1 text-[11px] text-hawk-text3">{meta}</div>
+    </div>
+  );
+}
+
+function StatusPill({
+  label,
+  value,
+  tone = 'muted',
+}: {
+  label: string;
+  value: string;
+  tone?: 'muted' | 'good' | 'accent' | 'danger';
+}) {
+  const toneClass =
+    tone === 'good'
+      ? 'border-hawk-green/25 bg-hawk-green/10 text-hawk-green'
+      : tone === 'accent'
+        ? 'border-hawk-orange/25 bg-hawk-orange/10 text-hawk-orange'
+        : tone === 'danger'
+          ? 'border-hawk-red/25 bg-hawk-red/10 text-hawk-red'
+          : 'border-hawk-border-subtle bg-hawk-bg/55 text-hawk-text2';
+
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] ${toneClass}`}>
+      <span className="text-hawk-text3">{label}</span>
+      <span>{value}</span>
+    </span>
   );
 }
 
@@ -660,8 +756,8 @@ function PolicySection({
   };
 
   return (
-    <div className="mt-6 overflow-hidden rounded-xl border border-hawk-border-subtle bg-gradient-to-b from-hawk-surface to-hawk-surface2/55 shadow-sm">
-      <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-surface2/75 px-4 sm:px-5 py-3">
+    <div className="overflow-hidden rounded-[20px] border border-hawk-border-subtle bg-hawk-surface/72">
+      <div className="flex items-center justify-between border-b border-hawk-border-subtle bg-hawk-bg/35 px-4 py-3 sm:px-5">
         <div className="flex items-center gap-3">
           <h2 className="font-display text-base font-semibold text-hawk-text">Policy Engine</h2>
           <span className="rounded bg-hawk-orange/15 px-1.5 py-0.5 font-mono text-[10px] text-hawk-orange">
@@ -697,7 +793,7 @@ function PolicySection({
       ) : (
         <>
           {/* Policy metadata */}
-          <div className="px-4 sm:px-5 py-3 border-b border-hawk-border-subtle bg-hawk-surface2/30">
+          <div className="border-b border-hawk-border-subtle bg-hawk-bg/20 px-4 py-3 sm:px-5">
             <div className="flex flex-col sm:flex-row gap-3">
               <div className="flex-1">
                 <label className="block font-mono text-[10px] uppercase tracking-wider text-hawk-text3 mb-1">Name</label>
@@ -829,7 +925,7 @@ function PolicySection({
           </div>
 
           {/* Add rule + summary */}
-          <div className="flex items-center justify-between border-t border-hawk-border-subtle px-4 sm:px-5 py-3 bg-hawk-surface2/30">
+          <div className="flex items-center justify-between border-t border-hawk-border-subtle bg-hawk-bg/20 px-4 py-3 sm:px-5">
             <div className="font-mono text-[10px] text-hawk-text3">
               {policy.rules.filter((r) => r.enabled).length} of {policy.rules.length} rules enabled
             </div>

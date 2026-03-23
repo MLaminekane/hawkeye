@@ -8,6 +8,7 @@ import { createRecorder, Logger, type DriftCheckResult, type GuardrailViolation,
 import { RecordOverlay } from './record-overlay.js';
 import { loadConfig, getDefaultConfig } from '../config.js';
 import { fireWebhooks } from '../webhooks.js';
+import { createCodexSessionBridge, type CodexSessionBridge } from './codex-session.js';
 
 export const recordCommand = new Command('record')
   .alias('watch')
@@ -146,12 +147,14 @@ export const recordCommand = new Command('record')
     let eventCount = 0;
     let totalCostUsd = 0;
     let childProcess: ChildProcess | null = null;
+    let codexBridge: CodexSessionBridge | null = null;
     let promptingDrift = false;
     let cleaned = false;
 
     const cleanup = (status: 'completed' | 'aborted') => {
       if (cleaned) return;
       cleaned = true;
+      codexBridge?.stop();
       overlay.stop();
       recorder.stop(status);
       console.log('');
@@ -368,6 +371,27 @@ export const recordCommand = new Command('record')
     // Spawn the wrapped command with IPC channel + network preload
     const [cmd, ...args] = commandArgs;
     const existingNodeOpts = process.env.NODE_OPTIONS || '';
+    const childStartTimeMs = Date.now();
+
+    // Record the top-level agent launch immediately so interactive CLIs keep a real TTY
+    // without sacrificing timeline visibility in Hawkeye.
+    recorder.recordCommandEvent({
+      command: cmd,
+      args,
+      cwd,
+    });
+
+    if (agent === 'codex') {
+      codexBridge = createCodexSessionBridge({
+        cwd,
+        startTimeMs: childStartTimeMs,
+        onCommand: (event) => {
+          recorder.recordCommandEvent(event);
+        },
+      });
+      codexBridge.start();
+    }
+
     childProcess = spawn(cmd, args, {
       cwd,
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],

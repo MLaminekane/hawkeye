@@ -1,57 +1,77 @@
 #!/usr/bin/env node
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
+import { analyzeCommand } from './commands/analyze.js';
+import { approveCommand } from './commands/approve.js';
+import { autocorrectCommand } from './commands/autocorrect.js';
 import { initCommand } from './commands/init.js';
+import { compareCommand } from './commands/compare.js';
+import { daemonCommand } from './commands/daemon.js';
+import { endCommand } from './commands/end.js';
+import { exportCommand } from './commands/export.js';
+import { hookHandlerCommand } from './commands/hook-handler.js';
+import { hooksCommand } from './commands/hooks.js';
+import { inspectCommand } from './commands/inspect.js';
+import { mcpCommand } from './commands/mcp.js';
+import { memoryCommand } from './commands/memory.js';
+import { otelExportCommand } from './commands/otel-export.js';
+import { overnightCommand } from './commands/overnight.js';
+import { policyCommand } from './commands/policy.js';
 import { recordCommand } from './commands/record.js';
+import { replayCommand } from './commands/replay.js';
+import { reportCommand } from './commands/report.js';
+import { restartCommand } from './commands/restart.js';
+import { revertCommand } from './commands/revert.js';
+import { serveCommand } from './commands/serve.js';
 import { sessionsCommand } from './commands/sessions.js';
 import { statsCommand } from './commands/stats.js';
-import { replayCommand } from './commands/replay.js';
-import { serveCommand } from './commands/serve.js';
-import { exportCommand } from './commands/export.js';
-import { hooksCommand } from './commands/hooks.js';
-import { hookHandlerCommand } from './commands/hook-handler.js';
-import { otelExportCommand } from './commands/otel-export.js';
-import { endCommand } from './commands/end.js';
-import { restartCommand } from './commands/restart.js';
-import { inspectCommand } from './commands/inspect.js';
-import { compareCommand } from './commands/compare.js';
-import { revertCommand } from './commands/revert.js';
-import { approveCommand } from './commands/approve.js';
-import { mcpCommand } from './commands/mcp.js';
-import { daemonCommand } from './commands/daemon.js';
-import { overnightCommand } from './commands/overnight.js';
-import { reportCommand } from './commands/report.js';
-import { policyCommand } from './commands/policy.js';
+import { swarmCommand } from './commands/swarm.js';
 import { startInteractive } from './interactive.js';
 
+const currentDir = dirname(fileURLToPath(import.meta.url));
+const packageJson = JSON.parse(readFileSync(join(currentDir, '..', 'package.json'), 'utf8')) as { version?: string };
+const cliVersion = packageJson.version ?? '0.1.13';
+
 const program = new Command();
+const compareCommands = (left: Command, right: Command) => left.name().localeCompare(right.name());
 
 program
   .name('hawkeye')
   .description('The flight recorder for AI agents')
-  .version('0.1.0');
+  .version(cliVersion);
 
-program.addCommand(initCommand);
-program.addCommand(recordCommand);
-program.addCommand(sessionsCommand);
-program.addCommand(statsCommand);
-program.addCommand(replayCommand);
-program.addCommand(serveCommand);
-program.addCommand(exportCommand);
-program.addCommand(hooksCommand);
-program.addCommand(hookHandlerCommand);
-program.addCommand(otelExportCommand);
-program.addCommand(endCommand);
-program.addCommand(restartCommand);
-program.addCommand(inspectCommand);
-program.addCommand(compareCommand);
-program.addCommand(revertCommand);
-program.addCommand(approveCommand);
-program.addCommand(mcpCommand);
-program.addCommand(daemonCommand);
-program.addCommand(overnightCommand);
-program.addCommand(reportCommand);
-program.addCommand(policyCommand);
+[
+  analyzeCommand,
+  approveCommand,
+  autocorrectCommand,
+  compareCommand,
+  daemonCommand,
+  endCommand,
+  exportCommand,
+  hookHandlerCommand,
+  hooksCommand,
+  initCommand,
+  inspectCommand,
+  mcpCommand,
+  memoryCommand,
+  otelExportCommand,
+  overnightCommand,
+  policyCommand,
+  recordCommand,
+  replayCommand,
+  reportCommand,
+  restartCommand,
+  revertCommand,
+  serveCommand,
+  sessionsCommand,
+  statsCommand,
+  swarmCommand,
+]
+  .sort(compareCommands)
+  .forEach((command) => program.addCommand(command));
 
 // If no subcommand is given, launch interactive mode
 const knownCommands = program.commands.flatMap((c) => [c.name(), ...c.aliases()]);

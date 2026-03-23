@@ -8,6 +8,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { ComparePage } from './pages/ComparePage';
 import { TasksPage } from './pages/TasksPage';
 import { InterceptionPage } from './pages/InterceptionPage';
+import SwarmPage from './pages/SwarmPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import './index.css';
 
@@ -22,6 +23,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             <Route path="/firewall" element={<InterceptionPage />} />
             <Route path="/compare" element={<ComparePage />} />
             <Route path="/tasks" element={<TasksPage />} />
+            <Route path="/swarm" element={<ErrorBoundary><SwarmPage /></ErrorBoundary>} />
+            <Route path="/swarm/:id" element={<ErrorBoundary><SwarmPage /></ErrorBoundary>} />
             <Route path="/settings" element={<SettingsPage />} />
           </Route>
         </Routes>

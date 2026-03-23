@@ -1,8 +1,7 @@
 import { Command } from 'commander';
-import { join } from 'node:path';
-import { existsSync } from 'node:fs';
 import chalk from 'chalk';
-import { Storage, type EventRow } from '@mklamine/hawkeye-core';
+import { type EventRow } from '@mklamine/hawkeye-core';
+import { formatAmbiguousSessionMessage, openTraceStorage, resolveSession, traceDbExists } from './storage-helpers.js';
 
 export const replayCommand = new Command('replay')
   .description('Replay a recorded session action by action')
@@ -11,22 +10,25 @@ export const replayCommand = new Command('replay')
   .option('--no-delay', 'Show all events immediately without delay')
   .option('-i, --interactive', 'Interactive mode with keyboard navigation')
   .action(async (sessionId: string, options) => {
-    const dbPath = join(process.cwd(), '.hawkeye', 'traces.db');
-
-    if (!existsSync(dbPath)) {
+    if (!traceDbExists()) {
       console.error(chalk.red('No database found. Run `hawkeye init` first.'));
       return;
     }
 
-    const storage = new Storage(dbPath);
+    const storage = openTraceStorage();
 
-    // Resolve short IDs
-    const resolved = resolveSessionId(storage, sessionId);
-    if (!resolved) {
+    const sessionMatch = resolveSession(storage, sessionId);
+    if (sessionMatch.kind === 'ambiguous') {
+      console.error(chalk.yellow(formatAmbiguousSessionMessage(sessionMatch.matches)));
+      storage.close();
+      return;
+    }
+    if (!sessionMatch.session) {
       console.error(chalk.red(`Session not found: ${sessionId}`));
       storage.close();
       return;
     }
+    const resolved = sessionMatch.session.id;
 
     const sessionResult = storage.getSession(resolved);
     const eventsResult = storage.getEvents(resolved);
@@ -167,18 +169,6 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-function resolveSessionId(storage: Storage, input: string): string | null {
-  const exact = storage.getSession(input);
-  if (exact.ok && exact.value) return input;
-
-  const all = storage.listSessions();
-  if (!all.ok) return null;
-
-  const matches = all.value.filter((s) => s.id.startsWith(input));
-  if (matches.length === 1) return matches[0].id;
-  return null;
 }
 
 function sleep(ms: number): Promise<void> {

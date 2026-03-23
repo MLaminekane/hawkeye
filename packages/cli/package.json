@@ -1,7 +1,7 @@
 {
   "name": "hawkeye-ai",
   "version": "0.1.13",
-  "description": "The flight recorder for AI agents - observability and security for Claude Code, Aider, AutoGPT and more",
+  "description": "The flight recorder for AI agents - observability, security, multi-agent orchestration, and autonomous control for Claude Code, Aider, Codex, Cursor, and more",
   "license": "MIT",
   "homepage": "https://github.com/MLaminekane/hawkeye#readme",
   "repository": {
@@ -21,7 +21,17 @@
     "llm",
     "flight-recorder",
     "guardrails",
-    "drift-detection"
+    "drift-detection",
+    "multi-agent",
+    "swarm",
+    "orchestration",
+    "autocorrect",
+    "memory-diff",
+    "arena",
+    "mcp",
+    "aider",
+    "codex",
+    "cursor"
   ],
   "type": "module",
   "bin": {

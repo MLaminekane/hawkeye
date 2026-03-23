@@ -48,6 +48,22 @@ export interface WebhookSettings {
   events: string[];
 }
 
+export interface AutocorrectSettings {
+  enabled: boolean;
+  dryRun: boolean;
+  triggers: {
+    driftCritical: boolean;
+    errorRepeat: number;
+    costThreshold: number;
+  };
+  actions: {
+    rollbackFiles: boolean;
+    pauseSession: boolean;
+    injectHint: boolean;
+    blockPattern: boolean;
+  };
+}
+
 export interface HawkeyeConfig {
   drift: DriftSettings;
   guardrails: GuardrailRuleSetting[];
@@ -55,6 +71,7 @@ export interface HawkeyeConfig {
   recording?: RecordingSettings;
   dashboard?: DashboardSettings;
   webhooks?: WebhookSettings[];
+  autocorrect?: AutocorrectSettings;
 }
 
 // ─── Provider models ─────────────────────────────────────────
@@ -217,6 +234,12 @@ export function loadConfig(cwd: string): HawkeyeConfig {
         recording: { ...def.recording, ...raw.recording },
         dashboard: { ...def.dashboard, ...raw.dashboard },
         webhooks: raw.webhooks || [],
+        autocorrect: raw.autocorrect ? {
+          enabled: raw.autocorrect.enabled ?? false,
+          dryRun: raw.autocorrect.dryRun ?? false,
+          triggers: { driftCritical: true, errorRepeat: 3, costThreshold: 85, ...raw.autocorrect.triggers },
+          actions: { rollbackFiles: true, pauseSession: true, injectHint: true, blockPattern: true, ...raw.autocorrect.actions },
+        } : undefined,
       };
     } catch {
       return getDefaultConfig();

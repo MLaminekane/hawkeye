@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import chalk from 'chalk';
 import { loadConfig } from '../config.js';
 import { fireWebhooks } from '../webhooks.js';
+import { buildAgentInvocation, inferAgentName } from './agent-command.js';
 
 const o = chalk.hex('#ff5f1f');
 
@@ -140,7 +141,7 @@ function trimJournal(cwd: string): void {
 
 function getGitDiffStat(cwd: string): string {
   try {
-    return execSync('git diff --stat HEAD', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+    return execSync('git diff --stat HEAD', { cwd, encoding: 'utf-8', timeout: 5000, stdio: 'pipe' }).trim();
   } catch {
     return '';
   }
@@ -148,12 +149,12 @@ function getGitDiffStat(cwd: string): string {
 
 // ─── Context builder ─────────────────────────────────────────
 
-function gatherContext(cwd: string): string {
+export function gatherContext(cwd: string): string {
   const sections: string[] = [];
 
   // 1. Git status — what files are currently modified
   try {
-    const status = execSync('git status --short', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+    const status = execSync('git status --short', { cwd, encoding: 'utf-8', timeout: 5000, stdio: 'pipe' }).trim();
     if (status) {
       sections.push(`[Current git status]\n${status}`);
     }
@@ -161,7 +162,7 @@ function gatherContext(cwd: string): string {
 
   // 2. Git branch
   try {
-    const branch = execSync('git branch --show-current', { cwd, encoding: 'utf-8', timeout: 3000 }).trim();
+    const branch = execSync('git branch --show-current', { cwd, encoding: 'utf-8', timeout: 3000, stdio: 'pipe' }).trim();
     if (branch) {
       sections.push(`[Current branch] ${branch}`);
     }
@@ -169,7 +170,7 @@ function gatherContext(cwd: string): string {
 
   // 3. Recent git commits
   try {
-    const log = execSync('git log --oneline -5', { cwd, encoding: 'utf-8', timeout: 5000 }).trim();
+    const log = execSync('git log --oneline -5', { cwd, encoding: 'utf-8', timeout: 5000, stdio: 'pipe' }).trim();
     if (log) {
       sections.push(`[Recent commits]\n${log}`);
     }
@@ -195,9 +196,10 @@ function buildPromptWithContext(task: Task, cwd: string): string {
 
 // ─── Execute a task ──────────────────────────────────────────
 
-function shouldContinueSession(agentCmd: string, allTasks: Task[]): boolean {
+export function shouldContinueSession(agentCmd: string, allTasks: Task[]): boolean {
+  const agentName = inferAgentName(agentCmd);
   // Only for claude agent — use --continue to resume the last conversation
-  if (!agentCmd.startsWith('claude')) return false;
+  if (agentName !== 'claude') return false;
 
   const lastCompleted = allTasks
     .filter((t) => t.status === 'completed' && t.exitCode === 0)
@@ -212,17 +214,13 @@ function shouldContinueSession(agentCmd: string, allTasks: Task[]): boolean {
 
 function executeTask(task: Task, agentCmd: string, cwd: string, allTasks: Task[]): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolve) => {
-    // Split agent command (e.g. "aider --model gpt-4" → ["aider", "--model", "gpt-4"])
-    const parts = agentCmd.split(/\s+/);
-    const cmd = parts[0];
-    const baseArgs = parts.slice(1);
-
-    // For claude: use --continue to resume the last conversation if recent
+    // For Claude, use --continue to resume the last conversation if recent.
+    // Other supported CLIs get the prompt in the form they expect.
     const useContinue = shouldContinueSession(agentCmd, allTasks);
     const enrichedPrompt = useContinue ? task.prompt : buildPromptWithContext(task, cwd);
-    const args = useContinue
-      ? [...baseArgs, '--continue', '-p', enrichedPrompt]
-      : [...baseArgs, '-p', enrichedPrompt];
+    const { cmd, args } = buildAgentInvocation(agentCmd, enrichedPrompt, {
+      continueConversation: useContinue,
+    });
 
     // Remove CLAUDECODE env var to avoid "nested session" error
     const env = { ...process.env };

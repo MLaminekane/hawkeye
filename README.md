@@ -30,17 +30,25 @@
 Hawkeye is a **flight recorder** for AI agents. It captures every action an agent performs — terminal commands, file operations, LLM calls, API requests — and provides:
 
 - **Session recording & replay** — Full timeline of every agent action with costs and metadata
+- **Time Travel Debugging** — Step-through replay with breakpoints, keyboard shortcuts, interactive SVG timeline, session forking ("replay from here")
+- **Root Cause Analysis** — Automatic `hawkeye analyze` finds primary errors, causal chains, error patterns, and fix suggestions (heuristic + optional LLM)
 - **DriftDetect** — Real-time objective drift detection using heuristic + LLM scoring
-- **Guardrails** — File protection, command blocking, cost limits, token limits, directory scoping
+- **Guardrails** — File protection, command blocking, cost limits, token limits, directory scoping, network lock, review gates
 - **Impact Preview** — Pre-execution risk analysis for every agent action (low/medium/high/critical)
 - **Live Firewall** — Real-time action stream with browser push notifications and badge counter
 - **Policy Engine** — Declarative `.hawkeye/policies.yml` for shareable, team-wide security rules
-- **Visual dashboard** — Mobile-responsive web UI with session explorer, drift charts, firewall, and settings management
+- **Autonomous Control Layer** — Autocorrect engine that auto-rolls back files, pauses sessions, blocks failing patterns, and injects correction hints to agents via MCP
+- **Memory Diff** — Cross-session agent memory tracking, hallucination detection, cumulative knowledge view
+- **Live Agent Spawning** — Spawn, monitor, and control AI agents directly from the dashboard with role assignment, permission levels, and real-time session linking
+- **Multi-agent Orchestration (Swarm)** — Coordinate multiple AI agents on parallel tasks with isolated worktrees, scope enforcement, dependency ordering, conflict detection, and merge strategies
+- **Agent Arena** — Pit multiple AI agents against the same task in isolated git worktrees with automated scoring
+- **Visual dashboard** — Mobile-responsive web UI with session explorer, drift charts, firewall, agents control room, memory viewer, and settings management
 - **Remote tasks** — Submit prompts from your phone via dashboard, with image attachments, auto-approve, and persistent agent memory
 - **Interactive TUI** — Terminal-responsive CLI with arrow-key navigation and slash commands
 - **OpenTelemetry export** — Push traces to Grafana Tempo, Jaeger, Datadog, Honeycomb
 - **Universal ingestion API** — Accept events from any source (MCP servers, custom tools)
-- **Multi-agent support** — Claude Code (hooks), Aider, Open Interpreter, AutoGPT, CrewAI, or any custom command
+- **MCP server** — 38 tools for agent self-awareness, intelligence, and cross-session analysis
+- **Multi-agent support** — Claude Code (hooks), Aider, Open Interpreter, AutoGPT, CrewAI, Codex, or any custom command
 
 ## Installation
 
@@ -161,8 +169,12 @@ Type `/` to open the command picker with arrow-key navigation and live filtering
 | `/tasks`       | List, create, clear remote tasks               |
 | `/tasks journal` | View agent memory (task history)             |
 | `/firewall`    | View recent interceptions and blocked actions  |
+| `/analyze`     | Root cause analysis — find why a session failed |
 | `/policy`      | Manage declarative security policies           |
 | `/arena`       | Agent Arena — pit agents against each other     |
+| `/swarm`       | Multi-agent orchestration with isolated worktrees|
+| `/memory`      | Cross-session agent memory & hallucination check|
+| `/autocorrect` | Enable/disable autonomous correction engine    |
 | `/overnight`   | Run overnight mode (guardrails + morning report)|
 | `/report`      | Generate morning report of recent sessions     |
 | `/remote`      | Launch serve + daemon + Cloudflare tunnel      |
@@ -296,6 +308,16 @@ Generate a morning report of recent sessions. Aggregates stats, drift, errors, a
 | `--llm`     | Include LLM-powered post-mortem per session                    |                                      |
 | `--webhook` | Fire `overnight_report` webhook with the report                |                                      |
 
+### `hawkeye analyze <session-id>`
+
+```bash
+hawkeye analyze <session-id>          # Heuristic root cause analysis
+hawkeye analyze <session-id> --llm    # Enhanced with LLM analysis
+hawkeye analyze <session-id> --json   # Machine-readable output
+```
+
+Automatic root cause analysis: identifies the primary error, builds the causal chain, detects error patterns, analyzes drift trajectory, and generates fix suggestions.
+
 ### `hawkeye policy`
 
 ```bash
@@ -307,6 +329,38 @@ hawkeye policy import <file>       # Import a policies.yml
 ```
 
 Declarative security policies in `.hawkeye/policies.yml` — shareable across projects and teams. The hook-handler automatically loads and merges policy rules with config.json guardrails.
+
+### `hawkeye memory`
+
+```bash
+hawkeye memory [session]              # Extract memories from a session
+hawkeye memory diff <s1> <s2>         # Compare what agent remembers between sessions
+hawkeye memory cumulative             # Aggregate knowledge across all sessions
+hawkeye memory hallucinations         # Detect contradictions and recurring errors
+```
+
+Cross-session agent memory tracking. Extracts structured knowledge (file patterns, error lessons, tool patterns, decisions) from session events, compares what agents learned/forgot across sessions, and detects hallucinations.
+
+### `hawkeye autocorrect`
+
+```bash
+hawkeye autocorrect enable [--dry-run]  # Enable autonomous correction
+hawkeye autocorrect disable             # Disable autocorrect
+hawkeye autocorrect status              # Show current status and config
+hawkeye autocorrect history             # View past corrections
+```
+
+Autonomous control layer — Hawkeye doesn't just observe, it autonomously corrects agent behavior when drift, errors, or cost issues are detected. Actions include file rollback, session pause, hint injection to MCP-aware agents, and pattern blocking.
+
+### `hawkeye swarm`
+
+```bash
+hawkeye swarm <config.json>           # Run multi-agent orchestration from config
+hawkeye swarm init                    # Generate a template swarm config
+hawkeye swarm list                    # List past swarm runs
+```
+
+Coordinate multiple AI agents on parallel tasks. Each agent gets an isolated git worktree with enforced scope boundaries. Features dependency ordering (topological sort), file conflict detection, sequential/octopus merge strategies, and live terminal progress.
 
 ### `hawkeye export`
 
@@ -366,15 +420,16 @@ Add to `.mcp.json` at project root for Claude Code:
 }
 ```
 
-**27 tools** for agent self-awareness:
+**38 tools** for agent self-awareness, intelligence, and control:
 
 | Category | Tools |
 |----------|-------|
 | **Observability** (9) | `list_sessions`, `get_session`, `get_session_events`, `get_session_drift`, `get_session_stats`, `get_global_stats`, `compare_sessions`, `get_violations`, `get_cost_by_file` |
 | **Self-awareness** (8) | `check_drift`, `get_objective`, `check_cost`, `check_guardrail`, `check_progress`, `log_event`, `list_changes`, `get_config` |
-| **Intelligence** (4) | `get_session_timeline`, `get_error_summary`, `suggest_correction`, `post_mortem` |
-| **Actions** (4) | `end_session`, `pause_session`, `resume_session`, `set_objective` |
+| **Intelligence** (8) | `get_session_timeline`, `get_error_summary`, `suggest_correction`, `analyze_root_cause`, `post_mortem`, `memory_diff`, `check_memory`, `auto_correct` |
+| **Actions** (5) | `end_session`, `pause_session`, `resume_session`, `set_objective`, `get_correction` |
 | **Cross-session** (2) | `search_events`, `revert_file` |
+| **Swarm** (3) | `list_swarms`, `get_swarm`, `get_swarm_agent` |
 
 ## Dashboard
 
@@ -389,9 +444,10 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 
 ### Session Detail Page
 
+- **Time Travel Debugger** — Interactive SVG timeline with step-through, breakpoints, keyboard shortcuts, and session forking
 - **Drift score chart** — Line chart with warning/critical reference zones
 - **Event timeline** — Filterable, searchable list with type badges (CMD, FILE, LLM, GUARD, etc.)
-- **Expandable details** — Full event payload for each action
+- **Expandable details** — Full event payload for each action, auto-expands during step-through
 - **Live mode** — Auto-refreshes every 3 seconds for active sessions
 - **Export** — Download session as JSON
 
@@ -404,10 +460,36 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 - **Agent memory** — View/clear the persistent task journal
 - Status tracking: pending, running, completed, failed
 
+### Agents Control Room
+
+- **Spawn agents** directly from the dashboard — choose agent CLI (claude, aider, codex), assign role (lead/worker/reviewer), set permissions (full access/supervised/default), add personality
+- **Live monitoring** — Real-time output streaming, session linking with drift/cost/action stats, follow-up messages
+- **Permission levels** — Full access (skip confirmation prompts), supervised (Hawkeye guardrails enforce limits), default (agent runtime defaults)
+- **Persistent agents** — Agents survive server restarts via file-backed persistence (`.hawkeye/agents.json`)
+- **Session integration** — Each spawned agent is automatically linked to its Hawkeye session for full observability
+
 ### Compare Page
 
 - Select two sessions to compare side by side
 - Stats comparison (actions, cost, tokens, drift)
+
+### Memory Page
+
+- **Cumulative Memory** — Aggregate knowledge across all sessions (file patterns, error lessons, tool patterns, decisions)
+- **Memory Diff** — Compare what an agent remembered between two sessions (learned, forgotten, retained, evolved, contradicted)
+- **Hallucination Detection** — Cross-session analysis for recurring errors and contradicted facts
+
+### Arena Page
+
+- View all arena results with expandable leaderboard tables
+- Composite scoring breakdown per agent (tests, speed, efficiency, focus, completion)
+
+### Swarm Page
+
+- List and detail view of multi-agent orchestration runs
+- Agent cards with scope display, files changed, merge status
+- Conflict visualization between agents
+- Real-time WebSocket updates during execution
 
 ### Firewall Page
 
@@ -435,6 +517,8 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 | `/api/sessions/:id/end`           | POST   | End a session                    |
 | `/api/sessions/:id/pause`         | POST   | Pause a session                  |
 | `/api/sessions/:id/resume`        | POST   | Resume a paused session          |
+| `/api/sessions/:id/fork`          | POST   | Fork session up to event N       |
+| `/api/sessions/:id/analyze`       | GET    | Root cause analysis              |
 | `/api/compare?ids=id1,id2`        | GET    | Compare sessions side by side    |
 | `/api/stats`                      | GET    | Global statistics                |
 | `/api/settings`                   | GET    | Get configuration                |
@@ -457,6 +541,25 @@ The web dashboard (`hawkeye serve`) is fully **mobile responsive** and provides:
 | `/api/policies`                   | POST   | Save policies (server-validated) |
 | `/api/impact`                     | GET    | Last impact preview              |
 | `/api/interceptions`              | GET    | Recent blocks + pending reviews  |
+| `/api/sessions/:id/memory`        | GET    | Session memory items             |
+| `/api/sessions/:id/corrections`   | GET    | Session autocorrect history      |
+| `/api/memory/diff?a=X&b=Y`       | GET    | Memory diff between sessions     |
+| `/api/memory/cumulative`          | GET    | Cumulative memory across sessions|
+| `/api/memory/hallucinations`      | GET    | Cross-session hallucination check|
+| `/api/corrections`                | GET    | All corrections across sessions  |
+| `/api/active-correction`          | GET    | Current active correction hint   |
+| `/api/autocorrect`                | POST   | Trigger/configure autocorrect    |
+| `/api/agents`                     | GET    | List live agents                 |
+| `/api/agents/spawn`               | POST   | Spawn a new agent                |
+| `/api/agents/:id`                 | GET    | Get agent details                |
+| `/api/agents/:id/stop`            | POST   | Stop a running agent             |
+| `/api/agents/:id/remove`          | POST   | Remove an agent                  |
+| `/api/agents/:id/message`         | POST   | Send follow-up message to agent  |
+| `/api/agents/:id/events`          | GET    | Get agent's session events       |
+| `/api/swarms`                     | GET    | List swarm runs                  |
+| `/api/swarms/:id`                 | GET    | Swarm details                    |
+| `/api/swarms/:id/agents`          | GET    | Swarm agent details              |
+| `/api/swarms/:id/conflicts`       | GET    | Swarm file conflicts             |
 
 ## DriftDetect
 
@@ -506,6 +609,52 @@ Guardrails are evaluated **synchronously before** events are persisted. Violatio
 | `review_gate`     | Require human approval for commands    | `patterns: string[]` (regex patterns) |
 | `impact_threshold`| Block actions above a risk level       | `blockAbove`, `warnAbove` (low/medium/high/critical) |
 
+### Time Travel Debugging
+
+The dashboard session replay is a full debugger for AI agent sessions:
+
+- **Step-through controls** — Step forward/back one event at a time, play/pause with speed controls (1x–10x)
+- **Breakpoints** — Click events on the interactive SVG timeline or press `B` to toggle breakpoints; playback pauses automatically at breakpoints
+- **Interactive timeline** — Color-coded dots by event type, drift score overlay, right-click context menu
+- **Session forking** — "Fork from here" creates a new session from any point in time, copying all events, drift snapshots, and guardrail violations up to that point
+- **Keyboard shortcuts** — `←`/`→` step through, `Space` play/pause, `B` toggle breakpoint
+- **Auto-expand** — Current event details expand automatically during step-through
+
+### Root Cause Analysis
+
+After a session fails, run `hawkeye analyze <session>` (or click "Analyze" in the dashboard) to get:
+
+- **Primary error** — The main failure event with context
+- **Causal chain** — Backwards trace: which file edits and LLM decisions led to the error
+- **Error patterns** — Repeated failures grouped and counted (e.g., "tsc failed 5x")
+- **Drift analysis** — Score trend, inflection point, and what triggered the drift
+- **Suggestions** — Actionable fix recommendations based on detected patterns
+- **LLM enhancement** — Add `--llm` for deeper natural language analysis
+
+```
+$ hawkeye analyze abc123
+
+ ─── Root Cause Analysis ─── session abc12345
+
+  FAILURE   confidence: high
+
+  SUMMARY
+  Session failed due to repeated TypeScript compilation errors
+
+  PRIMARY ERROR (event #47)
+  tsc --noEmit → exit 1
+  at 14:23:05 — command
+
+  CAUSAL CHAIN
+  #12 ◇ LLM    anthropic/claude-3.5-sonnet
+  #15 ● FILE   Modified src/middleware.ts
+  #23 ○ CMD    tsc --noEmit → exit 1
+
+  SUGGESTIONS
+  1. TypeScript compilation failed 5 times — fix type errors
+  2. Agent made multiple unsuccessful attempts
+```
+
 ### Impact Preview
 
 Every agent action is analyzed **before execution** via the Impact Preview engine:
@@ -539,6 +688,46 @@ rules:
 ```
 
 Manage via `hawkeye policy` CLI, dashboard Settings page, or direct YAML edit.
+
+### Autonomous Control Layer (Autocorrect)
+
+Hawkeye doesn't just observe — it autonomously corrects agent behavior:
+
+- **Triggers**: critical drift (< 30), declining drift trend, repeated error patterns (configurable, default 3x), cost exceeding budget threshold (85%)
+- **Actions**: file rollback (`git checkout -- <file>`), session pause, hint injection to MCP-aware agents, dynamic pattern blocking, webhook notifications
+- **Agent integration**: MCP-aware agents (Claude Code, Cursor) receive correction hints via `get_correction` tool with direct `agentInstructions`
+- **Dry-run mode**: test corrections without executing them
+
+### Memory Diff
+
+Cross-session agent memory tracking and hallucination detection:
+
+- **7-phase extraction**: file knowledge, error lessons, corrections, tool patterns, decisions, dependency facts, API knowledge
+- **Diff analysis**: learned (new), forgotten (lost), retained, evolved (updated), contradicted (conflicting)
+- **Hallucination detection**: recurring errors across sessions, contradicted facts
+- **Cumulative memory**: aggregated knowledge across all sessions with deduplication
+
+### Multi-agent Orchestration (Swarm)
+
+Coordinate multiple AI agents on parallel tasks:
+
+- **Isolated worktrees**: each agent gets its own git worktree — no conflicts during execution
+- **Scope enforcement**: include/exclude glob patterns, enforced at prompt-level and validated post-execution
+- **Dependency ordering**: topological sort (Kahn's algorithm) for task dependencies
+- **Conflict detection**: file overlap detection between agents with severity scoring
+- **Merge strategies**: sequential (least-conflict-first) or octopus
+- **Config-driven**: JSON config files with agent personas, tasks, scopes, and timeouts
+
+### Live Agent Spawning
+
+Spawn and control AI agents directly from the dashboard:
+
+- **Role-based creation**: assign roles (lead/worker/reviewer) and custom personality
+- **Permission levels**: full access (`--dangerously-skip-permissions`), supervised (Hawkeye guardrails), or default
+- **Session linking**: automatic detection and linking to Hawkeye sessions for full observability
+- **Live stats**: real-time drift score, cost, action count, and session info via WebSocket
+- **Follow-up messages**: send additional prompts to running agents via stdin
+- **Persistence**: agents survive server restarts via `.hawkeye/agents.json`
 
 Example configuration (via `/settings` in TUI or dashboard):
 
@@ -644,7 +833,7 @@ For child processes, Hawkeye injects a preload ESM script via `NODE_OPTIONS="--i
 
 ### Storage
 
-SQLite via `better-sqlite3` with WAL mode. Four tables:
+SQLite via `better-sqlite3` with WAL mode. Nine tables:
 
 | Table                  | Purpose                                                       |
 | ---------------------- | ------------------------------------------------------------- |
@@ -652,6 +841,11 @@ SQLite via `better-sqlite3` with WAL mode. Four tables:
 | `events`               | Captured events (type, data, timestamps, token counts, costs) |
 | `drift_snapshots`      | Drift score history per session                               |
 | `guardrail_violations` | Guardrail violation log                                       |
+| `memory_items`         | Cross-session agent memory (knowledge, patterns, lessons)     |
+| `corrections`          | Autocorrect actions (rollbacks, pauses, hints, blocks)        |
+| `swarms`               | Swarm orchestration run metadata                              |
+| `swarm_agents`         | Per-agent state within swarm runs                             |
+| `swarm_conflicts`      | File conflicts detected between swarm agents                  |
 
 ## Development
 

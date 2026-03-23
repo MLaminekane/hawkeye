@@ -1,13 +1,23 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Storage, EventType, TraceEvent } from '@mklamine/hawkeye-core';
 import {
   createLlmProvider,
   buildPostMortemPrompt,
   parsePostMortemResponse,
+  analyzeRootCause,
+  extractMemories,
+  diffMemories,
+  detectHallucinations,
+  buildCumulativeMemory,
+  createIncidentSnapshot,
+  selfAssess,
+  generateAutoCorrection,
+  extractGitCommits,
 } from '@mklamine/hawkeye-core';
+import type { MemoryItem } from '@mklamine/hawkeye-core';
 import type { PostMortemInput } from '@mklamine/hawkeye-core';
 import { loadConfig, getDefaultConfig } from '../config.js';
 import type { GuardrailRuleSetting, HawkeyeConfig } from '../config.js';
@@ -688,6 +698,336 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2) }],
       };
+    },
+  );
+
+  server.tool(
+    'analyze_root_cause',
+    'Perform root cause analysis on a session to identify the primary error, causal chain, error patterns, drift analysis, and actionable fix suggestions. Fast heuristic analysis — no LLM needed.',
+    {
+      sessionId: z
+        .string()
+        .optional()
+        .describe('Session ID or prefix. If omitted, analyzes the most recent completed session.'),
+    },
+    async ({ sessionId }) => {
+      let session;
+      if (sessionId) {
+        session = resolveSession(storage, sessionId);
+      } else {
+        const completedResult = storage.listSessions({ limit: 1, status: 'completed' });
+        session = completedResult.ok && completedResult.value.length > 0
+          ? completedResult.value[0]
+          : null;
+        if (!session) session = findActiveSession(storage);
+      }
+
+      if (!session) {
+        return {
+          content: [{ type: 'text' as const, text: 'No session found.' }],
+          isError: true,
+        };
+      }
+
+      const eventsResult = storage.getEvents(session.id);
+      const events = eventsResult.ok ? eventsResult.value : [];
+      const driftResult = storage.getDriftSnapshots(session.id);
+      const driftSnapshots = driftResult.ok ? driftResult.value : [];
+
+      const rcaEvents = events.map((e) => ({
+        id: e.id, sequence: e.sequence, timestamp: e.timestamp, type: e.type,
+        data: e.data, drift_score: e.drift_score, drift_flag: e.drift_flag, cost_usd: e.cost_usd,
+      }));
+
+      const rcaSession = {
+        id: session.id, objective: session.objective || '', agent: session.agent || '',
+        status: session.status, started_at: session.started_at, ended_at: session.ended_at,
+        total_cost_usd: session.total_cost_usd, final_drift_score: session.final_drift_score,
+      };
+
+      const result = analyzeRootCause(rcaSession, rcaEvents, driftSnapshots);
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  // ─── Memory helper ───
+
+  function loadOrExtractMemories(session: { id: string; objective: string; agent: string | null; status: string; started_at: string; ended_at: string | null }): MemoryItem[] {
+    const cached = storage.getMemoryItems(session.id);
+    if (cached.ok && cached.value && cached.value.length > 0) {
+      return cached.value.map((r) => ({
+        id: r.id, sessionId: r.session_id, sequence: r.sequence, timestamp: r.timestamp,
+        category: r.category as MemoryItem['category'], key: r.key, content: r.content,
+        evidence: r.evidence, confidence: r.confidence as MemoryItem['confidence'],
+        supersedes: r.supersedes ?? undefined, contradicts: r.contradicts ?? undefined,
+      }));
+    }
+
+    const eventsResult = storage.getEvents(session.id);
+    const events = (eventsResult.ok ? eventsResult.value : []).map((e) => ({
+      id: e.id, sequence: e.sequence, timestamp: e.timestamp, type: e.type,
+      data: e.data, drift_score: e.drift_score, cost_usd: e.cost_usd,
+    }));
+
+    const memSession = { id: session.id, objective: session.objective, agent: session.agent, status: session.status, started_at: session.started_at, ended_at: session.ended_at };
+    const memories = extractMemories(memSession, events);
+
+    storage.upsertMemoryItems(session.id, memories.map((m) => ({
+      id: m.id, session_id: m.sessionId, sequence: m.sequence, timestamp: m.timestamp,
+      category: m.category, key: m.key, content: m.content, evidence: m.evidence,
+      confidence: m.confidence, supersedes: m.supersedes ?? null, contradicts: m.contradicts ?? null,
+    })));
+
+    return memories;
+  }
+
+  server.tool(
+    'memory_diff',
+    'Compare what an agent remembers between two sessions. Shows learned knowledge, forgotten items, evolved understanding, contradictions, and recurring hallucinations.',
+    {
+      sessionIdA: z.string().optional().describe('First session ID or prefix. If omitted, uses second-most-recent completed session.'),
+      sessionIdB: z.string().optional().describe('Second session ID or prefix. If omitted, uses most recent completed session.'),
+    },
+    async ({ sessionIdA, sessionIdB }) => {
+      const completedResult = storage.listSessions({ limit: 5, status: 'completed' });
+      const completed = completedResult.ok ? completedResult.value : [];
+
+      const sA = sessionIdA ? resolveSession(storage, sessionIdA) : completed[1] ?? null;
+      const sB = sessionIdB ? resolveSession(storage, sessionIdB) : completed[0] ?? null;
+
+      if (!sA || !sB) {
+        return { content: [{ type: 'text' as const, text: 'Need at least 2 sessions for memory diff.' }], isError: true };
+      }
+
+      const memA = loadOrExtractMemories(sA);
+      const memB = loadOrExtractMemories(sB);
+
+      const msA = { id: sA.id, objective: sA.objective || '', agent: sA.agent, status: sA.status, started_at: sA.started_at, ended_at: sA.ended_at };
+      const msB = { id: sB.id, objective: sB.objective || '', agent: sB.agent, status: sB.status, started_at: sB.started_at, ended_at: sB.ended_at };
+
+      const result = diffMemories(memA, memB, msA, msB);
+
+      const memBySession = new Map<string, MemoryItem[]>();
+      memBySession.set(sA.id, memA);
+      memBySession.set(sB.id, memB);
+      result.hallucinations = detectHallucinations(memBySession);
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    'check_memory',
+    'Check cumulative agent memory across sessions. Shows what knowledge persists, what was lost, and recurring hallucinations. Call at session start to see what context to re-establish.',
+    {
+      limit: z.number().optional().describe('Max sessions to include (default 10)'),
+    },
+    async ({ limit }) => {
+      const sessionsResult = storage.listSessions({ limit: limit || 10 });
+      const sessions = sessionsResult.ok ? sessionsResult.value : [];
+
+      if (sessions.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No sessions found.' }], isError: true };
+      }
+
+      const sessionMemories = sessions.map((s) => ({
+        session: { id: s.id, objective: s.objective || '', agent: s.agent, status: s.status, started_at: s.started_at, ended_at: s.ended_at },
+        memories: loadOrExtractMemories(s),
+      }));
+
+      const cumulative = buildCumulativeMemory(sessionMemories);
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify(cumulative, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    'self_assess',
+    'Comprehensive self-assessment combining drift, cost, errors, and velocity into one actionable health check. Returns overall risk level (low/medium/high/critical) with specific recommendations. Call this when you sense something is off, or periodically every 15-20 actions.',
+    {
+      sessionId: z.string().optional().describe('Session ID or prefix. If omitted, uses active session.'),
+    },
+    async ({ sessionId }) => {
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
+      if (!session) {
+        return { content: [{ type: 'text' as const, text: 'No active session found.' }], isError: true };
+      }
+
+      const eventsResult = storage.getEvents(session.id);
+      const events = (eventsResult.ok ? eventsResult.value : []).map((e) => ({
+        sequence: e.sequence, type: e.type, timestamp: e.timestamp,
+        data: e.data, cost_usd: e.cost_usd,
+      }));
+      const driftResult = storage.getDriftSnapshots(session.id);
+      const drifts = driftResult.ok ? driftResult.value : [];
+      const latestDrift = drifts[drifts.length - 1];
+
+      const config = loadConfigSafe(workingDir);
+      const costLimit = config.guardrails?.find((g: { type: string }) => g.type === 'cost_limit');
+
+      const assessment = selfAssess({
+        driftScore: latestDrift?.score ?? session.final_drift_score ?? null,
+        driftFlag: latestDrift?.flag ?? 'unknown',
+        driftSnapshots: drifts.map((d) => ({ score: d.score, flag: d.flag })),
+        totalCost: session.total_cost_usd ?? 0,
+        costLimit: costLimit ? (costLimit as { value?: number }).value ?? null : null,
+        events,
+        startedAt: session.started_at,
+        objective: session.objective ?? '',
+      });
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify(assessment, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    'auto_correct',
+    'Get auto-correction recommendations AND check if Hawkeye has already taken autonomous corrections. Returns concrete actions: change_strategy, stop_retrying, refocus_objective, reduce_scope. Also returns any active correction hint from the Autonomous Control Layer. IMPORTANT: If there is an active correction, follow its agentInstructions immediately.',
+    {
+      sessionId: z.string().optional().describe('Session ID or prefix. If omitted, uses active session.'),
+    },
+    async ({ sessionId }) => {
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
+      if (!session) {
+        return { content: [{ type: 'text' as const, text: 'No active session found.' }], isError: true };
+      }
+
+      const eventsResult = storage.getEvents(session.id);
+      const events = (eventsResult.ok ? eventsResult.value : []).map((e) => ({
+        sequence: e.sequence, type: e.type, timestamp: e.timestamp,
+        data: e.data, cost_usd: e.cost_usd,
+      }));
+      const driftResult = storage.getDriftSnapshots(session.id);
+      const drifts = driftResult.ok ? driftResult.value : [];
+      const latestDrift = drifts[drifts.length - 1];
+
+      const assessment = selfAssess({
+        driftScore: latestDrift?.score ?? session.final_drift_score ?? null,
+        driftFlag: latestDrift?.flag ?? 'unknown',
+        driftSnapshots: drifts.map((d) => ({ score: d.score, flag: d.flag })),
+        totalCost: session.total_cost_usd ?? 0,
+        costLimit: null,
+        events,
+        startedAt: session.started_at,
+        objective: session.objective ?? '',
+      });
+
+      const correction = generateAutoCorrection(assessment, session.objective ?? '');
+
+      // Check for active autonomous correction hint
+      let activeHint: unknown = null;
+      try {
+        const hintPath = join(workingDir, '.hawkeye', 'active-correction.json');
+        if (existsSync(hintPath)) {
+          activeHint = JSON.parse(readFileSync(hintPath, 'utf-8'));
+        }
+      } catch {}
+
+      // Get correction history for this session
+      const correctionHistory = storage.getCorrections(session.id);
+      const recentCorrections = (correctionHistory.ok ? correctionHistory.value : []).slice(0, 5);
+
+      const result = {
+        ...correction,
+        activeCorrection: activeHint,
+        recentAutocorrections: recentCorrections.map((r) => ({
+          id: r.id,
+          timestamp: r.timestamp,
+          trigger: r.trigger,
+          corrections: (() => { try { return JSON.parse(r.corrections); } catch { return []; } })(),
+          dryRun: r.dry_run === 1,
+        })),
+      };
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    'get_correction',
+    'Check if Hawkeye has autonomously corrected your session (rollback files, blocked patterns, etc). Returns the active correction hint with instructions. Call this after check_drift if drift is declining, or periodically to see if the autocorrect engine has intervened.',
+    {},
+    async () => {
+      try {
+        const hintPath = join(workingDir, '.hawkeye', 'active-correction.json');
+        if (existsSync(hintPath)) {
+          const hint = JSON.parse(readFileSync(hintPath, 'utf-8'));
+          return { content: [{ type: 'text' as const, text: JSON.stringify(hint, null, 2) }] };
+        }
+      } catch {}
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ active: false, message: 'No active corrections. You are on track.' }) }] };
+    },
+  );
+
+  server.tool(
+    'trigger_incident',
+    'Trigger incident mode: freezes the session, captures a full snapshot, and creates an incident record. Use when you detect a critical issue or when the session should be paused for human review.',
+    {
+      sessionId: z.string().optional().describe('Session ID or prefix. If omitted, uses active session.'),
+      reason: z.string().optional().describe('Why the incident was triggered.'),
+    },
+    async ({ sessionId, reason }) => {
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
+      if (!session) {
+        return { content: [{ type: 'text' as const, text: 'No active session found.' }], isError: true };
+      }
+
+      const eventsResult = storage.getEvents(session.id);
+      const events = (eventsResult.ok ? eventsResult.value : []).map((e) => ({
+        sequence: e.sequence, type: e.type, timestamp: e.timestamp,
+        data: e.data, cost_usd: e.cost_usd,
+      }));
+      const driftResult = storage.getDriftSnapshots(session.id);
+      const drifts = driftResult.ok ? driftResult.value : [];
+      const latestDrift = drifts[drifts.length - 1];
+
+      const incidentId = `inc_${Date.now().toString(36)}`;
+      const incident = createIncidentSnapshot(incidentId, {
+        sessionId: session.id, objective: session.objective ?? '',
+        status: session.status,
+        driftScore: latestDrift?.score ?? session.final_drift_score ?? null,
+        driftFlag: latestDrift?.flag ?? null, driftReason: reason || latestDrift?.reason || null,
+        totalCost: session.total_cost_usd ?? 0, totalActions: events.length,
+      }, events, 'manual');
+
+      storage.insertIncident({
+        id: incident.id, sessionId: session.id, triggeredAt: incident.triggeredAt,
+        trigger: incident.trigger, severity: incident.severity,
+        driftScore: incident.driftScore, driftFlag: incident.driftFlag,
+        summary: incident.summary, snapshot: JSON.stringify(incident),
+      });
+
+      storage.pauseSession(session.id);
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ incident, action: 'Session frozen. Incident recorded.' }, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    'list_commits',
+    'List git commits made during agent sessions. Shows which agent wrote which commit, enabling intelligent revert. Use to audit what code changes agents have made.',
+    {
+      sessionId: z.string().optional().describe('Session ID or prefix. If omitted, shows commits across all sessions.'),
+      limit: z.number().optional().describe('Max commits to return (default 20).'),
+    },
+    async ({ sessionId, limit }) => {
+      const sid = sessionId ? resolveSession(storage, sessionId)?.id : undefined;
+      const result = storage.getGitCommits(sid);
+      const rows = result.ok ? result.value : [];
+
+      const commits = rows.slice(0, limit || 20).map((r) => {
+        const data = (() => { try { return JSON.parse(r.data); } catch { return {}; } })();
+        return {
+          sessionId: r.session_id, agent: r.agent, sequence: r.sequence, timestamp: r.timestamp,
+          commitHash: data.commitHash || data.hash || '', message: data.message || '',
+          branch: data.branch || null, filesChanged: data.filesChanged || 0,
+        };
+      });
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify(commits, null, 2) }] };
     },
   );
 
@@ -1801,6 +2141,144 @@ Respond as JSON:
             new_objective: objective,
           }, null, 2),
         }],
+      };
+    },
+  );
+
+  // ─── Swarm Tools ──────────────────────────────────────────────
+
+  server.tool(
+    'list_swarms',
+    'List multi-agent swarm runs. Shows past and active orchestration sessions with status, cost, and agent count.',
+    {
+      limit: z.number().optional().describe('Max number of swarms to return (default 10)'),
+      status: z.string().optional().describe('Filter by status: pending, running, completed, failed, cancelled'),
+    },
+    async ({ limit, status }) => {
+      const result = storage.listSwarms({ limit: limit || 10, status });
+      if (!result.ok) {
+        return { content: [{ type: 'text' as const, text: 'Failed to list swarms' }], isError: true };
+      }
+
+      const swarms = result.value.map((s) => {
+        let agentCount = 0;
+        try { agentCount = JSON.parse(s.config).agents?.length || 0; } catch {}
+        return {
+          id: s.id,
+          name: s.name,
+          status: s.status,
+          agents: agentCount,
+          cost: s.total_cost_usd,
+          created: s.created_at,
+          completed: s.completed_at,
+        };
+      });
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(swarms, null, 2) }],
+      };
+    },
+  );
+
+  server.tool(
+    'get_swarm',
+    'Get detailed info about a specific swarm run including all agents, their status, files changed, conflicts, and merge results.',
+    {
+      swarmId: z.string().describe('Swarm ID or prefix (min 4 chars)'),
+    },
+    async ({ swarmId }) => {
+      const swarm = storage.getSwarm(swarmId);
+      if (!swarm.ok || !swarm.value) {
+        return { content: [{ type: 'text' as const, text: `Swarm "${swarmId}" not found` }], isError: true };
+      }
+
+      const agents = storage.getSwarmAgents(swarm.value.id);
+      const conflicts = storage.getSwarmConflicts(swarm.value.id);
+
+      const response = {
+        swarm: {
+          id: swarm.value.id,
+          name: swarm.value.name,
+          objective: swarm.value.objective,
+          status: swarm.value.status,
+          cost: swarm.value.total_cost_usd,
+          tokens: swarm.value.total_tokens,
+          testsPassed: swarm.value.tests_passed,
+          mergeCommit: swarm.value.merge_commit,
+          created: swarm.value.created_at,
+          completed: swarm.value.completed_at,
+        },
+        agents: (agents.ok ? agents.value : []).map((a) => ({
+          name: a.agent_name,
+          status: a.status,
+          task: a.task_prompt.slice(0, 200),
+          duration: a.duration_seconds,
+          filesChanged: a.files_changed ? JSON.parse(a.files_changed).length : 0,
+          cost: a.cost_usd,
+          mergeStatus: a.merge_status,
+          exitCode: a.exit_code,
+        })),
+        conflicts: (conflicts.ok ? conflicts.value : []).map((c) => ({
+          path: c.path,
+          agents: JSON.parse(c.agents),
+          type: c.type,
+          resolved: !!c.resolved,
+        })),
+      };
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2) }],
+      };
+    },
+  );
+
+  server.tool(
+    'get_swarm_agent',
+    'Get detailed info about a specific agent within a swarm run — output, files changed, scope, errors.',
+    {
+      swarmId: z.string().describe('Swarm ID or prefix'),
+      agentName: z.string().describe('Agent name within the swarm'),
+    },
+    async ({ swarmId, agentName }) => {
+      const swarm = storage.getSwarm(swarmId);
+      if (!swarm.ok || !swarm.value) {
+        return { content: [{ type: 'text' as const, text: `Swarm "${swarmId}" not found` }], isError: true };
+      }
+
+      const agents = storage.getSwarmAgents(swarm.value.id);
+      if (!agents.ok) {
+        return { content: [{ type: 'text' as const, text: 'Failed to get agents' }], isError: true };
+      }
+
+      const agent = agents.value.find((a) => a.agent_name === agentName);
+      if (!agent) {
+        return { content: [{ type: 'text' as const, text: `Agent "${agentName}" not found in swarm` }], isError: true };
+      }
+
+      let persona: Record<string, unknown> = {};
+      try { persona = JSON.parse(agent.persona); } catch {}
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          name: agent.agent_name,
+          role: persona.role,
+          description: persona.description,
+          scope: persona.scope,
+          status: agent.status,
+          task: agent.task_prompt,
+          duration: agent.duration_seconds,
+          exitCode: agent.exit_code,
+          filesChanged: agent.files_changed ? JSON.parse(agent.files_changed) : [],
+          linesAdded: agent.lines_added,
+          linesRemoved: agent.lines_removed,
+          cost: agent.cost_usd,
+          tokens: agent.tokens_used,
+          driftScore: agent.final_drift_score,
+          errorCount: agent.error_count,
+          mergeStatus: agent.merge_status,
+          output: agent.output?.slice(-2000),
+          sessionId: agent.session_id,
+        }, null, 2) }],
       };
     },
   );

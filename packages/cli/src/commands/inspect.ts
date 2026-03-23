@@ -1,8 +1,6 @@
 import { Command } from 'commander';
-import { join } from 'node:path';
-import { existsSync } from 'node:fs';
 import chalk from 'chalk';
-import { Storage } from '@mklamine/hawkeye-core';
+import { formatAmbiguousSessionMessage, openTraceStorage, resolveSession, traceDbExists } from './storage-helpers.js';
 
 const o = chalk.hex('#ff5f1f');
 
@@ -14,22 +12,25 @@ export const inspectCommand = new Command('inspect')
   .option('--drift', 'Show drift history only')
   .option('--llm', 'Show LLM calls only')
   .action((sessionIdInput: string, options) => {
-    const dbPath = join(process.cwd(), '.hawkeye', 'traces.db');
-
-    if (!existsSync(dbPath)) {
+    if (!traceDbExists()) {
       console.error(chalk.red('No database found. Run `hawkeye init` first.'));
       return;
     }
 
-    const storage = new Storage(dbPath);
+    const storage = openTraceStorage();
 
-    // Resolve short IDs
-    const resolved = resolveSessionId(storage, sessionIdInput);
-    if (!resolved) {
+    const sessionMatch = resolveSession(storage, sessionIdInput);
+    if (sessionMatch.kind === 'ambiguous') {
+      console.error(chalk.yellow(formatAmbiguousSessionMessage(sessionMatch.matches)));
+      storage.close();
+      return;
+    }
+    if (!sessionMatch.session) {
       console.error(chalk.red(`Session not found: ${sessionIdInput}`));
       storage.close();
       return;
     }
+    const resolved = sessionMatch.session.id;
 
     const sessionResult = storage.getSession(resolved);
     if (!sessionResult.ok || !sessionResult.value) {
@@ -203,22 +204,6 @@ export const inspectCommand = new Command('inspect')
     console.log(o('└─────────────────────────────────────────────────────────'));
     console.log('');
   });
-
-function resolveSessionId(storage: Storage, input: string): string | null {
-  const exact = storage.getSession(input);
-  if (exact.ok && exact.value) return input;
-
-  const all = storage.listSessions();
-  if (!all.ok) return null;
-
-  const matches = all.value.filter((s) => s.id.startsWith(input));
-  if (matches.length === 1) return matches[0].id;
-  if (matches.length > 1) {
-    console.error(chalk.yellow(`Ambiguous session ID. Matches: ${matches.map((s) => s.id.slice(0, 8)).join(', ')}`));
-    return null;
-  }
-  return null;
-}
 
 function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000);

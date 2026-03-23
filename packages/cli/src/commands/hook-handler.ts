@@ -16,8 +16,8 @@ import { join, extname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { Storage, scoreHeuristic, slidingDriftScore, scanContent } from '@mklamine/hawkeye-core';
-import type { TraceEvent, EventType, DriftFlag } from '@mklamine/hawkeye-core';
+import { Storage, scoreHeuristic, slidingDriftScore, scanContent, evaluateAndCorrect, buildCorrectionHint, getDefaultAutocorrectConfig } from '@mklamine/hawkeye-core';
+import type { TraceEvent, EventType, DriftFlag, AutocorrectConfig, AutocorrectContext, CorrectionRecord } from '@mklamine/hawkeye-core';
 import { getDeveloperName } from '../config.js';
 import { analyzeImpact, formatImpactPreview, shouldBlockAction, shouldWarnAction } from '../impact.js';
 import type { ImpactPreview } from '../impact.js';
@@ -248,6 +248,8 @@ interface GuardrailConfig {
   contentGuardrails: ContentGuardrailConfig;
   autoPause: boolean;
   webhooks: WebhookConfig[];
+  autocorrect: AutocorrectConfig;
+  costLimit: number | null;
 }
 
 function loadGuardrailConfig(): GuardrailConfig {
@@ -266,6 +268,8 @@ function loadGuardrailConfig(): GuardrailConfig {
     contentGuardrails: { piiFilter: null, promptShield: null },
     autoPause: true,
     webhooks: [],
+    autocorrect: getDefaultAutocorrectConfig(),
+    costLimit: null,
   };
 
   // Load custom config from .hawkeye/config.json if exists
@@ -335,6 +339,32 @@ function loadGuardrailConfig(): GuardrailConfig {
       // Load webhooks
       if (config.webhooks?.length) {
         defaults.webhooks = config.webhooks.filter((w: WebhookConfig) => w.enabled);
+      }
+
+      // Load autocorrect config
+      if (config.autocorrect) {
+        defaults.autocorrect = {
+          enabled: config.autocorrect.enabled ?? false,
+          dryRun: config.autocorrect.dryRun ?? false,
+          triggers: {
+            driftCritical: config.autocorrect.triggers?.driftCritical ?? true,
+            errorRepeat: config.autocorrect.triggers?.errorRepeat ?? 3,
+            costThreshold: config.autocorrect.triggers?.costThreshold ?? 85,
+          },
+          actions: {
+            rollbackFiles: config.autocorrect.actions?.rollbackFiles ?? true,
+            pauseSession: config.autocorrect.actions?.pauseSession ?? true,
+            injectHint: config.autocorrect.actions?.injectHint ?? true,
+            blockPattern: config.autocorrect.actions?.blockPattern ?? true,
+          },
+        };
+      }
+
+      // Load cost limit for autocorrect context
+      for (const rule of rules) {
+        if (rule.type === 'cost_limit' && rule.enabled && rule.config?.maxUsdPerSession) {
+          defaults.costLimit = Number(rule.config.maxUsdPerSession);
+        }
       }
     }
   } catch (e) {
@@ -1137,6 +1167,60 @@ function runDriftCheck(
   }
 }
 
+// ── Autocorrect helpers ──
+
+function computeErrorPatterns(storage: Storage, sessionId: string): Array<{ pattern: string; count: number }> {
+  try {
+    const evts = storage.getEvents(sessionId, { limit: 100 });
+    if (!evts.ok) return [];
+    const map = new Map<string, number>();
+    for (const e of evts.value) {
+      if (e.type !== 'error') continue;
+      try {
+        const data = JSON.parse(e.data);
+        const msg = String(data.message || 'unknown')
+          .replace(/\d+/g, 'N')
+          .replace(/'[^']*'/g, "'...'")
+          .replace(/"[^"]*"/g, '"..."')
+          .trim().slice(0, 80).toLowerCase();
+        map.set(msg, (map.get(msg) || 0) + 1);
+      } catch {}
+    }
+    return [...map.entries()].map(([pattern, count]) => ({ pattern, count })).sort((a, b) => b.count - a.count);
+  } catch {
+    return [];
+  }
+}
+
+function computeFilesChanged(storage: Storage, sessionId: string): string[] {
+  try {
+    const evts = storage.getEvents(sessionId, { limit: 200 });
+    if (!evts.ok) return [];
+    const files = new Set<string>();
+    for (const e of evts.value) {
+      if (['file_write', 'file_delete', 'file_create'].includes(e.type)) {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.path) files.add(String(data.path));
+        } catch {}
+      }
+    }
+    return [...files];
+  } catch {
+    return [];
+  }
+}
+
+function computeDriftTrend(driftScores: number[]): 'stable' | 'declining' | 'improving' {
+  if (driftScores.length < 3) return 'stable';
+  const recent = driftScores.slice(-3);
+  const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const first = recent[0];
+  if (avg < first - 5) return 'declining';
+  if (avg > first + 5) return 'improving';
+  return 'stable';
+}
+
 // ── Read stdin ──
 
 async function readStdin(): Promise<string> {
@@ -1658,6 +1742,81 @@ export const hookHandlerCommand = new Command('hook-handler')
                 objective: session.objective,
                 autoPaused: guardConfig.autoPause,
               });
+            }
+          }
+
+          // ── Autocorrect engine ──
+          if (guardConfig.autocorrect.enabled) {
+            try {
+              const errorPatterns = computeErrorPatterns(storage, session.hawkeyeSessionId);
+              const filesChanged = computeFilesChanged(storage, session.hawkeyeSessionId);
+              const driftTrend = computeDriftTrend(session.driftScores);
+
+              const acCtx: AutocorrectContext = {
+                sessionId: session.hawkeyeSessionId,
+                workingDir: process.cwd(),
+                objective: session.objective,
+                driftScore: drift?.score ?? (session.driftScores.length > 0 ? slidingDriftScore(session.driftScores) : null),
+                driftFlag: drift?.flag ?? 'ok',
+                driftTrend,
+                totalCost: session.totalCostUsd + costUsd,
+                costBudget: guardConfig.costLimit,
+                errorPatterns,
+                filesChanged,
+                recentEvents: [],
+              };
+
+              const correctionRecord = evaluateAndCorrect(acCtx, guardConfig.autocorrect);
+
+              if (correctionRecord) {
+                correctionRecord.id = randomUUID();
+
+                // Execute side effects
+                for (const c of correctionRecord.corrections) {
+                  if (c.type === 'pause_session' && c.executed) {
+                    storage.pauseSession(session.hawkeyeSessionId);
+                  }
+                  if (c.type === 'inject_hint' && c.executed) {
+                    const hint = buildCorrectionHint(correctionRecord, session.objective);
+                    try {
+                      writeFileSync(
+                        join(getHawkDir(), 'active-correction.json'),
+                        JSON.stringify(hint, null, 2),
+                      );
+                    } catch {}
+                  }
+                  if (c.type === 'notify' && c.executed && guardConfig.webhooks.length > 0) {
+                    fireWebhooks(guardConfig.webhooks, 'autocorrect', {
+                      sessionId: session.hawkeyeSessionId,
+                      trigger: correctionRecord.trigger,
+                      corrections: correctionRecord.corrections.map((cc) => ({
+                        type: cc.type,
+                        description: cc.description,
+                        executed: cc.executed,
+                        result: cc.result,
+                      })),
+                    });
+                  }
+                }
+
+                // Persist correction record
+                storage.insertCorrection({
+                  id: correctionRecord.id,
+                  session_id: correctionRecord.sessionId,
+                  timestamp: correctionRecord.timestamp,
+                  trigger: correctionRecord.trigger,
+                  assessment: JSON.stringify(correctionRecord.assessment),
+                  corrections: JSON.stringify(correctionRecord.corrections),
+                  dry_run: correctionRecord.dryRun ? 1 : 0,
+                });
+
+                const executed = correctionRecord.corrections.filter((c) => c.executed);
+                process.stderr.write(
+                  `[hawkeye] Autocorrect: ${correctionRecord.trigger} → ${executed.length} correction(s) executed${correctionRecord.dryRun ? ' (dry run)' : ''}\n`,
+                );
+              }
+            } catch (acErr) {
+              process.stderr.write(`[hawkeye] Autocorrect error: ${String(acErr)}\n`);
             }
           }
 

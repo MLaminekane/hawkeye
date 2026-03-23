@@ -1,21 +1,18 @@
 import { Command } from 'commander';
-import { join } from 'node:path';
-import { existsSync } from 'node:fs';
 import chalk from 'chalk';
 import { Storage } from '@mklamine/hawkeye-core';
+import { formatAmbiguousSessionMessage, openTraceStorage, resolveSession, traceDbExists } from './storage-helpers.js';
 
 export const statsCommand = new Command('stats')
   .description('Show statistics for a session, or global stats if no session given')
   .argument('[session-id]', 'Session ID (full or prefix). Omit for global stats')
   .action((sessionId: string | undefined) => {
-    const dbPath = join(process.cwd(), '.hawkeye', 'traces.db');
-
-    if (!existsSync(dbPath)) {
+    if (!traceDbExists()) {
       console.error(chalk.red('No database found. Run `hawkeye init` first.'));
       return;
     }
 
-    const storage = new Storage(dbPath);
+    const storage = openTraceStorage();
 
     if (!sessionId) {
       showGlobalStats(storage);
@@ -24,12 +21,18 @@ export const statsCommand = new Command('stats')
     }
 
     // Support short IDs: find the matching session
-    const resolved = resolveSessionId(storage, sessionId);
-    if (!resolved) {
+    const sessionMatch = resolveSession(storage, sessionId);
+    if (sessionMatch.kind === 'ambiguous') {
+      console.error(chalk.yellow(formatAmbiguousSessionMessage(sessionMatch.matches)));
+      storage.close();
+      return;
+    }
+    if (!sessionMatch.session) {
       console.error(chalk.red(`Session not found: ${sessionId}`));
       storage.close();
       return;
     }
+    const resolved = sessionMatch.session.id;
 
     const sessionResult = storage.getSession(resolved);
     if (!sessionResult.ok || !sessionResult.value) {
@@ -180,25 +183,6 @@ function showGlobalStats(storage: Storage): void {
     console.log(`  Last Session:     ${chalk.dim(new Date(g.last_session!).toLocaleString())}`);
   }
   console.log('');
-}
-
-function resolveSessionId(storage: Storage, input: string): string | null {
-  // Try exact match first
-  const exact = storage.getSession(input);
-  if (exact.ok && exact.value) return input;
-
-  // Try prefix match
-  const all = storage.listSessions();
-  if (!all.ok) return null;
-
-  const matches = all.value.filter((s) => s.id.startsWith(input));
-  if (matches.length === 1) return matches[0].id;
-  if (matches.length > 1) {
-    console.error(chalk.yellow(`Ambiguous session ID. Matches: ${matches.map((s) => s.id.slice(0, 8)).join(', ')}`));
-    return null;
-  }
-
-  return null;
 }
 
 function formatDuration(ms: number): string {

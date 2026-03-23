@@ -1,11 +1,12 @@
 import { createInterface } from 'node:readline';
-import { join } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
-import { Storage, type SessionRow, type EventRow } from '@mklamine/hawkeye-core';
+import { Storage, analyzeRootCause, extractMemories, diffMemories, detectHallucinations, buildCumulativeMemory, type SessionRow, type EventRow, type RcaResult, type CausalStep, type MemoryItem } from '@mklamine/hawkeye-core';
 import {
   loadConfig,
   saveConfig,
@@ -18,7 +19,9 @@ import {
 import { loadTasks, createTask, saveTasks, readJournal, clearJournal, type Task } from './commands/daemon.js';
 import { loadPolicy, savePolicy, generateTemplate, validatePolicy, policyExists, getPolicyPath, configToPolicy, policyToYaml } from './policy.js';
 
-const VERSION = '0.1.0';
+const currentDir = dirname(fileURLToPath(import.meta.url));
+const packageJson = JSON.parse(readFileSync(join(currentDir, '..', 'package.json'), 'utf8')) as { version?: string };
+const VERSION = packageJson.version ?? '0.1.13';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -73,6 +76,10 @@ const COMMANDS: SlashCommand[] = [
   { name: 'settings', desc: 'Configure Hawkeye' },
   { name: 'tasks', desc: 'List & submit remote tasks' },
   { name: 'firewall', desc: 'Show recent interceptions & impact previews' },
+  { name: 'analyze', desc: 'Root cause analysis — find why a session failed' },
+  { name: 'memory', desc: 'Memory diff — what an agent remembers across sessions' },
+  { name: 'autocorrect', desc: 'Autonomous control — auto-correct agent behavior' },
+  { name: 'swarm', desc: 'Multi-agent orchestration — list/show/init swarm runs' },
   { name: 'policy', desc: 'Manage security policies (init/check/show)' },
   { name: 'overnight', desc: 'Run overnight mode (guardrails + morning report)' },
   { name: 'report', desc: 'Generate morning report' },
@@ -83,7 +90,7 @@ const COMMANDS: SlashCommand[] = [
   { name: 'init', desc: 'Initialize Hawkeye (auto-runs on /new)' },
   { name: 'clear', desc: 'Clear screen' },
   { name: 'quit', desc: 'Exit' },
-];
+].sort((left, right) => left.name.localeCompare(right.name));
 
 const o = chalk.hex('#ff5f1f');
 
@@ -564,6 +571,14 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     await cmdTasks(cwd, args);
   } else if (c === 'firewall') {
     await cmdFirewall(dbPath);
+  } else if (c === 'analyze') {
+    await cmdAnalyze(dbPath, cwd, args);
+  } else if (c === 'memory') {
+    await cmdMemory(dbPath, cwd, args);
+  } else if (c === 'autocorrect') {
+    await cmdAutocorrect(dbPath, cwd, args);
+  } else if (c === 'swarm') {
+    await cmdSwarm(dbPath, cwd, args);
   } else if (c === 'policy') {
     await cmdPolicy(cwd, args);
   } else if (c === 'overnight') {
@@ -1085,11 +1100,12 @@ interface AgentDef {
 }
 
 const AGENTS: AgentDef[] = [
-  { name: 'Claude Code', command: 'claude', description: 'Anthropic Claude Code CLI', usesHooks: true },
   { name: 'Aider', command: 'aider', description: 'AI pair programming (supports DeepSeek, OpenAI, etc.)', needsInstall: 'brew install aider' },
-  { name: 'Open Interpreter', command: 'interpreter', description: 'Natural language → code execution', needsInstall: 'pipx install open-interpreter' },
+  { name: 'Claude Code', command: 'claude', description: 'Anthropic Claude Code CLI', usesHooks: true },
+  { name: 'Codex', command: 'codex', description: 'OpenAI Codex CLI', needsInstall: 'npm install -g @openai/codex' },
   { name: 'Custom command', command: '', description: 'Enter any command manually' },
-];
+  { name: 'Open Interpreter', command: 'interpreter', description: 'Natural language → code execution', needsInstall: 'pipx install open-interpreter' },
+].sort((left, right) => left.name.localeCompare(right.name));
 
 async function cmdNew(cwd: string): Promise<void> {
   console.log('');
@@ -1721,6 +1737,755 @@ function revertSingleEvent(
   }
 }
 
+async function cmdAnalyze(dbPath: string, cwd: string, args: string): Promise<void> {
+  const storage = new Storage(dbPath);
+  const sessionsResult = storage.listSessions();
+  if (!sessionsResult.ok || !sessionsResult.value || sessionsResult.value.length === 0) {
+    console.log(chalk.yellow('  No sessions found.'));
+    storage.close();
+    return;
+  }
+
+  // Resolve session
+  let session: SessionRow | undefined;
+  const sid = args.trim();
+  if (sid) {
+    session = sessionsResult.value.find(
+      (s: SessionRow) => s.id === sid || (sid.length >= 4 && s.id.startsWith(sid)),
+    );
+  } else {
+    // Use most recent completed/aborted session
+    session = sessionsResult.value.find((s: SessionRow) => s.status !== 'recording');
+  }
+
+  if (!session) {
+    console.log(chalk.yellow(`  Session not found: ${sid || '(none available)'}`));
+    storage.close();
+    return;
+  }
+
+  const eventsResult = storage.getEvents(session.id);
+  const events = eventsResult.ok && eventsResult.value ? eventsResult.value : [];
+  const driftResult = storage.getDriftSnapshots(session.id);
+  const driftSnapshots = driftResult.ok && driftResult.value ? driftResult.value : [];
+  storage.close();
+
+  if (events.length === 0) {
+    console.log(chalk.yellow('  No events in this session.'));
+    return;
+  }
+
+  const rcaEvents = events.map((e) => ({
+    id: e.id, sequence: e.sequence, timestamp: e.timestamp, type: e.type,
+    data: e.data, drift_score: e.drift_score, drift_flag: e.drift_flag, cost_usd: e.cost_usd,
+  }));
+
+  const rcaSession = {
+    id: session.id, objective: session.objective, agent: session.agent, status: session.status,
+    started_at: session.started_at, ended_at: session.ended_at,
+    total_cost_usd: session.total_cost_usd, final_drift_score: session.final_drift_score,
+  };
+
+  const result = analyzeRootCause(rcaSession, rcaEvents, driftSnapshots);
+
+  // Print report
+  const w = tw();
+  const hr2 = o('─'.repeat(w));
+
+  console.log();
+  console.log(hr2);
+  console.log(o('  Root Cause Analysis') + chalk.gray(` — ${session.id.slice(0, 8)} — ${session.objective.slice(0, 50)}`));
+  console.log(hr2);
+
+  // Outcome
+  const ob = result.outcome === 'success' ? chalk.green(' SUCCESS ')
+    : result.outcome === 'failure' ? chalk.red(' FAILURE ')
+    : result.outcome === 'partial' ? chalk.yellow(' PARTIAL ')
+    : chalk.gray(' UNKNOWN ');
+  console.log(`\n  ${ob}  ${chalk.gray(`confidence: ${result.confidence}`)}`);
+
+  // Summary
+  console.log(`\n  ${o('SUMMARY')}`);
+  console.log(chalk.white(`  ${result.summary}`));
+
+  // Primary error
+  if (result.primaryError) {
+    console.log(`\n  ${o('PRIMARY ERROR')} ${chalk.gray(`(event #${result.primaryError.sequence})`)}`);
+    console.log(chalk.red(`  ${result.primaryError.description}`));
+    console.log(chalk.gray(`  at ${new Date(result.primaryError.timestamp).toLocaleTimeString()} — ${result.primaryError.type}`));
+  }
+
+  // Causal chain
+  if (result.causalChain.length > 0) {
+    console.log(`\n  ${o('CAUSAL CHAIN')}`);
+    for (const step of result.causalChain) {
+      const icon = step.relevance === 'root_cause' ? chalk.red('●')
+        : step.relevance === 'contributing' ? chalk.yellow('◐')
+        : step.relevance === 'effect' ? chalk.gray('○') : chalk.blue('◇');
+      console.log(`  ${chalk.gray(`#${String(step.sequence).padStart(3)}`)} ${icon} ${chalk.white(step.description.slice(0, w - 15))}`);
+      if (step.explanation) console.log(chalk.gray(`        ↳ ${step.explanation}`));
+    }
+  }
+
+  // Error patterns
+  if (result.errorPatterns.length > 0) {
+    console.log(`\n  ${o('ERROR PATTERNS')}`);
+    for (const pat of result.errorPatterns.slice(0, 5)) {
+      console.log(`  ${chalk.red(`${pat.count}x`)} ${chalk.white(pat.pattern)}`);
+    }
+  }
+
+  // Drift
+  if (result.driftAnalysis) {
+    const da = result.driftAnalysis;
+    const tc = da.trend === 'declining' ? chalk.red : da.trend === 'volatile' ? chalk.yellow : chalk.green;
+    console.log(`\n  ${o('DRIFT')}`);
+    console.log(`  Trend: ${tc(da.trend)} — Score: ${da.lowestScore} → ${da.highestScore}`);
+    if (da.inflectionPoint) {
+      console.log(chalk.yellow(`  Inflection at #${da.inflectionPoint.sequence}: ${da.inflectionPoint.scoreBefore} → ${da.inflectionPoint.scoreAfter}`));
+    }
+  }
+
+  // Suggestions
+  if (result.suggestions.length > 0) {
+    console.log(`\n  ${o('SUGGESTIONS')}`);
+    result.suggestions.forEach((s, i) => console.log(chalk.white(`  ${i + 1}. ${s}`)));
+  }
+
+  console.log(`\n${hr2}\n`);
+}
+
+function loadOrExtractMem(storage: Storage, session: SessionRow): MemoryItem[] {
+  const cached = storage.getMemoryItems(session.id);
+  if (cached.ok && cached.value && cached.value.length > 0) {
+    return cached.value.map((r) => ({
+      id: r.id, sessionId: r.session_id, sequence: r.sequence, timestamp: r.timestamp,
+      category: r.category as MemoryItem['category'], key: r.key, content: r.content,
+      evidence: r.evidence, confidence: r.confidence as MemoryItem['confidence'],
+      supersedes: r.supersedes ?? undefined, contradicts: r.contradicts ?? undefined,
+    }));
+  }
+
+  const eventsResult = storage.getEvents(session.id);
+  const events = (eventsResult.ok && eventsResult.value ? eventsResult.value : []).map((e) => ({
+    id: e.id, sequence: e.sequence, timestamp: e.timestamp, type: e.type,
+    data: e.data, drift_score: e.drift_score, cost_usd: e.cost_usd,
+  }));
+
+  const memSession = { id: session.id, objective: session.objective, agent: session.agent, status: session.status, started_at: session.started_at, ended_at: session.ended_at };
+  const memories = extractMemories(memSession, events);
+
+  storage.upsertMemoryItems(session.id, memories.map((m) => ({
+    id: m.id, session_id: m.sessionId, sequence: m.sequence, timestamp: m.timestamp,
+    category: m.category, key: m.key, content: m.content, evidence: m.evidence,
+    confidence: m.confidence, supersedes: m.supersedes ?? null, contradicts: m.contradicts ?? null,
+  })));
+
+  return memories;
+}
+
+async function cmdMemory(dbPath: string, cwd: string, args: string): Promise<void> {
+  const storage = new Storage(dbPath);
+  const sessionsResult = storage.listSessions();
+  if (!sessionsResult.ok || !sessionsResult.value || sessionsResult.value.length === 0) {
+    console.log(chalk.yellow('  No sessions found.'));
+    storage.close();
+    return;
+  }
+
+  const parts = args.trim().split(/\s+/);
+  const sub = parts[0]?.toLowerCase() || '';
+
+  // /memory diff <sidA> <sidB>
+  if (sub === 'diff') {
+    const argA = parts[1] || '';
+    const argB = parts[2] || '';
+    const sA = argA ? sessionsResult.value.find((s: SessionRow) => s.id === argA || (argA.length >= 4 && s.id.startsWith(argA)))
+      : sessionsResult.value[1]; // second most recent
+    const sB = argB ? sessionsResult.value.find((s: SessionRow) => s.id === argB || (argB.length >= 4 && s.id.startsWith(argB)))
+      : sessionsResult.value[0]; // most recent
+
+    if (!sA || !sB) {
+      console.log(chalk.yellow('  Need two sessions. Usage: /memory diff <sessionA> <sessionB>'));
+      storage.close();
+      return;
+    }
+
+    const memA = loadOrExtractMem(storage, sA);
+    const memB = loadOrExtractMem(storage, sB);
+
+    const msA = { id: sA.id, objective: sA.objective, agent: sA.agent, status: sA.status, started_at: sA.started_at, ended_at: sA.ended_at };
+    const msB = { id: sB.id, objective: sB.objective, agent: sB.agent, status: sB.status, started_at: sB.started_at, ended_at: sB.ended_at };
+
+    const result = diffMemories(memA, memB, msA, msB);
+    const memBySession = new Map<string, MemoryItem[]>();
+    memBySession.set(sA.id, memA);
+    memBySession.set(sB.id, memB);
+    result.hallucinations = detectHallucinations(memBySession);
+
+    const w = tw();
+    const hr2 = o('─'.repeat(w));
+    console.log(`\n${hr2}`);
+    console.log(o('  Memory Diff'));
+    console.log(chalk.gray(`  A: ${sA.id.slice(0, 8)} — ${sA.objective.slice(0, 50)}`));
+    console.log(chalk.gray(`  B: ${sB.id.slice(0, 8)} — ${sB.objective.slice(0, 50)}`));
+    console.log(hr2);
+    console.log(chalk.white(`\n  ${result.summary}\n`));
+
+    if (result.learned.length > 0) {
+      console.log(chalk.green(`  LEARNED (${result.learned.length})`));
+      for (const item of result.learned.slice(0, 10)) console.log(chalk.green('    + ') + chalk.white(item.after?.content || ''));
+      console.log();
+    }
+    if (result.forgotten.length > 0) {
+      console.log(chalk.red(`  FORGOTTEN (${result.forgotten.length})`));
+      for (const item of result.forgotten.slice(0, 10)) console.log(chalk.red('    - ') + chalk.white(item.before?.content || ''));
+      console.log();
+    }
+    if (result.evolved.length > 0) {
+      console.log(chalk.hex('#f0a830')(`  EVOLVED (${result.evolved.length})`));
+      for (const item of result.evolved.slice(0, 5)) {
+        console.log(chalk.gray('    Before: ') + chalk.white(item.before?.content || ''));
+        console.log(chalk.hex('#f0a830')('    After:  ') + chalk.white(item.after?.content || ''));
+      }
+      console.log();
+    }
+    if (result.contradicted.length > 0) {
+      console.log(chalk.red.bold(`  CONTRADICTED (${result.contradicted.length})`));
+      for (const item of result.contradicted.slice(0, 5)) console.log(chalk.red('    ✗ ') + chalk.white(item.explanation));
+      console.log();
+    }
+    if (result.hallucinations.length > 0) {
+      console.log(chalk.magenta(`  HALLUCINATIONS (${result.hallucinations.length})`));
+      for (const h of result.hallucinations.slice(0, 5)) {
+        console.log(chalk.magenta('    ⚠ ') + chalk.white(`[${h.type}] ${h.claim.slice(0, 70)}`));
+        console.log(chalk.gray(`      ${h.evidence}`));
+      }
+      console.log();
+    }
+    console.log(`${hr2}\n`);
+    storage.close();
+    return;
+  }
+
+  // /memory hallucinations
+  if (sub === 'hallucinations') {
+    const memBySession = new Map<string, MemoryItem[]>();
+    for (const s of sessionsResult.value.slice(0, 20)) {
+      memBySession.set(s.id, loadOrExtractMem(storage, s));
+    }
+    const hallu = detectHallucinations(memBySession);
+    if (hallu.length === 0) {
+      console.log(chalk.green('  No hallucinations detected.'));
+    } else {
+      console.log(chalk.magenta(`\n  HALLUCINATIONS (${hallu.length})`));
+      for (const h of hallu) {
+        console.log(chalk.magenta('    ⚠ ') + chalk.white(`[${h.type}] ${h.claim.slice(0, 70)}`));
+        console.log(chalk.gray(`      ${h.evidence}`));
+        console.log(chalk.gray(`      Across ${h.occurrences.length} sessions`));
+      }
+    }
+    storage.close();
+    return;
+  }
+
+  // /memory <session-id> or /memory (show cumulative)
+  if (sub && sub !== 'cumulative') {
+    // Try to resolve as session ID
+    const session = sessionsResult.value.find(
+      (s: SessionRow) => s.id === sub || (sub.length >= 4 && s.id.startsWith(sub)),
+    );
+    if (session) {
+      const memories = loadOrExtractMem(storage, session);
+      const w = tw();
+      const hr2 = o('─'.repeat(w));
+      console.log(`\n${hr2}`);
+      console.log(o('  Agent Memory') + chalk.gray(` — ${session.id.slice(0, 8)} — ${memories.length} items`));
+      console.log(hr2);
+
+      const byCat = new Map<string, MemoryItem[]>();
+      for (const m of memories) {
+        const list = byCat.get(m.category) || [];
+        list.push(m);
+        byCat.set(m.category, list);
+      }
+      for (const [cat, items] of byCat) {
+        const label: Record<string, string> = {
+          file_knowledge: 'Files', error_lesson: 'Error Lessons', correction: 'Corrections',
+          tool_pattern: 'Tool Patterns', decision: 'Decisions', dependency_fact: 'Dependencies', api_knowledge: 'API Knowledge',
+        };
+        console.log(`\n  ${o(label[cat] || cat)} ${chalk.gray(`(${items.length})`)}`);
+        for (const item of items.slice(0, 8)) {
+          const conf = item.confidence === 'high' ? chalk.green('●') : item.confidence === 'medium' ? chalk.yellow('◐') : chalk.red('○');
+          console.log(`    ${conf} ${chalk.white(item.content)}`);
+        }
+        if (items.length > 8) console.log(chalk.gray(`    ... and ${items.length - 8} more`));
+      }
+      console.log(`\n${hr2}\n`);
+      storage.close();
+      return;
+    }
+  }
+
+  // Default: cumulative
+  const sessionMemories = sessionsResult.value.slice(0, 20).map((s: SessionRow) => ({
+    session: { id: s.id, objective: s.objective, agent: s.agent, status: s.status, started_at: s.started_at, ended_at: s.ended_at },
+    memories: loadOrExtractMem(storage, s),
+  }));
+
+  const cumulative = buildCumulativeMemory(sessionMemories);
+  const w = tw();
+  const hr2 = o('─'.repeat(w));
+  console.log(`\n${hr2}`);
+  console.log(o('  Cumulative Agent Memory'));
+  console.log(hr2);
+  console.log(chalk.gray(`  ${cumulative.totalSessions} sessions, ${cumulative.stats.totalItems} unique memories`));
+  console.log(chalk.gray(`  ${cumulative.stats.corrections} corrections, ${cumulative.stats.contradictions} contradictions`));
+
+  const byCat = new Map<string, MemoryItem[]>();
+  for (const item of cumulative.items) {
+    const list = byCat.get(item.category) || [];
+    list.push(item);
+    byCat.set(item.category, list);
+  }
+  for (const [cat, items] of byCat) {
+    const label: Record<string, string> = {
+      file_knowledge: 'Files', error_lesson: 'Error Lessons', correction: 'Corrections',
+      tool_pattern: 'Tool Patterns', decision: 'Decisions', dependency_fact: 'Dependencies', api_knowledge: 'API Knowledge',
+    };
+    console.log(`\n  ${o(label[cat] || cat)} ${chalk.gray(`(${items.length})`)}`);
+    for (const item of items.slice(0, 5)) {
+      const conf = item.confidence === 'high' ? chalk.green('●') : item.confidence === 'medium' ? chalk.yellow('◐') : chalk.red('○');
+      console.log(`    ${conf} ${chalk.white(item.content)}`);
+    }
+    if (items.length > 5) console.log(chalk.gray(`    ... and ${items.length - 5} more`));
+  }
+
+  if (cumulative.hallucinations.length > 0) {
+    console.log(chalk.magenta(`\n  HALLUCINATIONS (${cumulative.hallucinations.length})`));
+    for (const h of cumulative.hallucinations.slice(0, 5)) {
+      console.log(chalk.magenta('    ⚠ ') + chalk.white(`[${h.type}] ${h.claim.slice(0, 70)}`));
+    }
+  }
+  console.log(`\n${hr2}\n`);
+  storage.close();
+}
+
+async function cmdAutocorrect(dbPath: string, cwd: string, args: string): Promise<void> {
+  const sub = args.trim().toLowerCase();
+  const config = loadConfig(cwd);
+  const hr2 = hr();
+
+  if (!sub || sub === 'status') {
+    console.log(o('\n  ⚡ Autocorrect — Autonomous Control Layer'));
+    console.log(chalk.gray('  ─────────────────────────────────────'));
+    const ac = config.autocorrect;
+    if (!ac || !ac.enabled) {
+      console.log(chalk.gray('  Status: ') + chalk.red('disabled'));
+      console.log(chalk.gray('\n  Enable: ') + chalk.white('/autocorrect enable'));
+    } else {
+      console.log(chalk.gray('  Status: ') + chalk.green('enabled') + (ac.dryRun ? chalk.yellow(' (dry run)') : ''));
+      console.log(chalk.gray('  Triggers: ') +
+        (ac.triggers.driftCritical ? chalk.green('drift ') : '') +
+        (ac.triggers.errorRepeat > 0 ? chalk.green(`errors≥${ac.triggers.errorRepeat} `) : '') +
+        (ac.triggers.costThreshold > 0 ? chalk.green(`cost≥${ac.triggers.costThreshold}%`) : ''));
+      console.log(chalk.gray('  Actions:  ') +
+        (ac.actions.rollbackFiles ? chalk.white('rollback ') : '') +
+        (ac.actions.pauseSession ? chalk.white('pause ') : '') +
+        (ac.actions.injectHint ? chalk.white('hint ') : '') +
+        (ac.actions.blockPattern ? chalk.white('block') : ''));
+    }
+    // Active correction?
+    try {
+      const hintPath = join(cwd, '.hawkeye', 'active-correction.json');
+      if (existsSync(hintPath)) {
+        const hint = JSON.parse(readFileSync(hintPath, 'utf-8'));
+        console.log(chalk.yellow('\n  ⚠ Active correction:'));
+        console.log(`    ${chalk.gray('Trigger:')} ${o(hint.trigger)}  ${chalk.gray('Urgency:')} ${hint.urgency}`);
+        console.log(`    ${chalk.gray('Diagnosis:')} ${hint.diagnosis}`);
+        if (hint.corrections?.length) {
+          for (const c of hint.corrections as Array<{ type: string; description: string; executed: boolean }>) {
+            const icon = c.executed ? chalk.green('✓') : chalk.gray('○');
+            console.log(`    ${icon} ${c.type}: ${c.description}`);
+          }
+        }
+      }
+    } catch {}
+    console.log(`\n${hr2}\n`);
+    return;
+  }
+
+  if (sub === 'enable' || sub === 'enable --dry-run' || sub.startsWith('enable')) {
+    const dryRun = sub.includes('dry');
+    config.autocorrect = {
+      enabled: true,
+      dryRun,
+      triggers: config.autocorrect?.triggers || { driftCritical: true, errorRepeat: 3, costThreshold: 85 },
+      actions: config.autocorrect?.actions || { rollbackFiles: true, pauseSession: true, injectHint: true, blockPattern: true },
+    };
+    saveConfig(cwd, config);
+    console.log(o('  ⚡ Autocorrect enabled') + (dryRun ? chalk.yellow(' (dry run)') : ''));
+    console.log(chalk.gray('  Hawkeye will autonomously correct drift, errors, and cost overruns.\n'));
+    return;
+  }
+
+  if (sub === 'disable') {
+    if (config.autocorrect) config.autocorrect.enabled = false;
+    saveConfig(cwd, config);
+    try { const hp = join(cwd, '.hawkeye', 'active-correction.json'); if (existsSync(hp)) unlinkSync(hp); } catch {}
+    console.log(chalk.gray('  Autocorrect disabled.\n'));
+    return;
+  }
+
+  if (sub === 'clear') {
+    try { const hp = join(cwd, '.hawkeye', 'active-correction.json'); if (existsSync(hp)) unlinkSync(hp); } catch {}
+    console.log(chalk.gray('  Active correction cleared.\n'));
+    return;
+  }
+
+  if (sub === 'history' || sub.startsWith('history')) {
+    const sid = sub.replace('history', '').trim();
+    if (!existsSync(dbPath)) { console.log(chalk.gray('No database.')); return; }
+    const storage = new Storage(dbPath);
+    try {
+      const result = sid ? storage.getCorrections(sid) : storage.getAllCorrections(15);
+      const rows = result.ok ? result.value : [];
+      if (rows.length === 0) { console.log(chalk.gray('  No corrections recorded.\n')); return; }
+
+      console.log(o(`\n  ⚡ Correction History (${rows.length})\n`));
+      for (const r of rows) {
+        const corrections = (() => { try { return JSON.parse(r.corrections); } catch { return []; } })() as Array<{ type: string; description: string; executed: boolean; result: string }>;
+        const assessment = (() => { try { return JSON.parse(r.assessment); } catch { return {}; } })() as { driftScore?: number; driftFlag?: string };
+        const ts = new Date(r.timestamp).toLocaleString();
+        const dryTag = r.dry_run ? chalk.yellow(' [dry]') : '';
+        console.log(`  ${chalk.white(ts)} ${o(r.trigger)}${dryTag} ${chalk.gray(r.session_id.slice(0, 8))}`);
+        if (assessment.driftScore !== undefined) {
+          console.log(`    drift ${assessment.driftScore}/100 (${assessment.driftFlag})`);
+        }
+        for (const c of corrections) {
+          const icon = c.result === 'success' ? chalk.green('✓') : c.result === 'failed' ? chalk.red('✗') : chalk.gray('○');
+          console.log(`    ${icon} ${c.type}: ${c.description}`);
+        }
+      }
+      console.log(`\n${hr2}\n`);
+    } finally { storage.close(); }
+    return;
+  }
+
+  console.log(chalk.gray('  Usage: /autocorrect [enable|disable|status|history|clear]'));
+}
+
+async function cmdSwarm(dbPath: string, cwd: string, args: string): Promise<void> {
+  const sub = args.trim();
+  const subLower = sub.toLowerCase();
+  const storage = new Storage(dbPath);
+
+  try {
+    // ─── /swarm init — generate template ───
+    if (subLower === 'init') {
+      const { generateSwarmTemplate } = await import('@mklamine/hawkeye-core');
+      const outPath = join(cwd, '.hawkeye', 'swarm.json');
+      const dir = join(cwd, '.hawkeye');
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(outPath, generateSwarmTemplate());
+      console.log(`  ${chalk.green('✓')} Template written to ${o('.hawkeye/swarm.json')}`);
+      console.log(chalk.dim('  Edit it, then run /swarm run to start'));
+      return;
+    }
+
+    // ─── /swarm new — interactive wizard ───
+    if (subLower === 'new') {
+      console.log('');
+      console.log(`  ${o.bold('🐝 New Swarm')}`);
+      console.log(chalk.dim(`  ${hr()}`));
+
+      const name = await rawPromptSingle(`  ${o('Name:')} `);
+      if (!name.trim()) { console.log(chalk.dim('  Cancelled.')); return; }
+
+      const objective = await rawPromptSingle(`  ${o('Objective:')} `);
+      if (!objective.trim()) { console.log(chalk.dim('  Cancelled.')); return; }
+
+      // Agent setup
+      const AGENT_CHOICES = [
+        { name: 'claude', desc: 'Claude Code (Anthropic)' },
+        { name: 'aider', desc: 'Aider (AI pair programming)' },
+        { name: 'codex', desc: 'Codex CLI (OpenAI)' },
+      ].sort((left, right) => left.name.localeCompare(right.name));
+
+      console.log('');
+      console.log(chalk.dim('  Available agents:'));
+      for (let i = 0; i < AGENT_CHOICES.length; i++) {
+        const a = AGENT_CHOICES[i];
+        let installed = false;
+        try { execSync(`command -v ${a.name}`, { stdio: 'pipe', timeout: 3000, shell: '/bin/sh' }); installed = true; } catch {}
+        const status = installed ? chalk.green('✓') : chalk.dim('✗');
+        console.log(`    ${o.bold(`${i + 1})`)} ${status} ${chalk.white(a.name)} ${chalk.dim('—')} ${a.desc}`);
+      }
+      console.log(`    ${o.bold(`${AGENT_CHOICES.length + 1})`)}   ${chalk.white('Custom')} ${chalk.dim('— enter command')}`);
+      console.log('');
+
+      // Collect agents
+      interface SwarmAgentInput { name: string; command: string; role: string; task: string; scope: string[]; color: string }
+      const agentInputs: SwarmAgentInput[] = [];
+      const colors = ['#3b82f6', '#8b5cf6', '#22c55e', '#f59e0b', '#ef4444', '#ec4899'];
+
+      let addMore = true;
+      let agentIdx = 0;
+      while (addMore) {
+        console.log(`  ${o.bold(`Agent ${agentIdx + 1}`)}`);
+        const agentPick = await rawPromptSingle(`    ${chalk.dim('Command (number or name):')} `);
+        if (!agentPick.trim()) { if (agentIdx > 0) break; console.log(chalk.dim('  Cancelled.')); return; }
+
+        let agentCmd = agentPick.trim();
+        const num = parseInt(agentCmd, 10);
+        if (num >= 1 && num <= AGENT_CHOICES.length) agentCmd = AGENT_CHOICES[num - 1].name;
+
+        const agentName = await rawPromptSingle(`    ${chalk.dim(`Name (${agentCmd}):`)} `) || agentCmd;
+        const role = await rawPromptSingle(`    ${chalk.dim('Role (worker/lead/reviewer) [worker]:')} `) || 'worker';
+        const task = await rawPromptSingle(`    ${chalk.dim('Task prompt:')} `);
+        if (!task.trim()) { console.log(chalk.dim('  Skipped.')); continue; }
+        const scope = await rawPromptSingle(`    ${chalk.dim('Scope globs [**/*]:')} `) || '**/*';
+
+        agentInputs.push({
+          name: agentName.trim(),
+          command: agentCmd,
+          role: role.trim(),
+          task: task.trim(),
+          scope: scope.split(',').map((s) => s.trim()),
+          color: colors[agentIdx % colors.length],
+        });
+        agentIdx++;
+
+        const more = await rawPromptSingle(`  ${chalk.dim('Add another agent? (y/N):')} `);
+        addMore = more.trim().toLowerCase() === 'y';
+      }
+
+      if (agentInputs.length === 0) { console.log(chalk.dim('  No agents — cancelled.')); return; }
+
+      // Merge & test
+      const testCmd = await rawPromptSingle(`  ${o('Test command')} ${chalk.dim('(optional, Enter to skip):')} `);
+      const strategy = await rawPromptSingle(`  ${o('Merge strategy')} ${chalk.dim('(sequential/octopus) [sequential]:')} `) || 'sequential';
+
+      // Build config
+      const swarmConfig = {
+        name: name.trim(),
+        description: '',
+        objective: objective.trim(),
+        mergeStrategy: strategy.trim() === 'octopus' ? 'octopus' : 'sequential',
+        autoMerge: true,
+        testCommand: testCmd.trim() || undefined,
+        timeout: 3600,
+        agents: agentInputs.map((a) => ({
+          name: a.name,
+          role: a.role,
+          description: '',
+          command: a.command,
+          scope: { include: a.scope },
+          timeout: 1800,
+          color: a.color,
+        })),
+        tasks: agentInputs.map((a, i) => ({
+          id: `task-${i + 1}`,
+          agent: a.name,
+          prompt: a.task,
+          priority: 0,
+        })),
+      };
+
+      // Save config
+      const dir = join(cwd, '.hawkeye');
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const outPath = join(dir, 'swarm.json');
+      writeFileSync(outPath, JSON.stringify(swarmConfig, null, 2));
+
+      // Summary
+      console.log('');
+      console.log(chalk.dim(`  ${hr()}`));
+      console.log(`  ${chalk.dim('Name:')}      ${chalk.white(swarmConfig.name)}`);
+      console.log(`  ${chalk.dim('Objective:')} ${chalk.white(swarmConfig.objective)}`);
+      console.log(`  ${chalk.dim('Agents:')}    ${agentInputs.map((a) => o.bold(a.name)).join(chalk.dim(', '))}`);
+      if (testCmd.trim()) console.log(`  ${chalk.dim('Test:')}      ${chalk.cyan(testCmd.trim())}`);
+      console.log(`  ${chalk.dim('Strategy:')}  ${swarmConfig.mergeStrategy}`);
+      console.log(chalk.dim(`  ${hr()}`));
+      console.log(`  ${chalk.green('✓')} Config saved to ${o('.hawkeye/swarm.json')}`);
+      console.log('');
+
+      const run = await rawPromptSingle(`  ${o('Run now?')} ${chalk.dim('(Y/n):')} `);
+      if (run.trim().toLowerCase() === 'n') {
+        console.log(chalk.dim(`  Run later with: /swarm run  or  hawkeye swarm --config .hawkeye/swarm.json`));
+        return;
+      }
+
+      // Execute
+      console.log(chalk.dim('  Starting swarm...'));
+      try {
+        const { execSync: ex } = await import('node:child_process');
+        ex(`node "${join(cwd, 'packages/cli/dist/index.js')}" swarm --config .hawkeye/swarm.json`, {
+          cwd,
+          stdio: 'inherit',
+          timeout: 3600000,
+        });
+      } catch (e) {
+        // Non-zero exit or timeout — swarm command already printed output
+      }
+      return;
+    }
+
+    // ─── /swarm run [config-path] — execute from config ───
+    if (subLower === 'run' || subLower.startsWith('run ')) {
+      let configFile = sub.slice(3).trim() || '.hawkeye/swarm.json';
+      let configPath = configFile.startsWith('/') ? configFile : join(cwd, configFile);
+      if (!existsSync(configPath)) {
+        // Try .hawkeye/ prefix
+        const alt = join(cwd, '.hawkeye', configFile);
+        if (existsSync(alt)) {
+          configPath = alt;
+        } else {
+          console.log(`  ${chalk.red('✗')} Config not found: ${configFile}`);
+          console.log(chalk.dim(`  Run /swarm init to generate a template, or /swarm new for the wizard`));
+          return;
+        }
+      }
+
+      console.log(`  ${chalk.dim('Running swarm from')} ${o(configFile)}${chalk.dim('...')}`);
+      try {
+        const cliEntry = join(cwd, 'packages/cli/dist/index.js');
+        const bin = existsSync(cliEntry) ? `node "${cliEntry}"` : 'hawkeye';
+        const { execSync: ex } = await import('node:child_process');
+        ex(`${bin} swarm --config "${configPath}"`, {
+          cwd,
+          stdio: 'inherit',
+          timeout: 3600000,
+        });
+      } catch (e) {
+        // Swarm command already printed output
+      }
+      return;
+    }
+
+    // ─── /swarm delete <id> — delete a swarm ───
+    if (subLower.startsWith('delete ')) {
+      const id = sub.slice(7).trim();
+      const swarm = storage.getSwarm(id);
+      if (!swarm.ok || !swarm.value) {
+        console.log(`  ${chalk.red('✗')} Swarm "${id}" not found`);
+        return;
+      }
+      storage.deleteSwarm(swarm.value.id);
+      console.log(`  ${chalk.green('✓')} Swarm ${o(swarm.value.id.slice(0, 8))} deleted`);
+      return;
+    }
+
+    // ─── /swarm <id> — show detail ───
+    if (sub && sub.length >= 4) {
+      const swarm = storage.getSwarm(sub);
+      if (swarm.ok && swarm.value) {
+        const s = swarm.value;
+        const agents = storage.getSwarmAgents(s.id);
+        const conflicts = storage.getSwarmConflicts(s.id);
+
+        let config: { mergeStrategy?: string; testCommand?: string } = {};
+        try { config = JSON.parse(s.config); } catch {}
+
+        console.log('');
+        console.log(`  ${o.bold('🐝 Swarm')}  ${chalk.dim(s.id)}`);
+        console.log(chalk.dim(`  ${hr()}`));
+        console.log(`  ${chalk.dim('Name:')}       ${chalk.white(s.name)}`);
+        console.log(`  ${chalk.dim('Objective:')}  ${chalk.white(s.objective)}`);
+        console.log(`  ${chalk.dim('Status:')}     ${s.status === 'completed' ? chalk.green(s.status) : s.status === 'failed' ? chalk.red(s.status) : chalk.cyan(s.status)}`);
+        console.log(`  ${chalk.dim('Cost:')}       ${chalk.cyan('$' + (s.total_cost_usd || 0).toFixed(2))}`);
+        console.log(`  ${chalk.dim('Strategy:')}   ${config.mergeStrategy || 'sequential'}`);
+        if (s.started_at) console.log(`  ${chalk.dim('Started:')}    ${new Date(s.started_at).toLocaleString()}`);
+        if (s.completed_at) console.log(`  ${chalk.dim('Completed:')}  ${new Date(s.completed_at).toLocaleString()}`);
+        if (s.merge_commit) console.log(`  ${chalk.dim('Merge:')}      ${chalk.cyan(s.merge_commit.slice(0, 8))}`);
+        if (s.tests_passed !== null) {
+          console.log(`  ${chalk.dim('Tests:')}      ${s.tests_passed ? chalk.green('passed') : chalk.red('failed')}`);
+        }
+
+        if (agents.ok && agents.value.length > 0) {
+          console.log('');
+          console.log(`  ${chalk.dim('Agents:')}`);
+          console.log(`  ${chalk.dim('─'.repeat(Math.min(tw() - 6, 80)))}`);
+          for (const a of agents.value) {
+            const st = a.status === 'completed' || a.status === 'merged' ? chalk.green('✓')
+              : a.status === 'failed' ? chalk.red('✗')
+              : a.status === 'running' ? chalk.cyan('●')
+              : a.status === 'blocked' ? chalk.yellow('⏸')
+              : chalk.dim('○');
+            const time = a.duration_seconds ? `${Math.floor(a.duration_seconds / 60)}m ${a.duration_seconds % 60}s` : '-';
+            const files = a.files_changed ? JSON.parse(a.files_changed).length : 0;
+            const cost = a.cost_usd ? `$${a.cost_usd.toFixed(2)}` : '';
+            const merge = a.merge_status === 'merged' ? chalk.green('merged')
+              : a.merge_status === 'conflict' ? chalk.red('conflict') : '';
+
+            console.log(`  ${st} ${o.bold(a.agent_name.padEnd(16))} ${chalk.dim(a.status.padEnd(10))} ${chalk.dim(time.padEnd(8))} ${chalk.dim(`${files} files`.padEnd(10))} ${chalk.dim(cost.padEnd(8))} ${merge}`);
+            console.log(`    ${chalk.dim(a.task_prompt.length > 70 ? a.task_prompt.slice(0, 67) + '...' : a.task_prompt)}`);
+          }
+        }
+
+        if (conflicts.ok && conflicts.value.length > 0) {
+          console.log('');
+          console.log(`  ${chalk.red.bold('Conflicts')} ${chalk.dim(`(${conflicts.value.length})`)}`);
+          for (const c of conflicts.value) {
+            const ag = JSON.parse(c.agents).join(', ');
+            console.log(`    ${c.resolved ? chalk.green('✓') : chalk.red('✗')} ${chalk.white(c.path)} ${chalk.dim(`(${ag})`)} ${chalk.dim(c.type)}`);
+          }
+        }
+
+        if (s.summary) {
+          console.log('');
+          console.log(`  ${chalk.dim('Summary:')} ${chalk.gray(s.summary)}`);
+        }
+
+        console.log('');
+        return;
+      }
+    }
+
+    // ─── /swarm (default) — list or help ───
+    const result = storage.listSwarms({ limit: 10 });
+    if (!result.ok || result.value.length === 0) {
+      console.log('');
+      console.log(`  ${o.bold('🐝 Swarm')} — Multi-agent Orchestration`);
+      console.log(chalk.dim(`  ${hr()}`));
+      console.log('');
+      console.log(`  ${chalk.dim('No swarm runs yet. Get started:')}`);
+      console.log('');
+      console.log(`    ${o('/swarm init')}   ${chalk.dim('—')} Generate template config (.hawkeye/swarm.json)`);
+      console.log(`    ${o('/swarm new')}    ${chalk.dim('—')} Interactive wizard to create & run a swarm`);
+      console.log(`    ${o('/swarm run')}    ${chalk.dim('—')} Execute swarm from config file`);
+      console.log('');
+      console.log(chalk.dim(`  Or from CLI:  hawkeye swarm --config .hawkeye/swarm.json`));
+      console.log('');
+      return;
+    }
+
+    console.log('');
+    console.log(`  ${o.bold('🐝 Swarm Runs')}`);
+    console.log(chalk.dim(`  ${hr()}`));
+
+    for (const s of result.value) {
+      const statusStr = s.status === 'completed' ? chalk.green(s.status)
+        : s.status === 'failed' ? chalk.red(s.status)
+        : s.status === 'running' ? chalk.cyan(s.status) : chalk.dim(s.status);
+      const cost = s.total_cost_usd > 0 ? chalk.dim(` $${s.total_cost_usd.toFixed(2)}`) : '';
+      const date = new Date(s.created_at).toLocaleDateString();
+
+      let agentCount = 0;
+      try { agentCount = JSON.parse(s.config).agents?.length || 0; } catch {}
+
+      console.log(`  ${o.bold(s.id.slice(0, 8))}  ${statusStr.padEnd(20)}  ${chalk.white(s.name)}  ${chalk.dim(`${agentCount} agents`)}${cost}`);
+      console.log(`    ${chalk.dim(date)}  ${chalk.dim(s.objective.slice(0, 55))}${s.objective.length > 55 ? chalk.dim('...') : ''}`);
+      console.log('');
+    }
+
+    console.log(chalk.dim(`  /swarm delete <id> — delete  |  /swarm init — template  |  /swarm new — wizard  |  /swarm run — execute  |  /swarm <id> — detail`));
+    console.log('');
+  } finally {
+    storage.close();
+  }
+}
+
 async function cmdPolicy(cwd: string, args: string): Promise<void> {
   const sub = args.trim().toLowerCase() || 'show';
 
@@ -1808,7 +2573,7 @@ async function cmdPolicy(cwd: string, args: string): Promise<void> {
     if (rule.description) console.log(`    ${chalk.dim(rule.description)}`);
   }
   console.log();
-  console.log(chalk.dim('  Commands: /policy init | check | export'));
+  console.log(chalk.dim('  Commands: /policy check | export | import <file> | init | show'));
 }
 
 async function cmdFirewall(dbPath: string): Promise<void> {

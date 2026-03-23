@@ -2,11 +2,11 @@
  * hawkeye policy — Declarative security policy management
  *
  * Subcommands:
- *   init     Generate a default policies.yml template
  *   check    Validate the current policies.yml
- *   show     Display current policies
  *   export   Export current config.json guardrails as policies.yml
  *   import   Import a policies.yml from a file or URL
+ *   init     Generate a default policies.yml template
+ *   show     Display current policies
  */
 
 import { Command } from 'commander';
@@ -27,6 +27,7 @@ import {
 import { loadConfig } from '../config.js';
 
 const o = chalk.hex('#ff5f1f');
+const compareCommands = (left: Command, right: Command) => left.name().localeCompare(right.name());
 
 export const policyCommand = new Command('policy')
   .description('Manage declarative security policies (.hawkeye/policies.yml)')
@@ -233,3 +234,5 @@ export const policyCommand = new Command('policy')
         }
       }),
   );
+
+(policyCommand.commands as Command[]).sort(compareCommands);

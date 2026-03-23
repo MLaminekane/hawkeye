@@ -53,6 +53,295 @@ export interface TaskData {
   attachments?: string[];
 }
 
+export interface RcaCausalStep {
+  sequence: number;
+  type: string;
+  description: string;
+  timestamp: string;
+  relevance: 'root_cause' | 'contributing' | 'effect' | 'context';
+  explanation: string;
+}
+
+export interface RcaErrorPattern {
+  pattern: string;
+  count: number;
+  sequences: number[];
+}
+
+export interface RcaResult {
+  summary: string;
+  outcome: 'success' | 'failure' | 'partial' | 'unknown';
+  primaryError: {
+    sequence: number;
+    type: string;
+    description: string;
+    timestamp: string;
+  } | null;
+  causalChain: RcaCausalStep[];
+  driftAnalysis: {
+    trend: 'stable' | 'declining' | 'volatile' | 'improving';
+    lowestScore: number;
+    highestScore: number;
+    inflectionPoint: {
+      sequence: number;
+      scoreBefore: number;
+      scoreAfter: number;
+      triggerDescription: string;
+    } | null;
+  } | null;
+  errorPatterns: RcaErrorPattern[];
+  suggestions: string[];
+  confidence: 'high' | 'medium' | 'low';
+}
+
+// ─── Memory Diff types ───
+
+export interface MemoryItemData {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  timestamp: string;
+  category: string;
+  key: string;
+  content: string;
+  evidence: string;
+  confidence: 'high' | 'medium' | 'low';
+  supersedes?: string;
+  contradicts?: string;
+}
+
+export interface MemoryDiffItemData {
+  status: 'learned' | 'forgotten' | 'retained' | 'evolved' | 'contradicted';
+  category: string;
+  key: string;
+  before?: MemoryItemData;
+  after?: MemoryItemData;
+  explanation: string;
+}
+
+export interface HallucinationItemData {
+  key: string;
+  category: string;
+  claim: string;
+  evidence: string;
+  type: 'nonexistent_file' | 'contradicted_fact' | 'recurring_error' | 'phantom_api';
+  occurrences: Array<{ sessionId: string; sequence: number; timestamp: string }>;
+}
+
+export interface MemoryDiffResultData {
+  sessionA: { id: string; objective: string; startedAt: string };
+  sessionB: { id: string; objective: string; startedAt: string };
+  learned: MemoryDiffItemData[];
+  forgotten: MemoryDiffItemData[];
+  retained: MemoryDiffItemData[];
+  evolved: MemoryDiffItemData[];
+  contradicted: MemoryDiffItemData[];
+  hallucinations: HallucinationItemData[];
+  summary: string;
+}
+
+export interface CumulativeMemoryData {
+  items: MemoryItemData[];
+  totalSessions: number;
+  firstSeen: string;
+  lastUpdated: string;
+  hallucinations: HallucinationItemData[];
+  stats: {
+    byCategory: Record<string, number>;
+    totalItems: number;
+    contradictions: number;
+    corrections: number;
+  };
+}
+
+// ─── Incident / Intelligence types ───
+
+export interface IncidentData {
+  id: string;
+  sessionId: string;
+  triggeredAt: string;
+  trigger: string;
+  severity: 'warning' | 'critical';
+  driftScore: number | null;
+  driftFlag: string | null;
+  summary: string;
+  recentEvents: Array<{ sequence: number; type: string; timestamp: string; summary: string }>;
+  errorPatterns: Array<{ pattern: string; count: number }>;
+  filesChanged: string[];
+}
+
+export interface SelfAssessmentData {
+  overallRisk: 'low' | 'medium' | 'high' | 'critical';
+  drift: { score: number | null; flag: string; trend: string };
+  cost: { spent: number; budget: number | null; percentUsed: number | null };
+  errors: { total: number; recurring: number; unresolvedPatterns: string[] };
+  velocity: { actionsPerMinute: number; filesChanged: number };
+  recommendations: string[];
+}
+
+export interface AutoCorrectionData {
+  shouldCorrect: boolean;
+  urgency: string;
+  diagnosis: string;
+  corrections: Array<{ type: string; description: string; reasoning: string }>;
+}
+
+// ─── Autocorrect types ───
+
+export interface CorrectionRecordData {
+  id: string;
+  sessionId: string;
+  timestamp: string;
+  trigger: string;
+  assessment: {
+    driftScore: number | null;
+    driftFlag: string;
+    errorCount: number;
+    recurringErrors: number;
+    costPercent: number | null;
+  };
+  corrections: Array<{
+    type: string;
+    target: string;
+    description: string;
+    reasoning: string;
+    executed: boolean;
+    result: string;
+    error?: string;
+  }>;
+  dryRun: boolean;
+}
+
+export interface CorrectionHintData {
+  sessionId: string;
+  timestamp: string;
+  trigger: string;
+  urgency: 'low' | 'medium' | 'high' | 'critical';
+  diagnosis: string;
+  corrections: Array<{
+    type: string;
+    description: string;
+    reasoning: string;
+    executed: boolean;
+  }>;
+  agentInstructions: string;
+}
+
+export interface GitCommitData {
+  sessionId: string;
+  agent: string | null;
+  sequence: number;
+  timestamp: string;
+  commitHash: string;
+  message: string;
+  branch: string | null;
+  filesChanged: number;
+  linesAdded: number;
+  linesRemoved: number;
+}
+
+// ─── Live Agent types ───
+
+export type PermissionLevel = 'default' | 'full' | 'supervised';
+
+export interface LiveAgentData {
+  id: string;
+  name: string;
+  command: string;
+  prompt: string;
+  role: 'lead' | 'worker' | 'reviewer';
+  personality: string;
+  permissions: PermissionLevel;
+  status: 'running' | 'completed' | 'failed';
+  output: string;
+  startedAt: string;
+  finishedAt: string | null;
+  exitCode: number | null;
+  pid: number | null;
+  filesChanged: string[];
+  linesAdded: number;
+  linesRemoved: number;
+  sessionId: string | null;
+  driftScore: number | null;
+  actionCount: number;
+  costUsd: number;
+}
+
+export interface AgentEventData {
+  id: string;
+  session_id: string;
+  sequence: number;
+  timestamp: string;
+  type: string;
+  data: string;
+  drift_score: number | null;
+  cost_usd: number;
+}
+
+// ─── Swarm types ───
+
+export interface SwarmData {
+  id: string;
+  name: string;
+  objective: string;
+  config: string;
+  status: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  total_cost_usd: number;
+  total_tokens: number;
+  tests_passed: number | null;
+  test_output: string | null;
+  merge_commit: string | null;
+  summary: string | null;
+}
+
+export interface SwarmAgentData {
+  id: string;
+  swarm_id: string;
+  agent_name: string;
+  persona: string;
+  task_prompt: string;
+  task_id: string;
+  status: string;
+  session_id: string | null;
+  worktree_path: string | null;
+  branch: string | null;
+  pid: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_seconds: number | null;
+  exit_code: number | null;
+  output: string | null;
+  files_changed: string | null;
+  lines_added: number | null;
+  lines_removed: number | null;
+  cost_usd: number | null;
+  tokens_used: number | null;
+  final_drift_score: number | null;
+  error_count: number | null;
+  merge_status: string | null;
+  merge_conflicts: string | null;
+}
+
+export interface SwarmConflictData {
+  id: string;
+  swarm_id: string;
+  path: string;
+  agents: string;
+  type: string;
+  resolved: number;
+  resolved_by: string | null;
+  resolution: string | null;
+}
+
+export interface SwarmFullData {
+  swarm: SwarmData;
+  agents: SwarmAgentData[];
+  conflicts: SwarmConflictData[];
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`API error: ${res.status}`);
@@ -101,6 +390,12 @@ export interface SettingsData {
   };
   dashboard?: {
     openBrowser: boolean;
+  };
+  autocorrect?: {
+    enabled: boolean;
+    dryRun: boolean;
+    triggers: { driftCritical: boolean; errorRepeat: number; costThreshold: number };
+    actions: { rollbackFiles: boolean; pauseSession: boolean; injectHint: boolean; blockPattern: boolean };
   };
 }
 
@@ -190,6 +485,9 @@ export const api = {
   endSession: (id: string, status: 'completed' | 'aborted' = 'completed') =>
     postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/end`, { status }),
 
+  forkSession: (sessionId: string, upToSequence: number) =>
+    postJson<{ ok: boolean; forkedSessionId: string }>(`${API_BASE}/sessions/${sessionId}/fork`, { upToSequence }),
+
   revertFile: (eventId: string) =>
     postJson<{ ok: boolean; path?: string; error?: string }>(`${API_BASE}/revert`, { event_id: eventId }),
 
@@ -234,6 +532,108 @@ export const api = {
 
   savePolicies: (policy: PolicyData) =>
     postJson<{ ok: boolean; errors?: PolicyValidationError[] }>(`${API_BASE}/policies`, policy),
+
+  analyzeSession: (sessionId: string) =>
+    fetchJson<RcaResult>(`${API_BASE}/sessions/${sessionId}/analyze`),
+
+  getSessionMemory: (sessionId: string) =>
+    fetchJson<MemoryItemData[]>(`${API_BASE}/sessions/${sessionId}/memory`),
+
+  getMemoryDiff: (sessionA: string, sessionB: string) =>
+    fetchJson<MemoryDiffResultData>(`${API_BASE}/memory/diff?a=${sessionA}&b=${sessionB}`),
+
+  getCumulativeMemory: (limit = 20) =>
+    fetchJson<CumulativeMemoryData>(`${API_BASE}/memory/cumulative?limit=${limit}`),
+
+  getHallucinations: () =>
+    fetchJson<HallucinationItemData[]>(`${API_BASE}/memory/hallucinations`),
+
+  triggerIncident: (sessionId: string) =>
+    postJson<IncidentData>(`${API_BASE}/sessions/${sessionId}/incident`, {}),
+
+  getIncidents: (sessionId: string) =>
+    fetchJson<IncidentData[]>(`${API_BASE}/sessions/${sessionId}/incidents`),
+
+  getSelfAssessment: (sessionId: string) =>
+    fetchJson<SelfAssessmentData>(`${API_BASE}/sessions/${sessionId}/self-assess`),
+
+  getAutoCorrection: (sessionId: string) =>
+    fetchJson<AutoCorrectionData>(`${API_BASE}/sessions/${sessionId}/auto-correct`),
+
+  getCommits: (sessionId?: string) =>
+    fetchJson<GitCommitData[]>(`${API_BASE}/commits${sessionId ? `?session=${sessionId}` : ''}`),
+
+  // ─── Autocorrect ───
+
+  getCorrections: (sessionId: string) =>
+    fetchJson<CorrectionRecordData[]>(`${API_BASE}/sessions/${sessionId}/corrections`),
+
+  getAllCorrections: (limit = 50) =>
+    fetchJson<CorrectionRecordData[]>(`${API_BASE}/corrections?limit=${limit}`),
+
+  getActiveCorrection: () =>
+    fetchJson<CorrectionHintData | null>(`${API_BASE}/active-correction`),
+
+  saveAutocorrect: (config: { enabled: boolean; dryRun: boolean; triggers: Record<string, unknown>; actions: Record<string, unknown> }) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/autocorrect`, config),
+
+  clearActiveCorrection: () =>
+    postJson<{ ok: boolean }>(`${API_BASE}/autocorrect/clear`, {}),
+
+  // ─── Swarm ───
+
+  listSwarms: (limit = 20) =>
+    fetchJson<SwarmData[]>(`${API_BASE}/swarms?limit=${limit}`),
+
+  getSwarm: (id: string) =>
+    fetchJson<SwarmData>(`${API_BASE}/swarms/${id}`),
+
+  getSwarmAgents: (swarmId: string) =>
+    fetchJson<SwarmAgentData[]>(`${API_BASE}/swarms/${swarmId}/agents`),
+
+  getSwarmConflicts: (swarmId: string) =>
+    fetchJson<SwarmConflictData[]>(`${API_BASE}/swarms/${swarmId}/conflicts`),
+
+  getSwarmFull: (swarmId: string) =>
+    fetchJson<SwarmFullData>(`${API_BASE}/swarms/${swarmId}/full`),
+
+  cancelSwarm: (swarmId: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/swarms/${swarmId}/cancel`, {}),
+
+  deleteSwarm: (swarmId: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/swarms/${swarmId}/delete`, {}),
+
+  createSwarm: (config: Record<string, unknown>) =>
+    postJson<{ ok: boolean; message: string }>(`${API_BASE}/swarms`, config),
+
+  getSwarmTemplate: async (): Promise<string> => {
+    const res = await fetch(`${API_BASE}/swarms/template`, { method: 'POST' });
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    return res.text();
+  },
+
+  // ─── Live Agents ───
+
+  listAgents: () =>
+    fetchJson<LiveAgentData[]>(`${API_BASE}/agents`),
+
+  getAgent: (id: string) =>
+    fetchJson<LiveAgentData>(`${API_BASE}/agents/${id}`),
+
+  spawnAgent: (name: string, command: string, prompt: string, role: string = 'worker', personality: string = '', permissions: string = 'full') =>
+    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/spawn`, { name, command, prompt, role, personality, permissions }),
+
+  getAgentEvents: (id: string, limit: number = 20) =>
+    fetchJson<AgentEventData[]>(`${API_BASE}/agents/${id}/events?limit=${limit}`),
+
+  stopAgent: (id: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/agents/${id}/stop`, {}),
+
+  removeAgent: (id: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/agents/${id}/remove`, {}),
+
+  sendAgentMessage: (id: string, message: string) =>
+    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/${id}/message`, { message }),
 };
 
 // ─── WebSocket client ────────────────────────────────────────
@@ -252,7 +652,16 @@ export type WsMessage =
   | { type: 'task_completed'; task: TaskData }
   | { type: 'task_failed'; task: TaskData }
   | { type: 'impact_preview'; timestamp: string; sessionId: string; toolName: string; toolInput: Record<string, unknown>; impact: ImpactPreviewData['impact'] }
-  | { type: 'action_stream'; sessionId: string; event: EventData; risk: 'safe' | 'low' | 'medium' | 'high' | 'critical' };
+  | { type: 'action_stream'; sessionId: string; event: EventData; risk: 'safe' | 'low' | 'medium' | 'high' | 'critical' }
+  | { type: 'incident'; sessionId: string; incident: IncidentData }
+  | { type: 'autocorrect'; sessionId: string; correction: CorrectionRecordData }
+  | { type: 'swarm'; event: string; swarmId: string; [key: string]: unknown }
+  | { type: 'agent_spawned'; agent: LiveAgentData }
+  | { type: 'agent_output'; agentId: string; chunk: string }
+  | { type: 'agent_complete'; agentId: string; status: string; exitCode?: number; filesChanged?: string[] }
+  | { type: 'agent_removed'; agentId: string }
+  | { type: 'agent_session_linked'; agentId: string; sessionId: string }
+  | { type: 'agent_stats'; agentId: string; drift: number | null; cost: number; actions: number };
 
 type WsListener = (msg: WsMessage) => void;
 
@@ -278,6 +687,10 @@ class HawkeyeWs {
       this.ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data as string) as WsMessage;
+          if (msg.type === 'session_end' && msg.session.id === '__reload__' && msg.session.status === 'reload') {
+            window.location.reload();
+            return;
+          }
           for (const fn of this.listeners) {
             fn(msg);
           }

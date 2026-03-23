@@ -38,3 +38,6 @@ coverage/
 # Local development files
 *.local
 step.txt
+
+# CLI bundled dashboard (created by prepack)
+packages/cli/dashboard/

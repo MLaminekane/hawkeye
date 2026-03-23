@@ -62,6 +62,7 @@ export function Layout() {
     { to: '/firewall', label: 'Firewall' },
     { to: '/compare', label: 'Compare' },
     { to: '/tasks', label: 'Tasks' },
+    { to: '/swarm', label: 'Agents' },
     { to: '/settings', label: 'Settings' },
   ];
 
@@ -79,7 +80,7 @@ export function Layout() {
               H
             </div>
             <span className="hidden font-display text-base font-semibold tracking-wide text-hawk-text sm:inline">
-              Hawkeye
+              Hawkeye-ai
             </span>
           </Link>
 

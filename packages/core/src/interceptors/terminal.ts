@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { spawn, type ChildProcess, type SpawnOptions, type StdioOptions } from 'node:child_process';
 import type { CommandEvent } from '../types.js';
 import { Logger } from '../logger.js';
 
@@ -43,12 +43,21 @@ export function createTerminalInterceptor(onEvent: CommandCallback, options?: Te
     spawn(command: string, args: string[], spawnOptions?: SpawnOptions): ChildProcess {
       const startTime = Date.now();
       const cwd = (spawnOptions?.cwd as string) ?? process.cwd();
+      const requestedStdio = spawnOptions?.stdio;
+      const stdio: StdioOptions = Array.isArray(requestedStdio)
+        ? [
+            requestedStdio[0] ?? 'inherit',
+            requestedStdio[1] ?? 'pipe',
+            requestedStdio[2] ?? 'pipe',
+            ...requestedStdio.slice(3),
+          ]
+        : ['inherit', 'pipe', 'pipe'];
 
       logger.debug(`Spawning: ${command} ${args.join(' ')}`);
 
-      const child = spawn(command, args, {
+      const child: ChildProcess = spawn(command, args, {
         ...spawnOptions,
-        stdio: ['inherit', 'pipe', 'pipe'],
+        stdio,
       });
 
       let stdout = '';
@@ -66,7 +75,7 @@ export function createTerminalInterceptor(onEvent: CommandCallback, options?: Te
         process.stderr.write(chunk);
       });
 
-      child.on('close', (exitCode) => {
+      child.on('close', (exitCode: number | null) => {
         const event: CommandEvent = {
           command: sanitize(command),
           args: args.map(sanitize),

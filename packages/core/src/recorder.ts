@@ -71,6 +71,7 @@ export interface Recorder {
   pause(): void;
   resume(): void;
   getTerminalInterceptor(): TerminalInterceptor;
+  recordCommandEvent(event: CommandEvent): void;
   recordLlmEvent(event: LlmEvent): void;
   onEvent(handler: EventHandler): () => void;
   onDriftAlert(handler: DriftAlertHandler): void;
@@ -341,6 +342,10 @@ export function createRecorder(options: RecorderOptions): Recorder {
 
     get session() {
       return session;
+    },
+
+    recordCommandEvent(event: CommandEvent): void {
+      recordEvent('command', event);
     },
 
     recordLlmEvent(event: LlmEvent): void {

@@ -4,19 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Hawkeye is an open-source observability and security tool for AI agents (Claude Code, Cursor, AutoGPT, CrewAI, Aider, etc.). It acts as a "flight recorder" that logs every action an agent performs, enables visual session replay, and includes **DriftDetect** (real-time objective drift detection), **Guardrails** (file protection, command blocking, cost limits), **Impact Preview** (pre-execution risk analysis), **Live Firewall** (real-time action stream with browser notifications), and **Policy Engine** (declarative `.hawkeye/policies.yml`).
+Hawkeye is an open-source observability and security tool for AI agents (Claude Code, Cursor, AutoGPT, CrewAI, Aider, Codex, etc.). It acts as a "flight recorder" that logs every action an agent performs, enables visual session replay, and includes **DriftDetect** (real-time objective drift detection), **Guardrails** (file protection, command blocking, cost limits), **Impact Preview** (pre-execution risk analysis), **Live Firewall** (real-time action stream with browser notifications), **Policy Engine** (declarative `.hawkeye/policies.yml`), **Time Travel Debugging** (step-through replay with breakpoints, session forking), **Memory Diff** (cross-session agent memory tracking, hallucination detection), **Autonomous Control Layer** (autocorrect engine that autonomously rolls back files, pauses sessions, blocks failing patterns, and injects correction hints to agents via MCP), **Multi-agent Orchestration (Swarm)** (coordinate multiple AI agents on parallel tasks with isolated worktrees, scope enforcement, dependency ordering, conflict detection, and merge strategies), and **Live Agent Spawning** (spawn, monitor, and control AI agents directly from the dashboard with role assignment, permission levels, real-time session linking, and persistent state).
 
 ## Architecture
 
 TypeScript monorepo using pnpm workspaces + Turborepo:
 
-- `packages/core` — Node.js SDK: recorder engine, interceptors (terminal, filesystem, network, LLM), SQLite storage, DriftDetect engine, guardrails enforcer
-- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`, `overnight`, `report`, `arena`, `policy`. Interactive TUI via raw-mode stdin with slash command picker.
+- `packages/core` — Node.js SDK: recorder engine, interceptors (terminal, filesystem, network, LLM), SQLite storage, DriftDetect engine, guardrails enforcer, RCA engine, Memory Diff engine
+- `packages/cli` — CLI (Commander.js + chalk). Commands: `init`, `record` (alias: `watch`), `replay`, `sessions`, `stats`, `inspect`, `compare`, `serve`, `export`, `hooks`, `hook-handler`, `mcp`, `otel-export`, `end`, `restart`, `daemon`, `overnight`, `report`, `arena`, `policy`, `analyze`, `memory`, `autocorrect`, `swarm`. Interactive TUI via raw-mode stdin with slash command picker.
 - `packages/dashboard` — React 19 + Vite + Tailwind CSS + Recharts web UI served by `hawkeye serve` on port 4242. Mobile responsive.
 
 ### Data Flow
 
-Interceptors capture events → Recorder evaluates guardrails (sync, blocking) → persists to SQLite → triggers drift check (async, non-blocking). The CLI's `serve` command exposes a REST API (`/api/sessions`, `/api/sessions/:id/events`, `/api/sessions/:id/drift`, `/api/sessions/:id/pause`, `/api/sessions/:id/resume`, `/api/sessions/:id/end`, `/api/sessions/:id/cost-by-file`, `/api/compare?ids=id1,id2`, `/api/settings`, `/api/providers`, `/api/policies`, `/api/ingest`, `/api/stats`, `/api/revert`, `/api/tasks`, `/api/tasks/journal`, `/api/pending-reviews`, `/api/review-approve`, `/api/review-deny`, `/api/impact`, `/api/interceptions`) and serves the dashboard as static files. The server **auto-reloads** on `pnpm build` — it watches `dist/` and restarts itself when compiled files change.
+Interceptors capture events → Recorder evaluates guardrails (sync, blocking) → persists to SQLite → triggers drift check (async, non-blocking). The CLI's `serve` command exposes a REST API (`/api/sessions`, `/api/sessions/:id/events`, `/api/sessions/:id/drift`, `/api/sessions/:id/pause`, `/api/sessions/:id/resume`, `/api/sessions/:id/end`, `/api/sessions/:id/fork`, `/api/sessions/:id/analyze`, `/api/sessions/:id/memory`, `/api/sessions/:id/cost-by-file`, `/api/compare?ids=id1,id2`, `/api/settings`, `/api/providers`, `/api/policies`, `/api/ingest`, `/api/stats`, `/api/revert`, `/api/tasks`, `/api/tasks/journal`, `/api/pending-reviews`, `/api/review-approve`, `/api/review-deny`, `/api/impact`, `/api/interceptions`, `/api/sessions/:id/corrections`, `/api/corrections`, `/api/active-correction`, `/api/autocorrect`, `/api/swarms`, `/api/swarms/:id`, `/api/swarms/:id/agents`, `/api/swarms/:id/conflicts`, `/api/swarms/:id/full`, `/api/swarms/:id/cancel`, `/api/swarms/:id/delete`, `/api/agents`, `/api/agents/spawn`, `/api/agents/:id`, `/api/agents/:id/stop`, `/api/agents/:id/remove`, `/api/agents/:id/message`, `/api/agents/:id/events`) and serves the dashboard as static files. The server **auto-reloads** on `pnpm build` — it watches `dist/` and restarts itself when compiled files change.
 
 ### Network Interception (Child Process)
 
@@ -60,6 +60,19 @@ When `hawkeye` is run with no subcommand, it launches an interactive TUI (`packa
 - **Task queue**: tasks stored in `.hawkeye/tasks.json`, created via dashboard (`POST /api/tasks`), TUI (`/tasks new`), or direct file edit.
 - **Image attachments**: tasks can include base64-encoded images saved to `.hawkeye/task-attachments/` and served via `/api/tasks/attachments/:filename`.
 - **Review gate integration**: dashboard Tasks page has auto-approve toggle + approve/deny buttons for guardrail-blocked actions.
+
+### Live Agent Spawning
+
+`hawkeye serve` includes a full agent lifecycle manager. Agents are spawned, monitored, and controlled via the dashboard or API.
+
+- **LiveAgent interface**: `id`, `name`, `command`, `prompt`, `role` (lead/worker/reviewer), `personality`, `permissions` (default/full/supervised), `status`, `output`, `pid`, `sessionId`, `driftScore`, `actionCount`, `costUsd`
+- **Permission levels**: `'full'` passes `--dangerously-skip-permissions` to `claude -p`; `'supervised'` relies on Hawkeye guardrails; `'default'` uses agent runtime defaults
+- **Agent command resolution**: `packages/cli/src/commands/agent-command.ts` — `buildAgentInvocation()` resolves CLI commands with `extraArgs` support. Known agents: `claude` (`-p`), `aider` (`--message --yes`), `codex` (`-q`)
+- **Session linking**: Two detection methods — (1) diff `.hawkeye/hook-sessions.json` before/after spawn, (2) DB fallback querying `listSessions()` for sessions started after spawn time. Retries at 3s/6s/10s/15s + continuous polling
+- **Stats polling**: Every 5s, queries Storage for linked session's events to compute live drift, cost, and action count
+- **Persistence**: `Map<string, LiveAgent>` backed by `.hawkeye/agents.json`. Written on every mutation (spawn, error, close, stop, remove, message, session link, stats). Loaded on server startup via `loadPersistedAgents()`
+- **WebSocket events**: `agent_spawned`, `agent_output`, `agent_complete`, `agent_removed`, `agent_session_linked`, `agent_stats`
+- **Follow-up messages**: `POST /api/agents/:id/message` writes to agent stdin for ongoing interaction
 
 ### Server Auto-Reload
 
@@ -121,7 +134,7 @@ hawkeye                         # Test the CLI globally
 
 ## Database
 
-SQLite via `better-sqlite3` with WAL mode. Schema in `packages/core/src/storage/schema.ts`. Four tables: `sessions`, `events`, `drift_snapshots`, `guardrail_violations`. Manual migrations (no ORM). Local data directory: `.hawkeye/` (auto-created on first use). `Storage` class has `deleteSession()` and `getCostByFile()` methods.
+SQLite via `better-sqlite3` with WAL mode. Schema in `packages/core/src/storage/schema.ts`. Nine tables: `sessions`, `events`, `drift_snapshots`, `guardrail_violations`, `memory_items`, `corrections`, `swarms`, `swarm_agents`, `swarm_conflicts`. Manual migrations (no ORM). Local data directory: `.hawkeye/` (auto-created on first use). `Storage` class has `deleteSession()`, `getCostByFile()`, `upsertMemoryItems()`, `getMemoryItems()`, `getAllMemoryItems()`, `insertCorrection()`, `getCorrections()`, `getAllCorrections()`, `createSwarm()`, `getSwarm()`, `listSwarms()`, `updateSwarm()`, `deleteSwarm()`, `insertSwarmAgent()`, `getSwarmAgents()`, `updateSwarmAgent()`, `insertSwarmConflict()`, `getSwarmConflicts()`, `resolveSwarmConflict()` methods.
 
 ## Security
 
@@ -164,6 +177,80 @@ SQLite via `better-sqlite3` with WAL mode. Schema in `packages/core/src/storage/
 ## Guardrails
 
 Rules evaluated synchronously before event persistence. Rule types: `file_protect` (glob patterns), `command_block` (regex patterns), `cost_limit` (per-session and per-hour), `token_limit`, `directory_scope`, `network_lock` (allowed/blocked hostnames for API calls), `review_gate` (command patterns requiring human approval), `impact_threshold` (block/warn above risk level). Actions: `warn` or `block`. Blocked events are persisted as `guardrail_trigger` type. Rule definitions in `packages/core/src/guardrails/rules.ts`.
+
+## Time Travel Debugging
+
+Dashboard session replay upgraded to a full agent debugger. `SessionDetailPage.tsx` + `TimelineBar.tsx`:
+
+- **Step-through**: Step forward/back buttons (⏮/⏭) + play/pause + speed controls (1x–10x)
+- **Breakpoints**: `Set<number>` state. Toggle via SVG timeline click, keyboard `B`, or right-click menu. Playback auto-pauses at breakpoints
+- **Interactive SVG timeline** (`TimelineBar`): Color-coded dots by event type, drift score line overlay, current position marker (orange), breakpoint diamonds (red). Right-click context menu: "Toggle breakpoint", "Replay from here", "Fork from here", "Jump to event"
+- **Session forking**: `POST /api/sessions/:id/fork` + `Storage.forkSession()`. Copies session + events + drift snapshots + guardrail violations up to sequence N into a new session. Navigates to forked session
+- **Keyboard shortcuts**: `←`/`→` step, `Space` play/pause, `B` toggle breakpoint. Only active in replay mode, ignored in input fields
+- **Auto-expand**: Current event details auto-expand during step-through via `setExpandedEvent()`
+
+## Root Cause Analysis
+
+`packages/core/src/analysis/rca.ts` — Heuristic RCA engine + LLM prompt builder. CLI: `hawkeye analyze <session> [--json] [--llm]`. Dashboard: "Analyze" button on session detail. MCP: `analyze_root_cause` tool. API: `GET /api/sessions/:id/analyze`.
+
+Algorithm: (1) classify events into errors/guardrails/normal, (2) detect error patterns by normalizing + grouping, (3) find primary error (most repeated pattern or last error), (4) build causal chain by tracing backwards from primary error through related file modifications and LLM decisions, (5) analyze drift trajectory (trend, inflection point), (6) generate pattern-based suggestions, (7) assess confidence. Optional `--llm` flag sends condensed timeline + heuristic results to LLM for natural language root cause explanation.
+
+## Memory Diff
+
+`packages/core/src/analysis/memory-diff.ts` — Cross-session agent memory tracking engine. Extracts structured "memories" from session events (file knowledge, error lessons, corrections, tool patterns, decisions, dependency facts, API knowledge), persists them in SQLite, and enables comparison across sessions.
+
+- **Memory Extraction**: 7-phase heuristic analysis of session events. File interactions → file_knowledge, errors + fixes → error_lesson/correction, recurring commands → tool_pattern, explicit decisions → decision, dependency manifests → dependency_fact, API calls → api_knowledge
+- **Memory Diff** (`diffMemories`): Compare two sessions' memories — learned (new in B), forgotten (in A not B), retained (same), evolved (same key, different content), contradicted (opposing conclusions)
+- **Hallucination Detection** (`detectHallucinations`): Cross-session analysis for recurring errors (same error pattern in 2+ sessions), contradicted facts (same key, opposite content)
+- **Cumulative Memory** (`buildCumulativeMemory`): Aggregates all memories across sessions, deduplicates by key (latest wins), tracks corrections and contradictions
+- **Storage**: `memory_items` table (session_id, category, key, content, evidence, confidence). Methods: `upsertMemoryItems()`, `getMemoryItems()`, `getAllMemoryItems()`, `getMemoryItemsByKey()`
+- **CLI**: `hawkeye memory [session]`, `hawkeye memory diff <s1> <s2>`, `hawkeye memory cumulative`, `hawkeye memory hallucinations` (all support `--json`)
+- **TUI**: `/memory`, `/memory diff <s1> <s2>`, `/memory hallucinations`
+- **API**: `GET /api/sessions/:id/memory`, `GET /api/memory/diff?a=<id>&b=<id>`, `GET /api/memory/cumulative?limit=N`, `GET /api/memory/hallucinations`
+- **MCP**: `memory_diff` (compare two sessions), `check_memory` (cumulative view)
+- **Dashboard**: `/memory` page with 3 tabs: Cumulative Memory, Memory Diff (session picker), Hallucinations
+
+## Autonomous Control Layer (Autocorrect)
+
+`packages/core/src/analysis/autocorrect.ts` — Active co-pilot engine. Hawkeye doesn't just observe — it autonomously corrects agent behavior when drift, errors, or cost issues are detected.
+
+### How it works
+
+1. **Trigger evaluation** (`shouldTriggerAutocorrect`): After every drift check in the hook-handler, evaluates conditions:
+   - Drift score hits critical (< 30)
+   - Drift declining (warning + downward trend)
+   - Error pattern repeats N times (configurable, default 3)
+   - Cost exceeds budget threshold (configurable, default 85%)
+
+2. **Correction planning** (`planCorrections`): Generates a correction plan based on trigger type:
+   - `rollback_file` — `git checkout -- <file>` to revert problematic recent changes
+   - `pause_session` — Freeze the session to prevent further damage
+   - `inject_hint` — Write `.hawkeye/active-correction.json` with instructions for MCP-aware agents
+   - `block_pattern` — Dynamically block failing command patterns
+   - `notify` — Fire webhooks with correction details
+
+3. **Execution** (`evaluateAndCorrect`): Executes corrections immediately (or logs them in dry-run mode). All corrections are persisted to the `corrections` SQLite table.
+
+4. **Agent integration**: MCP-aware agents (Claude Code, Cursor) receive correction hints via `get_correction` or `auto_correct` tools. The hint includes `agentInstructions` — a direct instruction to change behavior.
+
+### Configuration
+
+```json
+{
+  "autocorrect": {
+    "enabled": true,
+    "dryRun": false,
+    "triggers": { "driftCritical": true, "errorRepeat": 3, "costThreshold": 85 },
+    "actions": { "rollbackFiles": true, "pauseSession": true, "injectHint": true, "blockPattern": true }
+  }
+}
+```
+
+- **CLI**: `hawkeye autocorrect enable [--dry-run]`, `hawkeye autocorrect disable`, `hawkeye autocorrect status`, `hawkeye autocorrect history`
+- **TUI**: `/autocorrect enable`, `/autocorrect disable`, `/autocorrect status`, `/autocorrect history`
+- **API**: `GET /api/sessions/:id/corrections`, `GET /api/corrections`, `GET /api/active-correction`, `POST /api/autocorrect`, `POST /api/autocorrect/clear`
+- **MCP**: `auto_correct` (enhanced — includes active correction + history), `get_correction` (read active hint)
+- **Dashboard**: Autocorrect toggle in settings, correction history per session
 
 ## Impact Preview
 
@@ -209,15 +296,90 @@ Known agents: `claude` (`claude -p`), `aider` (`aider --message --yes`), `codex`
 
 Dashboard: `/arena` page shows all arena results with expandable leaderboard tables. API: `GET /api/arenas`, `GET /api/arenas/:id`.
 
+## Multi-agent Orchestration (Swarm)
+
+`hawkeye swarm` coordinates multiple AI agents working on subtasks in parallel, each in an isolated git worktree with enforced scope boundaries.
+
+### Architecture
+
+- **Core types**: `packages/core/src/swarm/types.ts` — SwarmConfig, AgentPersona, AgentScope, SwarmTask, SwarmAgent, SwarmResult, FileConflict, DB row types
+- **Config & validation**: `packages/core/src/swarm/config.ts` — JSON config parsing, validation, topological sort for task dependencies (Kahn's algorithm), scope validation with glob matching, template generation
+- **Conflict detection**: `packages/core/src/swarm/conflict.ts` — File conflict detection between agents, conflict severity scoring, merge order optimization
+- **CLI orchestrator**: `packages/cli/src/commands/swarm.ts` — Full orchestrator with git worktree isolation, parallel agent execution, scope enforcement (prompt-level), conflict detection, sequential/octopus merge strategies, live terminal progress display, webhook notifications, SQLite persistence
+- **Storage**: 3 tables — `swarms` (run metadata, status, cost, test results), `swarm_agents` (per-agent state, files changed, merge status), `swarm_conflicts` (file conflicts between agents)
+- **API**: `GET /api/swarms`, `GET /api/swarms/:id`, `GET /api/swarms/:id/agents`, `GET /api/swarms/:id/conflicts`, `GET /api/swarms/:id/full`, `POST /api/swarms/:id/cancel`, `POST /api/swarms/:id/delete`
+- **Dashboard**: `/swarm` page (list + detail view with expandable agent cards, scope display, conflict visualization, test results, merge info). Real-time WebSocket updates during execution
+- **MCP**: 3 tools — `list_swarms`, `get_swarm`, `get_swarm_agent`
+- **TUI**: `/swarm [list|init|<id>]`
+
+### Config Format (JSON)
+
+```json
+{
+  "name": "my-swarm",
+  "objective": "Build feature X",
+  "mergeStrategy": "sequential",
+  "autoMerge": true,
+  "testCommand": "npm test",
+  "timeout": 3600,
+  "agents": [
+    {
+      "name": "backend-agent",
+      "role": "worker",
+      "command": "claude",
+      "scope": { "include": ["src/api/**"], "exclude": ["*.test.ts"] },
+      "timeout": 1800,
+      "color": "#3b82f6"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "backend",
+      "agent": "backend-agent",
+      "prompt": "Create REST API endpoints",
+      "dependsOn": [],
+      "priority": 0
+    }
+  ]
+}
+```
+
+### Execution Flow
+
+1. Parse + validate config, resolve task dependency order (topological sort)
+2. Create isolated git worktrees per agent (`.hawkeye/swarm-<id>/<agent>/`)
+3. Execute agents in waves respecting dependencies — agents with unmet deps are `blocked`
+4. Scope enforcement: agent prompts include scope restrictions (include/exclude globs)
+5. After completion: collect git diff stats, detect file conflicts between agents
+6. Merge phase: sequential (least-conflict-first) or octopus strategy
+7. Optional test phase: run test command after merge
+8. Persist results to SQLite, fire webhooks, clean up worktrees
+
+### Agent Personas
+
+Each agent has a persona with: name, role (`lead`/`worker`/`reviewer`), command (CLI to invoke), scope (include/exclude globs), timeout, cost budget, model override, and display color. Known agents: `claude`, `aider`, `codex`. Custom agents supported.
+
+### Scope Enforcement
+
+Scope is enforced at two levels:
+1. **Prompt-level**: Agent's prompt includes `IMPORTANT: You are ONLY allowed to modify files matching: <patterns>`
+2. **Post-execution validation**: After agent completes, files changed outside scope are flagged as violations
+
+### Conflict Detection
+
+After all agents complete, Hawkeye compares file lists to detect overlaps. Conflicts scored by severity (config/lock files = critical, more agents = worse, modify+delete = worse). Merge order optimized to minimize conflicts (agents with fewer conflicts merge first).
+
 ## Webhooks
 
-Shared `fireWebhooks()` utility in `packages/cli/src/webhooks.ts`. Five webhook event types:
+Shared `fireWebhooks()` utility in `packages/cli/src/webhooks.ts`. Seven webhook event types:
 
 - `drift_critical` — fired by record.ts when drift score drops to critical
 - `guardrail_block` — fired by record.ts when a guardrail blocks an action
 - `session_complete` — fired by serve.ts auto-close on 30min inactivity
 - `task_complete` — fired by daemon.ts after each task finishes (completed or failed)
 - `overnight_report` — fired by overnight.ts / report.ts with full report payload
+- `autocorrect` — fired by hook-handler when autocorrect engine executes corrections
+- `swarm_complete` — fired by swarm.ts when a swarm run finishes (all agents + merge + tests)
 
 ## Design System (Dashboard)
 
@@ -231,14 +393,15 @@ Shared `fireWebhooks()` utility in `packages/cli/src/webhooks.ts`. Five webhook 
 | ------------------------------------------- | ----------------------------------------------------------------------------- |
 | `packages/cli/src/interactive.ts`           | TUI with raw-mode input, slash command picker — all `cmdXxx()` functions      |
 | `packages/cli/src/config.ts`                | Unified config types, load/save, `PROVIDER_MODELS` map (shared by TUI+API)   |
-| `packages/cli/src/commands/serve.ts`        | Dashboard server + all REST API endpoints + auto-reload watcher               |
+| `packages/cli/src/commands/serve.ts`        | Dashboard server + REST API + agent spawning + auto-reload watcher            |
+| `packages/cli/src/commands/agent-command.ts`| Agent command resolver — buildAgentInvocation() for claude/aider/codex       |
 | `packages/cli/src/commands/daemon.ts`       | Task daemon — polls tasks.json, context injection, journal, `--continue`      |
 | `packages/cli/src/commands/hook-handler.ts` | Internal hook handler — reads JSON from stdin, writes directly to SQLite      |
 | `packages/cli/src/commands/record-overlay.ts` | Recording banner + terminal title bar (adaptive width)                      |
 | `packages/core/src/types.ts`                | Central type definitions used across all packages                             |
 | `packages/core/src/interceptors/llm.ts`     | LLM endpoint detection, token extraction, cost estimation (shared logic)      |
 | `packages/core/src/drift/scorer.ts`         | Heuristic drift scorer — scoring logic and penalty rules                      |
-| `packages/cli/src/mcp/server.ts`            | MCP server — 27 tools for agent self-awareness (stdio JSON-RPC)               |
+| `packages/cli/src/mcp/server.ts`            | MCP server — 38 tools for agent self-awareness (stdio JSON-RPC)               |
 | `packages/core/src/llm/providers.ts`        | LLM provider factory — Ollama, Anthropic, OpenAI, DeepSeek, Mistral, Google   |
 | `packages/core/src/llm/post-mortem.ts`      | Post-mortem prompt template and JSON response parser                          |
 | `packages/dashboard/src/pages/TasksPage.tsx` | Remote tasks page — image upload, auto-approve, journal viewer               |
@@ -250,6 +413,19 @@ Shared `fireWebhooks()` utility in `packages/cli/src/webhooks.ts`. Five webhook 
 | `packages/cli/src/policy.ts`               | Policy Engine — YAML schema, parser, validator, template, converters         |
 | `packages/cli/src/commands/policy.ts`      | Policy CLI — init, check, show, export, import subcommands                   |
 | `packages/dashboard/src/pages/InterceptionPage.tsx` | Firewall page — live action stream, risk classification, notifications |
+| `packages/core/src/analysis/rca.ts`                 | RCA engine — heuristic analysis, causal chain, error patterns, LLM prompt |
+| `packages/core/src/analysis/memory-diff.ts`         | Memory Diff engine — extraction, diffing, hallucination detection, cumulative |
+| `packages/cli/src/commands/memory.ts`               | CLI memory command — extract, diff, cumulative, hallucinations              |
+| `packages/dashboard/src/pages/MemoryPage.tsx`       | Dashboard Memory page — cumulative view, diff picker, hallucinations        |
+| `packages/cli/src/commands/analyze.ts`              | CLI analyze command — chalk-formatted RCA report, --json, --llm           |
+| `packages/core/src/analysis/autocorrect.ts`                | Autocorrect engine — triggers, correction planner, executor, hint builder |
+| `packages/cli/src/commands/autocorrect.ts`                  | CLI autocorrect command — enable, disable, status, history, clear        |
+| `packages/dashboard/src/components/TimelineBar.tsx` | Time Travel timeline — SVG dots, breakpoints, drift overlay, context menu |
+| `packages/core/src/swarm/types.ts`                          | Swarm types — SwarmConfig, AgentPersona, SwarmResult, FileConflict       |
+| `packages/core/src/swarm/config.ts`                         | Swarm config — validation, topological sort, scope matching, templates   |
+| `packages/core/src/swarm/conflict.ts`                       | Swarm conflict detection — file overlap, severity scoring, merge order   |
+| `packages/cli/src/commands/swarm.ts`                        | Swarm CLI orchestrator — worktrees, execution, merge, live progress      |
+| `packages/dashboard/src/pages/SwarmPage.tsx`                | Dashboard Agents Control Room — spawn, monitor, control live agents + swarm orchestration |
 
 ## MCP Server
 
@@ -270,7 +446,7 @@ Add to `.mcp.json` at project root (Claude Code auto-reads this):
 }
 ```
 
-### MCP Tools Reference (27 tools)
+### MCP Tools Reference (38 tools)
 
 **Observability** — Query session data and metrics:
 
@@ -306,7 +482,12 @@ Add to `.mcp.json` at project root (Claude Code auto-reads this):
 | `get_session_timeline` | Condensed timeline grouped into phases (30s gaps) |
 | `get_error_summary` | Aggregate errors by pattern with frequency and last occurrence |
 | `suggest_correction` | LLM-generated correction when drift is high or errors repeat |
+| `analyze_root_cause` | Heuristic root cause analysis: primary error, causal chain, patterns, suggestions |
+| `memory_diff` | Compare what an agent remembers between two sessions (learned, forgotten, hallucinations) |
+| `check_memory` | Cumulative agent memory across sessions — what knowledge persists and what was lost |
 | `post_mortem` | Full LLM-powered session post-mortem (summary, outcome, recommendations) |
+| `auto_correct` | Get correction actions + check if autocorrect engine has already intervened (rollback, pause, hints) |
+| `get_correction` | Check if Hawkeye has autonomously corrected your session — returns active correction hint |
 
 **Actions** — Control session lifecycle:
 
@@ -324,14 +505,27 @@ Add to `.mcp.json` at project root (Claude Code auto-reads this):
 | `search_events` | Keyword search across all sessions' events |
 | `revert_file` | Revert a file to its pre-session state using git |
 
+**Swarm** — Multi-agent orchestration:
+
+| Tool | Description |
+|------|-------------|
+| `list_swarms` | List past and active swarm runs with status, cost, agent count |
+| `get_swarm` | Get full swarm details: agents, files changed, conflicts, merge results |
+| `get_swarm_agent` | Get detailed info about a specific agent within a swarm run |
+
 ### Hawkeye MCP Self-Monitoring
 
 This project has a Hawkeye MCP server configured. Use these tools proactively:
 
+- **At session start**: call `check_memory` to see what previous agents learned — avoid repeating their mistakes and build on their work
 - **Every 10 actions**: call `check_drift` to verify you're still aligned with the objective
+- **Every 15-20 actions**: call `self_assess` for a comprehensive health check (drift + cost + errors + velocity)
 - **Before dangerous operations** (force push, delete, deploy): call `check_guardrail` to pre-check
 - **When unsure about direction**: call `get_objective` to re-read the original task
 - **When making a significant decision**: call `log_event` with type "decision" to document your reasoning
-- **If you encounter repeated errors**: call `get_error_summary` to spot patterns
+- **If you encounter repeated errors**: call `get_error_summary` to spot patterns, then call `memory_diff` to check if a previous agent already solved this
+- **If self_assess returns high/critical risk**: call `auto_correct` to get concrete correction actions, then follow them
+- **After any drift warning/critical**: call `get_correction` to check if the autocorrect engine has already intervened (rolled back files, blocked patterns). Follow any `agentInstructions` immediately.
+- **If things go completely wrong**: call `trigger_incident` to freeze the session and create a snapshot for human review
 - **Periodically**: call `check_cost` to stay budget-aware
 - **At session end**: call `post_mortem` for a structured debrief

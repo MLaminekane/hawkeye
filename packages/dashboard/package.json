@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "echo 'no tests yet'",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "eslint src/"
   },
   "dependencies": {
@@ -25,6 +26,7 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
   }
 }

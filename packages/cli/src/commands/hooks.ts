@@ -1,13 +1,15 @@
 /**
  * hawkeye hooks install   — Configure Claude Code hooks for automatic event capture
- * hawkeye hooks uninstall — Remove Hawkeye hooks from Claude Code settings
  * hawkeye hooks status    — Check if hooks are installed
+ * hawkeye hooks uninstall — Remove Hawkeye hooks from Claude Code settings
  */
 
 import { Command } from 'commander';
 import { join } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import chalk from 'chalk';
+
+const compareCommands = (left: Command, right: Command) => left.name().localeCompare(right.name());
 
 function getClaudeSettingsPath(): string {
   return join(process.cwd(), '.claude', 'settings.json');
@@ -220,7 +222,8 @@ const statusCommand = new Command('status')
   });
 
 export const hooksCommand = new Command('hooks')
-  .description('Manage Claude Code hooks integration')
-  .addCommand(installCommand)
-  .addCommand(uninstallCommand)
-  .addCommand(statusCommand);
+  .description('Manage Claude Code hooks integration');
+
+[installCommand, statusCommand, uninstallCommand]
+  .sort(compareCommands)
+  .forEach((command) => hooksCommand.addCommand(command));
