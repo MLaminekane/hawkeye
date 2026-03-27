@@ -14,10 +14,20 @@ import { loadPolicy, savePolicy, validatePolicy, generateTemplate, configToPolic
 import { generatePdfBuffer } from './export.js';
 import { generateCIReport } from './ci-report.js';
 import { loadTasks, saveTasks, createTask, readJournal, clearJournal, type Task } from './daemon.js';
+import {
+  approveDesktopReview,
+  cancelDesktopRun,
+  deleteDesktopRun,
+  denyDesktopReview,
+  getDesktopStatus,
+  loadDesktopReviews,
+  loadDesktopRuns,
+  startDesktopPrompt,
+} from '../desktop.js';
 import { runSwarm, setSwarmBroadcast } from './swarm.js';
 import { validateSwarmConfig, generateSwarmTemplate } from '@mklamine/hawkeye-core';
 import type { ChildProcess } from 'node:child_process';
-import { buildAgentInvocation } from './agent-command.js';
+import { buildAgentInvocation, getAgentFullAccessArgs, inferAgentName } from './agent-command.js';
 
 // ─── Live Agent Tracking ──────────────────────────────────────
 
@@ -50,7 +60,69 @@ interface LiveAgent {
 const liveAgents = new Map<string, LiveAgent>();
 const agentProcesses = new Map<string, ChildProcess>();
 
+function isAllowedWebSocketOrigin(req: IncomingMessage): boolean {
+  const wsOrigin = req.headers.origin || '';
+  if (!wsOrigin) return true;
+
+  try {
+    const origin = new URL(wsOrigin);
+    const requestHost = req.headers.host || '';
+    const originHost = origin.host;
+    const isLocalOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(wsOrigin);
+    return isLocalOrigin || (requestHost.length > 0 && originHost === requestHost);
+  } catch {
+    return false;
+  }
+}
+
 const AGENTS_FILE = '.hawkeye/agents.json';
+
+// ─── Inter-Agent Communication ────────────────────────────────
+
+interface AgentMessage {
+  id: string;
+  from: string;         // agent id or 'dashboard'
+  fromName: string;     // human-readable sender name
+  to: string | null;    // agent id (null = broadcast)
+  toRole: string | null; // target role ('lead', 'worker', 'reviewer') or null
+  content: string;
+  type: 'direct' | 'broadcast' | 'decision' | 'request' | 'response';
+  timestamp: string;
+  read: boolean;
+}
+
+const agentMessages: AgentMessage[] = [];
+const MESSAGES_FILE = '.hawkeye/agent-messages.json';
+
+function persistMessages(cwd: string): void {
+  try {
+    // Keep last 500 messages
+    const toSave = agentMessages.slice(-500);
+    writeFileSync(join(cwd, MESSAGES_FILE), JSON.stringify(toSave, null, 2));
+  } catch {}
+}
+
+function loadPersistedMessages(cwd: string): void {
+  try {
+    const raw = JSON.parse(readFileSync(join(cwd, MESSAGES_FILE), 'utf-8'));
+    if (Array.isArray(raw)) {
+      agentMessages.length = 0;
+      agentMessages.push(...raw);
+    }
+  } catch {}
+}
+
+function getInboxForAgent(agentId: string): AgentMessage[] {
+  const agent = liveAgents.get(agentId);
+  if (!agent) return [];
+  return agentMessages.filter((m) => {
+    if (m.from === agentId) return false; // not your own messages
+    if (m.to === agentId) return true;    // direct to you
+    if (m.toRole && m.toRole === agent.role) return true; // to your role
+    if (!m.to && !m.toRole) return true;  // broadcast
+    return false;
+  });
+}
 
 function persistAgents(cwd: string): void {
   try {
@@ -62,17 +134,26 @@ function persistAgents(cwd: string): void {
   } catch {}
 }
 
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 function loadPersistedAgents(cwd: string): void {
   try {
     const raw = JSON.parse(readFileSync(join(cwd, AGENTS_FILE), 'utf-8'));
     if (!Array.isArray(raw)) return;
     for (const a of raw) {
       if (!a.id) continue;
-      // Running agents from previous process are now dead
+      // Running agents: check if their PID is still alive
       if (a.status === 'running') {
-        a.status = 'failed';
-        a.finishedAt = a.finishedAt || new Date().toISOString();
-        a.output = (a.output || '') + '\n[Server restarted — agent process lost]';
+        if (a.pid && isProcessAlive(a.pid)) {
+          // Process is still running — keep status as running (orphaned but alive)
+          // We can't re-attach stdio but the agent continues working
+        } else {
+          a.status = 'failed';
+          a.finishedAt = a.finishedAt || new Date().toISOString();
+          a.output = (a.output || '') + '\n[Server restarted — agent process lost]';
+        }
       }
       liveAgents.set(a.id, a);
     }
@@ -157,11 +238,32 @@ function spawnLiveAgent(
   };
   liveAgents.set(id, agent);
 
-  // Resolve command — pass --dangerously-skip-permissions for 'full' access
-  const extraArgs: string[] = [];
-  if (permissions === 'full') {
-    extraArgs.push('--dangerously-skip-permissions');
+  const agentName = inferAgentName(command);
+  if (storage && agentName !== 'claude') {
+    const syntheticSessionId = randomUUID();
+    const sessionResult = storage.createSession({
+      id: syntheticSessionId,
+      objective: `[${role.toUpperCase()}] ${name}: ${prompt.slice(0, 200)}`,
+      startedAt: new Date(agent.startedAt),
+      status: 'recording',
+      metadata: {
+        agent: agentName,
+        workingDir: cwd,
+        gitCommitBefore: initialHash || undefined,
+        developer: 'hawkeye-live-agent',
+      },
+      totalCostUsd: 0,
+      totalTokens: 0,
+      totalActions: 0,
+    });
+    if (sessionResult.ok) {
+      agent.sessionId = sessionResult.value;
+      broadcast({ type: 'agent_session_linked', agentId: id, sessionId: sessionResult.value });
+      persistAgents(cwd);
+    }
   }
+
+  const extraArgs = permissions === 'full' ? getAgentFullAccessArgs(command) : [];
   const { cmd, args } = buildAgentInvocation(command, fullPrompt, { extraArgs });
 
   try {
@@ -191,6 +293,9 @@ function spawnLiveAgent(
       agent.finishedAt = new Date().toISOString();
       agent.output += `\nError: ${err.message}`;
       agentProcesses.delete(id);
+      if (storage && agent.sessionId && agentName !== 'claude') {
+        storage.endSession(agent.sessionId, 'aborted');
+      }
       broadcast({ type: 'agent_complete', agentId: id, status: 'failed', error: err.message });
       persistAgents(cwd);
     });
@@ -200,6 +305,9 @@ function spawnLiveAgent(
       agent.exitCode = code;
       agent.finishedAt = new Date().toISOString();
       agentProcesses.delete(id);
+      if (storage && agent.sessionId && agentName !== 'claude') {
+        storage.endSession(agent.sessionId, code === 0 ? 'completed' : 'aborted');
+      }
 
       // Detect files changed
       if (initialHash) {
@@ -406,10 +514,11 @@ export const serveCommand = new Command('serve')
 
     const storage = new Storage(dbPath);
 
-    // Restore agents from previous server run
+    // Restore agents and messages from previous server run
     loadPersistedAgents(cwd);
+    loadPersistedMessages(cwd);
 
-    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       const url = req.url || '/';
       const clientIp = req.socket.remoteAddress || '127.0.0.1';
 
@@ -435,7 +544,7 @@ export const serveCommand = new Command('serve')
         if (req.method === 'POST') {
           handlePostApi(url, req, storage, res, broadcast, cwd);
         } else {
-          handleApi(url, storage, res, dbPath, cwd);
+          await handleApi(url, storage, res, dbPath, cwd);
         }
         return;
       }
@@ -455,9 +564,7 @@ export const serveCommand = new Command('serve')
     });
 
     server.on('upgrade', (req, socket, head) => {
-      const wsOrigin = req.headers.origin || '';
-      const isLocalOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(wsOrigin);
-      if (req.url === '/ws' && (isLocalOrigin || !wsOrigin)) {
+      if (req.url === '/ws' && isAllowedWebSocketOrigin(req)) {
         wss.handleUpgrade(req, socket, head, (ws) => {
           wss.emit('connection', ws, req);
         });
@@ -629,8 +736,20 @@ export const serveCommand = new Command('serve')
     let reloadDebounce: ReturnType<typeof setTimeout> | null = null;
     let isRestarting = false;
 
+    function hasRunningAgents(): boolean {
+      for (const a of liveAgents.values()) {
+        if (a.status === 'running') return true;
+      }
+      return false;
+    }
+
     function scheduleReload(changedFile: string) {
       if (isRestarting) return;
+      // Don't restart while agents are running — it would kill their processes
+      if (hasRunningAgents()) {
+        console.log(chalk.yellow(`  ⚠ Build detected (${changedFile}) but agents are running — skipping auto-reload`));
+        return;
+      }
       if (reloadDebounce) clearTimeout(reloadDebounce);
       reloadDebounce = setTimeout(() => {
         isRestarting = true;
@@ -868,8 +987,9 @@ function latestMtime(rootDir: string): number {
   return latest;
 }
 
-function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: string, cwd?: string): void {
+async function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: string, cwd?: string): Promise<void> {
   res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
 
   try {
     // GET /api/info — returns which project this dashboard serves
@@ -1515,6 +1635,79 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
       return;
     }
 
+    // GET /api/desktop/runs — List desktop automation runs
+    if (url === '/api/desktop/runs') {
+      res.writeHead(200);
+      res.end(JSON.stringify(loadDesktopRuns(cwd || process.cwd())));
+      return;
+    }
+
+    // GET /api/desktop/status — Desktop runtime readiness
+    if (url === '/api/desktop/status') {
+      const status = await getDesktopStatus(cwd || process.cwd());
+      res.writeHead(200);
+      res.end(JSON.stringify(status));
+      return;
+    }
+
+    // GET /api/desktop/reviews — Pending or resolved desktop review gates
+    if (url === '/api/desktop/reviews') {
+      res.writeHead(200);
+      res.end(JSON.stringify(loadDesktopReviews(cwd || process.cwd())));
+      return;
+    }
+
+    // GET /api/desktop/runs/:id — Get a single desktop automation run
+    const desktopRunMatch = url.match(/^\/api\/desktop\/runs\/([^/]+)$/);
+    if (desktopRunMatch) {
+      const run = loadDesktopRuns(cwd || process.cwd()).find((item) => item.id === desktopRunMatch[1]);
+      if (!run) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Desktop run not found' }));
+        return;
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify(run));
+      return;
+    }
+
+    // GET /api/desktop/screenshots/:filename — Serve captured desktop screenshots
+    const desktopScreenshotMatch = url.match(/^\/api\/desktop\/screenshots\/(.+)$/);
+    if (desktopScreenshotMatch) {
+      const filename = decodeURIComponent(desktopScreenshotMatch[1]);
+      const screenshotsDir = resolve(cwd || process.cwd(), '.hawkeye', 'desktop-screenshots');
+      let filePath = resolve(screenshotsDir, filename);
+      if (!filePath.startsWith(screenshotsDir + '/')) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: 'Forbidden' }));
+        return;
+      }
+      if (!existsSync(filePath)) {
+        const runs = loadDesktopRuns(cwd || process.cwd());
+        const candidate = runs
+          .flatMap((run) => run.results)
+          .map((result) => result.screenshotPath)
+          .find((resultPath) => {
+            if (!resultPath) return false;
+            return resultPath.split('/').pop() === filename && existsSync(resultPath);
+          });
+        if (candidate) {
+          filePath = candidate;
+        }
+      }
+      if (!existsSync(filePath)) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Screenshot not found' }));
+        return;
+      }
+      const ext = extname(filePath).toLowerCase();
+      const mimeMap: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+      res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
+      res.writeHead(200);
+      res.end(readFileSync(filePath));
+      return;
+    }
+
     // GET /api/tasks/attachments/:filename — Serve task attachment images
     const attachMatch = url.match(/^\/api\/tasks\/attachments\/(.+)$/);
     if (attachMatch) {
@@ -1709,6 +1902,7 @@ function handleApi(url: string, storage: Storage, res: ServerResponse, dbPath?: 
  */
 function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res: ServerResponse, broadcast: (msg: Record<string, unknown>) => void, cwd: string): void {
   res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
 
   const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB
   let body = '';
@@ -1720,7 +1914,7 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
       req.destroy();
     }
   });
-  req.on('end', () => {
+  req.on('end', async () => {
     if (exceeded) {
       res.writeHead(413);
       res.end(JSON.stringify({ error: 'Payload too large (max 5 MB)' }));
@@ -2087,6 +2281,67 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         return;
       }
 
+      // POST /api/desktop/run — Generate and execute a desktop automation run
+      if (url === '/api/desktop/run') {
+        const payload = JSON.parse(body);
+        if (!payload.prompt || typeof payload.prompt !== 'string' || !payload.prompt.trim()) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'prompt is required' }));
+          return;
+        }
+
+        const run = startDesktopPrompt({
+          prompt: payload.prompt.trim(),
+          agentCommand: typeof payload.agent === 'string' && payload.agent.trim() ? payload.agent.trim() : 'claude',
+          cwd,
+          dryRun: Boolean(payload.dryRun),
+          trustLevel:
+            payload.trustLevel === 'strict' || payload.trustLevel === 'permissive'
+              ? payload.trustLevel
+              : 'normal',
+          emit: broadcast,
+        });
+        res.writeHead(202);
+        res.end(JSON.stringify(run));
+        return;
+      }
+
+      // POST /api/desktop/reviews/:id/approve — Approve a paused desktop review gate
+      const desktopApproveMatch = url.match(/^\/api\/desktop\/reviews\/([^/]+)\/approve$/);
+      if (desktopApproveMatch) {
+        const review = await approveDesktopReview(cwd, desktopApproveMatch[1], broadcast);
+        res.writeHead(200);
+        res.end(JSON.stringify(review));
+        return;
+      }
+
+      // POST /api/desktop/reviews/:id/deny — Deny a paused desktop review gate
+      const desktopDenyMatch = url.match(/^\/api\/desktop\/reviews\/([^/]+)\/deny$/);
+      if (desktopDenyMatch) {
+        const review = denyDesktopReview(cwd, desktopDenyMatch[1], broadcast);
+        res.writeHead(200);
+        res.end(JSON.stringify(review));
+        return;
+      }
+
+      // POST /api/desktop/runs/:id/cancel — Cancel an active desktop run
+      const desktopCancelMatch = url.match(/^\/api\/desktop\/runs\/([^/]+)\/cancel$/);
+      if (desktopCancelMatch) {
+        const run = cancelDesktopRun(cwd, desktopCancelMatch[1], broadcast);
+        res.writeHead(200);
+        res.end(JSON.stringify(run));
+        return;
+      }
+
+      // POST /api/desktop/runs/:id/delete — Delete a completed/failed desktop run
+      const desktopDeleteMatch = url.match(/^\/api\/desktop\/runs\/([^/]+)\/delete$/);
+      if (desktopDeleteMatch) {
+        const result = deleteDesktopRun(cwd, desktopDeleteMatch[1]);
+        res.writeHead(200);
+        res.end(JSON.stringify(result));
+        return;
+      }
+
       // POST /api/tasks/:id/cancel — Cancel a pending task
       const cancelMatch = url.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
       if (cancelMatch) {
@@ -2327,6 +2582,144 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         return;
       }
 
+      // ─── Inter-Agent Communication Endpoints ──────────────────
+
+      // GET /api/agents/messages — Get all inter-agent messages
+      if (url === '/api/agents/messages' && req.method === 'GET') {
+        res.writeHead(200);
+        res.end(JSON.stringify(agentMessages.slice(-200)));
+        return;
+      }
+
+      // GET /api/agents/:id/inbox — Get unread messages for an agent
+      const inboxMatch = url.match(/^\/api\/agents\/([^/]+)\/inbox$/);
+      if (inboxMatch && req.method === 'GET') {
+        const agent = liveAgents.get(inboxMatch[1]);
+        if (!agent) { res.writeHead(404); res.end(JSON.stringify({ error: 'Agent not found' })); return; }
+        const inbox = getInboxForAgent(agent.id);
+        res.writeHead(200);
+        res.end(JSON.stringify(inbox));
+        return;
+      }
+
+      // POST /api/agents/comms — Send an inter-agent message
+      if (url === '/api/agents/comms' && req.method === 'POST') {
+        const p = JSON.parse(body);
+        if (!p.content) { res.writeHead(400); res.end(JSON.stringify({ error: 'content required' })); return; }
+
+        const fromAgent = p.from ? liveAgents.get(p.from) : null;
+        const msg: AgentMessage = {
+          id: randomUUID().slice(0, 12),
+          from: p.from || 'dashboard',
+          fromName: fromAgent?.name || p.fromName || 'Dashboard',
+          to: p.to || null,
+          toRole: p.toRole || null,
+          content: p.content,
+          type: p.type || 'direct',
+          timestamp: new Date().toISOString(),
+          read: false,
+        };
+
+        agentMessages.push(msg);
+        persistMessages(cwd);
+        broadcast({ type: 'agent_message', message: msg });
+
+        // Auto-deliver to target agents that are completed — trigger follow-up
+        const targets: LiveAgent[] = [];
+        if (msg.to) {
+          const t = liveAgents.get(msg.to);
+          if (t) targets.push(t);
+        } else if (msg.toRole) {
+          for (const a of liveAgents.values()) {
+            if (a.role === msg.toRole && a.id !== msg.from) targets.push(a);
+          }
+        } else {
+          // broadcast — deliver to all non-sender agents
+          for (const a of liveAgents.values()) {
+            if (a.id !== msg.from) targets.push(a);
+          }
+        }
+
+        const delivered: string[] = [];
+        for (const target of targets) {
+          if (target.status !== 'running') {
+            // Auto-deliver via follow-up for completed agents
+            const deliveryPrompt = `[INTER-AGENT MESSAGE from ${msg.fromName} (${fromAgent?.role || 'dashboard'})]\n${msg.content}\n\nRespond to this message while staying in your role as ${target.role}. If you need to communicate back, describe what you'd tell them.`;
+
+            const agentCmd = target.command.trim().split(/\s+/)[0]?.split('/').pop() || target.command;
+            const isClaude = agentCmd === 'claude';
+            const extraArgs =
+              target.permissions === 'full' ? getAgentFullAccessArgs(target.command) : [];
+
+            const { cmd, args } = buildAgentInvocation(target.command, deliveryPrompt, {
+              continueConversation: isClaude,
+              extraArgs,
+            });
+
+            try {
+              target.status = 'running';
+              target.finishedAt = null;
+              target.exitCode = null;
+
+              const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+              target.pid = child.pid || null;
+              agentProcesses.set(target.id, child);
+              broadcast({ type: 'agent_spawned', agent: { id: target.id, name: target.name, command: target.command, prompt: deliveryPrompt, status: 'running' } });
+              persistAgents(cwd);
+
+              child.stdout?.on('data', (data: Buffer) => {
+                const chunk = data.toString();
+                target.output += chunk;
+                if (target.output.length > 50000) target.output = target.output.slice(-40000);
+                broadcast({ type: 'agent_output', agentId: target.id, chunk: chunk.slice(0, 2000) });
+              });
+              child.stderr?.on('data', (data: Buffer) => {
+                const chunk = data.toString();
+                target.output += chunk;
+                if (target.output.length > 50000) target.output = target.output.slice(-40000);
+              });
+              child.on('error', (err) => {
+                target.status = 'failed';
+                target.finishedAt = new Date().toISOString();
+                target.output += `\nError: ${err.message}`;
+                agentProcesses.delete(target.id);
+                broadcast({ type: 'agent_complete', agentId: target.id, status: 'failed', error: err.message });
+                persistAgents(cwd);
+              });
+              child.on('close', (code) => {
+                target.status = code === 0 ? 'completed' : 'failed';
+                target.exitCode = code;
+                target.finishedAt = new Date().toISOString();
+                agentProcesses.delete(target.id);
+                if (target.initialHash) {
+                  try {
+                    const diff = execSync(`git diff --name-only ${target.initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+                    target.filesChanged = diff ? diff.split('\n') : target.filesChanged;
+                  } catch {}
+                }
+                broadcast({ type: 'agent_complete', agentId: target.id, status: target.status, exitCode: code ?? undefined, filesChanged: target.filesChanged });
+                persistAgents(cwd);
+              });
+
+              delivered.push(target.id);
+            } catch { /* spawn failed, skip */ }
+          }
+        }
+
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, message: msg, delivered }));
+        return;
+      }
+
+      // DELETE /api/agents/messages — Clear message history
+      if (url === '/api/agents/messages' && req.method === 'DELETE') {
+        agentMessages.length = 0;
+        persistMessages(cwd);
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
       // POST /api/agents/:id/message — Send a follow-up to an agent (continues same session)
       const msgAgentMatch = url.match(/^\/api\/agents\/([^/]+)\/message$/);
       if (msgAgentMatch) {
@@ -2344,10 +2737,8 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         const agentName = agent.command.trim().split(/\s+/)[0]?.split('/').pop() || agent.command;
         const isClaude = agentName === 'claude';
 
-        const extraArgs: string[] = [];
-        if (agent.permissions === 'full') {
-          extraArgs.push('--dangerously-skip-permissions');
-        }
+        const extraArgs =
+          agent.permissions === 'full' ? getAgentFullAccessArgs(agent.command) : [];
 
         const { cmd, args } = buildAgentInvocation(agent.command, p.message, {
           continueConversation: isClaude, // --continue for Claude = same session
