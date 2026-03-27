@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { join, extname, resolve } from 'node:path';
+import { join, extname, resolve, dirname } from 'node:path';
 import { existsSync, readFileSync, readdirSync, writeFileSync, statSync, mkdirSync, watch, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { exec, execFile, execFileSync, execSync, spawn } from 'node:child_process';
@@ -422,12 +422,93 @@ function validateSettings(payload: any): string | null {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     return 'Settings must be a JSON object';
   }
-  if (payload.guardrails !== undefined && !Array.isArray(payload.guardrails)) {
-    return 'guardrails must be an array';
+  
+  // Validate drift settings if present
+  if (payload.drift !== undefined) {
+    if (typeof payload.drift !== 'object' || payload.drift === null) {
+      return 'drift must be an object';
+    }
+    if (payload.drift.enabled !== undefined && typeof payload.drift.enabled !== 'boolean') {
+      return 'drift.enabled must be a boolean';
+    }
+    if (payload.drift.checkEvery !== undefined && (typeof payload.drift.checkEvery !== 'number' || payload.drift.checkEvery < 1)) {
+      return 'drift.checkEvery must be a positive number';
+    }
+    if (payload.drift.provider !== undefined && typeof payload.drift.provider !== 'string') {
+      return 'drift.provider must be a string';
+    }
+    if (payload.drift.model !== undefined && typeof payload.drift.model !== 'string') {
+      return 'drift.model must be a string';
+    }
+    if (payload.drift.warningThreshold !== undefined && (typeof payload.drift.warningThreshold !== 'number' || payload.drift.warningThreshold < 0 || payload.drift.warningThreshold > 100)) {
+      return 'drift.warningThreshold must be a number between 0 and 100';
+    }
+    if (payload.drift.criticalThreshold !== undefined && (typeof payload.drift.criticalThreshold !== 'number' || payload.drift.criticalThreshold < 0 || payload.drift.criticalThreshold > 100)) {
+      return 'drift.criticalThreshold must be a number between 0 and 100';
+    }
+    if (payload.drift.warningThreshold !== undefined && payload.drift.criticalThreshold !== undefined && payload.drift.warningThreshold <= payload.drift.criticalThreshold) {
+      return 'drift.warningThreshold must be greater than criticalThreshold';
+    }
   }
-  if (payload.webhooks !== undefined && !Array.isArray(payload.webhooks)) {
-    return 'webhooks must be an array';
+  
+  // Validate guardrails
+  if (payload.guardrails !== undefined) {
+    if (!Array.isArray(payload.guardrails)) {
+      return 'guardrails must be an array';
+    }
+    // Basic validation for each guardrail
+    for (let i = 0; i < payload.guardrails.length; i++) {
+      const rule = payload.guardrails[i];
+      if (typeof rule !== 'object' || rule === null) {
+        return `guardrails[${i}] must be an object`;
+      }
+      if (rule.name !== undefined && typeof rule.name !== 'string') {
+        return `guardrails[${i}].name must be a string`;
+      }
+      if (rule.type !== undefined && typeof rule.type !== 'string') {
+        return `guardrails[${i}].type must be a string`;
+      }
+      if (rule.enabled !== undefined && typeof rule.enabled !== 'boolean') {
+        return `guardrails[${i}].enabled must be a boolean`;
+      }
+      if (rule.action !== undefined && !['warn', 'block'].includes(rule.action)) {
+        return `guardrails[${i}].action must be either 'warn' or 'block'`;
+      }
+    }
   }
+  
+  // Validate webhooks
+  if (payload.webhooks !== undefined) {
+    if (!Array.isArray(payload.webhooks)) {
+      return 'webhooks must be an array';
+    }
+    for (let i = 0; i < payload.webhooks.length; i++) {
+      const webhook = payload.webhooks[i];
+      if (typeof webhook !== 'object' || webhook === null) {
+        return `webhooks[${i}] must be an object`;
+      }
+      if (webhook.url !== undefined && typeof webhook.url !== 'string') {
+        return `webhooks[${i}].url must be a string`;
+      }
+      if (webhook.events !== undefined && !Array.isArray(webhook.events)) {
+        return `webhooks[${i}].events must be an array`;
+      }
+    }
+  }
+  
+  // Validate apiKeys
+  if (payload.apiKeys !== undefined) {
+    if (typeof payload.apiKeys !== 'object' || payload.apiKeys === null) {
+      return 'apiKeys must be an object';
+    }
+    // Check that all values are strings
+    for (const [key, value] of Object.entries(payload.apiKeys)) {
+      if (typeof value !== 'string') {
+        return `apiKeys.${key} must be a string`;
+      }
+    }
+  }
+  
   return null;
 }
 
@@ -1564,9 +1645,16 @@ async function handleApi(url: string, storage: Storage, res: ServerResponse, dbP
 
     // GET /api/settings
     if (url === '/api/settings') {
-      const config = loadConfig(cwd || process.cwd());
-      res.writeHead(200);
-      res.end(JSON.stringify(config));
+      try {
+        const config = loadConfig(cwd || process.cwd());
+        res.writeHead(200);
+        res.end(JSON.stringify(config));
+      } catch (error) {
+        // If config doesn't exist, return default config
+        const defaultConfig = getDefaultConfig();
+        res.writeHead(200);
+        res.end(JSON.stringify(defaultConfig));
+      }
       return;
     }
 
@@ -2190,7 +2278,13 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
           return;
         }
         const cfgPath = join(cwd, '.hawkeye', 'config.json');
-        writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+        // Ensure directory exists
+        const cfgDir = dirname(cfgPath);
+        if (!existsSync(cfgDir)) {
+          mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
+        }
+        // Write with restricted permissions
+        writeFileSync(cfgPath, JSON.stringify(config, null, 2), { mode: 0o600 });
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -2199,15 +2293,98 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
       // POST /api/autocorrect — Toggle autocorrect or update config
       if (url === '/api/autocorrect') {
         const payload = JSON.parse(body);
+        // Validate payload
+        if (typeof payload !== 'object' || payload === null) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Payload must be a JSON object' }));
+          return;
+        }
+        
         const cfgPath = join(cwd, '.hawkeye', 'config.json');
         let existing: Record<string, unknown> = {};
-        try { existing = JSON.parse(readFileSync(cfgPath, 'utf-8')); } catch {}
-        existing.autocorrect = {
-          enabled: payload.enabled ?? false,
-          dryRun: payload.dryRun ?? false,
-          triggers: payload.triggers ?? { driftCritical: true, errorRepeat: 3, costThreshold: 85 },
-          actions: payload.actions ?? { rollbackFiles: true, pauseSession: true, injectHint: true, blockPattern: true },
-        };
+        try { 
+          existing = JSON.parse(readFileSync(cfgPath, 'utf-8')); 
+        } catch {
+          // If config doesn't exist, start with empty object
+          existing = {};
+        }
+        
+        // Build autocorrect config with validation
+        const autocorrectConfig: Record<string, unknown> = {};
+        
+        if (payload.enabled !== undefined) {
+          if (typeof payload.enabled !== 'boolean') {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'enabled must be a boolean' }));
+            return;
+          }
+          autocorrectConfig.enabled = payload.enabled;
+        } else {
+          autocorrectConfig.enabled = existing.autocorrect?.enabled ?? false;
+        }
+        
+        if (payload.dryRun !== undefined) {
+          if (typeof payload.dryRun !== 'boolean') {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'dryRun must be a boolean' }));
+            return;
+          }
+          autocorrectConfig.dryRun = payload.dryRun;
+        } else {
+          autocorrectConfig.dryRun = existing.autocorrect?.dryRun ?? false;
+        }
+        
+        // Validate triggers
+        if (payload.triggers !== undefined) {
+          if (typeof payload.triggers !== 'object' || payload.triggers === null) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'triggers must be an object' }));
+            return;
+          }
+          autocorrectConfig.triggers = {
+            driftCritical: payload.triggers.driftCritical ?? true,
+            errorRepeat: payload.triggers.errorRepeat ?? 3,
+            costThreshold: payload.triggers.costThreshold ?? 85,
+          };
+          // Additional validation
+          if (autocorrectConfig.triggers.errorRepeat < 1) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'triggers.errorRepeat must be at least 1' }));
+            return;
+          }
+          if (autocorrectConfig.triggers.costThreshold < 0 || autocorrectConfig.triggers.costThreshold > 100) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'triggers.costThreshold must be between 0 and 100' }));
+            return;
+          }
+        } else {
+          autocorrectConfig.triggers = existing.autocorrect?.triggers ?? { driftCritical: true, errorRepeat: 3, costThreshold: 85 };
+        }
+        
+        // Validate actions
+        if (payload.actions !== undefined) {
+          if (typeof payload.actions !== 'object' || payload.actions === null) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'actions must be an object' }));
+            return;
+          }
+          autocorrectConfig.actions = {
+            rollbackFiles: payload.actions.rollbackFiles ?? true,
+            pauseSession: payload.actions.pauseSession ?? true,
+            injectHint: payload.actions.injectHint ?? true,
+            blockPattern: payload.actions.blockPattern ?? true,
+          };
+        } else {
+          autocorrectConfig.actions = existing.autocorrect?.actions ?? { rollbackFiles: true, pauseSession: true, injectHint: true, blockPattern: true };
+        }
+        
+        existing.autocorrect = autocorrectConfig;
+        
+        // Ensure directory exists
+        const cfgDir = dirname(cfgPath);
+        if (!existsSync(cfgDir)) {
+          mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
+        }
         writeFileSync(cfgPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
