@@ -1,6 +1,6 @@
 {
   "name": "@mklamine/hawkeye-core",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Core SDK for Hawkeye — recording, interception, drift detection, guardrails, memory diff, autocorrect, and swarm orchestration",
   "license": "MIT",
   "repository": {
