@@ -7,6 +7,15 @@ export interface LlmProvider {
   complete(prompt: string, opts?: { maxTokens?: number }): Promise<string>;
 }
 
+function normalizeBaseUrl(baseUrl: string): string {
+  return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+}
+
+function normalizeLmStudioBaseUrl(baseUrl: string): string {
+  const normalized = normalizeBaseUrl(baseUrl);
+  return normalized.endsWith('/v1') ? normalized : `${normalized}/v1`;
+}
+
 export function createOllamaProvider(model: string, ollamaUrl?: string): LlmProvider {
   const baseUrl = ollamaUrl || 'http://localhost:11434';
   return {
@@ -58,13 +67,17 @@ export function createAnthropicProvider(model: string): LlmProvider {
   };
 }
 
-export function createOpenAIProvider(model: string): LlmProvider {
+export function createOpenAIProvider(
+  model: string,
+  baseUrl = 'https://api.openai.com/v1',
+): LlmProvider {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   return {
     async complete(prompt, opts) {
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) throw new Error('OPENAI_API_KEY not set');
 
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -79,6 +92,41 @@ export function createOpenAIProvider(model: string): LlmProvider {
       });
       if (!response.ok) {
         throw new Error(`OpenAI error: ${response.status}`);
+      }
+      const data = (await response.json()) as {
+        choices: Array<{ message: { content: string } }>;
+      };
+      return data.choices[0].message.content;
+    },
+  };
+}
+
+export function createLmStudioProvider(
+  model: string,
+  lmstudioUrl = 'http://localhost:1234/v1',
+): LlmProvider {
+  const baseUrl = normalizeLmStudioBaseUrl(lmstudioUrl);
+  return {
+    async complete(prompt, opts) {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (process.env.LMSTUDIO_API_KEY) {
+        headers.Authorization = `Bearer ${process.env.LMSTUDIO_API_KEY}`;
+      }
+
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: opts?.maxTokens ?? 300,
+          temperature: 0.1,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`LM Studio error: ${response.status}`);
       }
       const data = (await response.json()) as {
         choices: Array<{ message: { content: string } }>;
@@ -182,15 +230,17 @@ export function createGoogleProvider(model: string): LlmProvider {
 export function createLlmProvider(
   provider: string,
   model: string,
-  ollamaUrl?: string,
+  endpointUrl?: string,
 ): LlmProvider {
   switch (provider) {
     case 'ollama':
-      return createOllamaProvider(model, ollamaUrl);
+      return createOllamaProvider(model, endpointUrl);
     case 'anthropic':
       return createAnthropicProvider(model);
     case 'openai':
-      return createOpenAIProvider(model);
+      return createOpenAIProvider(model, endpointUrl || 'https://api.openai.com/v1');
+    case 'lmstudio':
+      return createLmStudioProvider(model, endpointUrl);
     case 'deepseek':
       return createDeepSeekProvider(model);
     case 'mistral':

@@ -8,22 +8,23 @@ import chalk from 'chalk';
 import { randomUUID } from 'node:crypto';
 import { Storage, analyzeRootCause, extractMemories, diffMemories, detectHallucinations, buildCumulativeMemory, createIncidentSnapshot, selfAssess, generateAutoCorrection, extractGitCommits, type RcaEvent, type RcaSession, type RcaDriftSnapshot, type MemoryItem } from '@mklamine/hawkeye-core';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { loadConfig, getDefaultConfig, PROVIDER_MODELS, getDeveloperName } from '../config.js';
+import { loadConfig, getDefaultConfig, PROVIDER_MODELS, getDeveloperName, normalizeLmStudioUrl } from '../config.js';
 import { fireWebhooks } from '../webhooks.js';
 import { loadPolicy, savePolicy, validatePolicy, generateTemplate, configToPolicy, type PolicyFile } from '../policy.js';
 import { generatePdfBuffer } from './export.js';
 import { generateCIReport } from './ci-report.js';
-import { loadTasks, saveTasks, createTask, readJournal, clearJournal, type Task } from './daemon.js';
 import {
-  approveDesktopReview,
-  cancelDesktopRun,
-  deleteDesktopRun,
-  denyDesktopReview,
-  getDesktopStatus,
-  loadDesktopReviews,
-  loadDesktopRuns,
-  startDesktopPrompt,
-} from '../desktop.js';
+  loadTasks,
+  saveTasks,
+  createTask,
+  readJournal,
+  clearJournal,
+  readDaemonStatus,
+  isDaemonStatusFresh,
+  injectConfiguredApiKeys,
+  ensureClineProfile,
+  type Task,
+} from './daemon.js';
 import { runSwarm, setSwarmBroadcast } from './swarm.js';
 import { validateSwarmConfig, generateSwarmTemplate } from '@mklamine/hawkeye-core';
 import type { ChildProcess } from 'node:child_process';
@@ -60,6 +61,85 @@ interface LiveAgent {
 const liveAgents = new Map<string, LiveAgent>();
 const agentProcesses = new Map<string, ChildProcess>();
 
+function buildLiveAgentEnv(cwd: string, command: string): NodeJS.ProcessEnv {
+  const env = injectConfiguredApiKeys(process.env, cwd, command);
+  delete env.CLAUDECODE;
+  return env;
+}
+
+function resolveAgentCommand(command: string, cwd: string, env: NodeJS.ProcessEnv): string {
+  try {
+    return ensureClineProfile(command, cwd, env);
+  } catch {
+    return command;
+  }
+}
+
+function safeParseRecord(value: string): Record<string, unknown> {
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function syncAgentStatsFromSession(agent: LiveAgent, storage: InstanceType<typeof Storage>): boolean {
+  if (!agent.sessionId) return false;
+
+  const eventsResult = storage.getEvents(agent.sessionId);
+  if (!eventsResult.ok) return false;
+
+  const events = eventsResult.value;
+  const files = new Set<string>();
+  let linesAdded = 0;
+  let linesRemoved = 0;
+  let totalCost = 0;
+
+  for (const event of events) {
+    totalCost += event.cost_usd || 0;
+    const data = safeParseRecord(event.data);
+
+    if (event.type === 'file_write' || event.type === 'file_delete') {
+      if (typeof data.path === 'string' && data.path) files.add(data.path);
+    }
+
+    if (event.type === 'file_rename') {
+      if (typeof data.from === 'string' && data.from) files.add(data.from);
+      if (typeof data.to === 'string' && data.to) files.add(data.to);
+    }
+
+    if (typeof data.linesAdded === 'number') linesAdded += data.linesAdded;
+    if (typeof data.linesRemoved === 'number') linesRemoved += data.linesRemoved;
+  }
+
+  agent.actionCount = events.length;
+  agent.costUsd = totalCost;
+  agent.filesChanged = [...files];
+  agent.linesAdded = linesAdded;
+  agent.linesRemoved = linesRemoved;
+
+  const driftResult = storage.getDriftSnapshots(agent.sessionId);
+  if (driftResult.ok && driftResult.value.length > 0) {
+    agent.driftScore = driftResult.value[driftResult.value.length - 1].score;
+  }
+
+  return true;
+}
+
+function syncAgentStatsFromGit(agent: LiveAgent, cwd: string): void {
+  if (!agent.initialHash) return;
+
+  try {
+    const diff = execSync(`git diff --name-only ${agent.initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
+    agent.filesChanged = diff ? diff.split('\n') : [];
+    const stat = execSync(`git diff --stat ${agent.initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 });
+    const addMatch = stat.match(/(\d+) insertions?\(\+\)/);
+    const delMatch = stat.match(/(\d+) deletions?\(-\)/);
+    agent.linesAdded = addMatch ? parseInt(addMatch[1], 10) : 0;
+    agent.linesRemoved = delMatch ? parseInt(delMatch[1], 10) : 0;
+  } catch {}
+}
+
 function isAllowedWebSocketOrigin(req: IncomingMessage): boolean {
   const wsOrigin = req.headers.origin || '';
   if (!wsOrigin) return true;
@@ -76,6 +156,82 @@ function isAllowedWebSocketOrigin(req: IncomingMessage): boolean {
 }
 
 const AGENTS_FILE = '.hawkeye/agents.json';
+
+function taskChanged(previous: Task | undefined, next: Task): boolean {
+  if (!previous) return true;
+  return previous.status !== next.status
+    || previous.output !== next.output
+    || previous.error !== next.error
+    || previous.startedAt !== next.startedAt
+    || previous.completedAt !== next.completedAt
+    || previous.exitCode !== next.exitCode;
+}
+
+function broadcastTaskUpdates(previous: Task[], next: Task[], broadcast: (msg: Record<string, unknown>) => void): void {
+  const previousById = new Map(previous.map((task) => [task.id, task]));
+
+  for (const task of next) {
+    const prev = previousById.get(task.id);
+    if (!prev) {
+      broadcast({ type: 'task_created', task });
+      continue;
+    }
+
+    if (!taskChanged(prev, task)) continue;
+
+    if (task.status === 'running') {
+      broadcast({ type: 'task_running', task });
+      continue;
+    }
+
+    if (task.status === 'completed') {
+      broadcast({ type: 'task_completed', task });
+      continue;
+    }
+
+    if (task.status === 'failed') {
+      broadcast({ type: 'task_failed', task });
+      continue;
+    }
+
+    if (task.status === 'cancelled') {
+      broadcast({ type: 'task_cancelled', task });
+    }
+  }
+}
+
+function buildDaemonStatusPayload(cwd: string): {
+  running: boolean;
+  agent: string | null;
+  startedAt: string | null;
+  lastHeartbeatAt: string | null;
+  intervalSec: number | null;
+  currentTaskId: string | null;
+  currentTaskPid: number | null;
+} {
+  const status = readDaemonStatus(cwd);
+  if (!status) {
+    return {
+      running: false,
+      agent: null,
+      startedAt: null,
+      lastHeartbeatAt: null,
+      intervalSec: null,
+      currentTaskId: null,
+      currentTaskPid: null,
+    };
+  }
+
+  return {
+    running: isDaemonStatusFresh(status),
+    agent: status.agent,
+    startedAt: status.startedAt,
+    lastHeartbeatAt: status.lastHeartbeatAt,
+    intervalSec: status.intervalSec,
+    currentTaskId: status.currentTaskId ?? null,
+    currentTaskPid: status.currentTaskPid ?? null,
+  };
+}
 
 // ─── Inter-Agent Communication ────────────────────────────────
 
@@ -263,11 +419,14 @@ function spawnLiveAgent(
     }
   }
 
-  const extraArgs = permissions === 'full' ? getAgentFullAccessArgs(command) : [];
-  const { cmd, args } = buildAgentInvocation(command, fullPrompt, { extraArgs });
+  const agentEnv = buildLiveAgentEnv(cwd, command);
+  const resolvedCommand = resolveAgentCommand(command, cwd, agentEnv);
+
+  const extraArgs = permissions === 'full' ? getAgentFullAccessArgs(resolvedCommand) : [];
+  const { cmd, args } = buildAgentInvocation(resolvedCommand, fullPrompt, { extraArgs });
 
   try {
-    const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+    const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: agentEnv });
     agent.pid = child.pid || null;
     agentProcesses.set(id, child);
 
@@ -309,17 +468,8 @@ function spawnLiveAgent(
         storage.endSession(agent.sessionId, code === 0 ? 'completed' : 'aborted');
       }
 
-      // Detect files changed
-      if (initialHash) {
-        try {
-          const diff = execSync(`git diff --name-only ${initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
-          agent.filesChanged = diff ? diff.split('\n') : [];
-          const stat = execSync(`git diff --stat ${initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 });
-          const m = stat.match(/(\d+) insertions?\(\+\)/);
-          const d = stat.match(/(\d+) deletions?\(-\)/);
-          agent.linesAdded = m ? parseInt(m[1]) : 0;
-          agent.linesRemoved = d ? parseInt(d[1]) : 0;
-        } catch {}
+      if (!(storage && syncAgentStatsFromSession(agent, storage))) {
+        syncAgentStatsFromGit(agent, cwd);
       }
 
       broadcast({ type: 'agent_complete', agentId: id, status: agent.status, exitCode: code, filesChanged: agent.filesChanged });
@@ -380,15 +530,7 @@ function spawnLiveAgent(
       // Try to link session if not yet linked
       if (!agent.sessionId) { linkSession(); return; }
       try {
-        const evResult = storage.getEvents(agent.sessionId);
-        if (evResult.ok) {
-          agent.actionCount = evResult.value.length;
-          agent.costUsd = evResult.value.reduce((sum: number, e: { cost_usd?: number }) => sum + (e.cost_usd || 0), 0);
-        }
-        const drResult = storage.getDriftSnapshots(agent.sessionId);
-        if (drResult.ok && drResult.value.length > 0) {
-          agent.driftScore = drResult.value[drResult.value.length - 1].score;
-        }
+        syncAgentStatsFromSession(agent, storage);
         broadcast({ type: 'agent_stats', agentId: id, drift: agent.driftScore, cost: agent.costUsd, actions: agent.actionCount });
         persistAgents(cwd);
       } catch {}
@@ -663,6 +805,48 @@ export const serveCommand = new Command('serve')
       }
     }
 
+    const hawkeyeMetaDir = join(cwd, '.hawkeye');
+    if (!existsSync(hawkeyeMetaDir)) {
+      mkdirSync(hawkeyeMetaDir, { recursive: true });
+    }
+
+    let knownTasks = loadTasks(cwd);
+    let lastDaemonStatusSnapshot = JSON.stringify(buildDaemonStatusPayload(cwd));
+    let tasksWatchTimer: NodeJS.Timeout | null = null;
+    let daemonWatchTimer: NodeJS.Timeout | null = null;
+
+    const flushTaskUpdates = () => {
+      tasksWatchTimer = null;
+      const nextTasks = loadTasks(cwd);
+      broadcastTaskUpdates(knownTasks, nextTasks, broadcast);
+      knownTasks = nextTasks;
+    };
+
+    const flushDaemonStatus = () => {
+      daemonWatchTimer = null;
+      const payload = buildDaemonStatusPayload(cwd);
+      const serialized = JSON.stringify(payload);
+      if (serialized === lastDaemonStatusSnapshot) return;
+      lastDaemonStatusSnapshot = serialized;
+      broadcast({ type: 'daemon_status', status: payload });
+    };
+
+    const scheduleTaskUpdates = () => {
+      if (tasksWatchTimer) clearTimeout(tasksWatchTimer);
+      tasksWatchTimer = setTimeout(flushTaskUpdates, 60);
+    };
+
+    const scheduleDaemonStatus = () => {
+      if (daemonWatchTimer) clearTimeout(daemonWatchTimer);
+      daemonWatchTimer = setTimeout(flushDaemonStatus, 60);
+    };
+
+    const hawkeyeMetaWatcher = watch(hawkeyeMetaDir, { recursive: false }, (_event, filename) => {
+      const changed = filename?.toString();
+      if (changed === 'tasks.json') scheduleTaskUpdates();
+      if (changed === 'daemon-status.json') scheduleDaemonStatus();
+    });
+
     // Auto-close sessions inactive for 30+ minutes
     const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
     let lastAutoCloseCheck = Date.now();
@@ -847,6 +1031,9 @@ export const serveCommand = new Command('serve')
         child.unref();
 
         // Give the new process a moment to bind, then exit
+        if (tasksWatchTimer) clearTimeout(tasksWatchTimer);
+        if (daemonWatchTimer) clearTimeout(daemonWatchTimer);
+        hawkeyeMetaWatcher.close();
         clearInterval(pollInterval);
         clearInterval(autoCloseInterval);
         wss.close();
@@ -953,6 +1140,9 @@ export const serveCommand = new Command('serve')
     // Graceful shutdown
     function shutdown(signal: string) {
       console.log(chalk.dim(`\n  Received ${signal}, shutting down...`));
+      if (tasksWatchTimer) clearTimeout(tasksWatchTimer);
+      if (daemonWatchTimer) clearTimeout(daemonWatchTimer);
+      hawkeyeMetaWatcher.close();
       clearInterval(pollInterval);
       clearInterval(autoCloseInterval);
       wss.close();
@@ -1665,6 +1855,56 @@ async function handleApi(url: string, storage: Storage, res: ServerResponse, dbP
       return;
     }
 
+    // GET /api/providers/local — Fetch actual installed models from Ollama + LM Studio
+    if (url === '/api/providers/local') {
+      const localCfg = loadConfig(cwd || process.cwd());
+      const result: Record<string, { available: boolean; models: string[]; url: string }> = {};
+
+      // Ollama
+      const ollamaUrl = localCfg?.drift?.ollamaUrl || 'http://localhost:11434';
+      try {
+        const resp = await fetch(`${ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(3000) });
+        if (resp.ok) {
+          const data = (await resp.json()) as { models?: Array<{ name: string; size?: number }> };
+          // Cloud models first, then local sorted by size desc
+          const all = data.models || [];
+          const cloud = all.filter((m) => m.name.includes(':cloud'));
+          const local = all.filter((m) => !m.name.includes(':cloud')).sort((a, b) => (b.size || 0) - (a.size || 0));
+          result.ollama = {
+            available: true,
+            models: [...cloud, ...local].map((m) => m.name),
+            url: ollamaUrl,
+          };
+        } else {
+          result.ollama = { available: false, models: [], url: ollamaUrl };
+        }
+      } catch {
+        result.ollama = { available: false, models: [], url: ollamaUrl };
+      }
+
+      // LM Studio
+      const lmUrl = normalizeLmStudioUrl(localCfg?.drift?.lmstudioUrl || 'http://localhost:1234');
+      try {
+        const resp = await fetch(`${lmUrl}/models`, { signal: AbortSignal.timeout(3000) });
+        if (resp.ok) {
+          const data = (await resp.json()) as { data?: Array<{ id: string }> };
+          result.lmstudio = {
+            available: true,
+            models: (data.data || []).map((m) => m.id),
+            url: lmUrl,
+          };
+        } else {
+          result.lmstudio = { available: false, models: [], url: lmUrl };
+        }
+      } catch {
+        result.lmstudio = { available: false, models: [], url: lmUrl };
+      }
+
+      res.writeHead(200);
+      res.end(JSON.stringify(result));
+      return;
+    }
+
     // GET /api/policies — Load policies.yml
     if (url === '/api/policies') {
       const policy = loadPolicy(cwd || process.cwd());
@@ -1707,6 +1947,13 @@ async function handleApi(url: string, storage: Storage, res: ServerResponse, dbP
       return;
     }
 
+    // GET /api/daemon/status — Check whether the task daemon is alive
+    if (url === '/api/daemon/status') {
+      res.writeHead(200);
+      res.end(JSON.stringify(buildDaemonStatusPayload(cwd || process.cwd())));
+      return;
+    }
+
     // GET /api/tasks — List all tasks from the task queue
     if (url === '/api/tasks') {
       const tasks = loadTasks(cwd || process.cwd());
@@ -1723,76 +1970,18 @@ async function handleApi(url: string, storage: Storage, res: ServerResponse, dbP
       return;
     }
 
-    // GET /api/desktop/runs — List desktop automation runs
-    if (url === '/api/desktop/runs') {
-      res.writeHead(200);
-      res.end(JSON.stringify(loadDesktopRuns(cwd || process.cwd())));
-      return;
-    }
-
-    // GET /api/desktop/status — Desktop runtime readiness
-    if (url === '/api/desktop/status') {
-      const status = await getDesktopStatus(cwd || process.cwd());
-      res.writeHead(200);
-      res.end(JSON.stringify(status));
-      return;
-    }
-
-    // GET /api/desktop/reviews — Pending or resolved desktop review gates
-    if (url === '/api/desktop/reviews') {
-      res.writeHead(200);
-      res.end(JSON.stringify(loadDesktopReviews(cwd || process.cwd())));
-      return;
-    }
-
-    // GET /api/desktop/runs/:id — Get a single desktop automation run
-    const desktopRunMatch = url.match(/^\/api\/desktop\/runs\/([^/]+)$/);
-    if (desktopRunMatch) {
-      const run = loadDesktopRuns(cwd || process.cwd()).find((item) => item.id === desktopRunMatch[1]);
-      if (!run) {
-        res.writeHead(404);
-        res.end(JSON.stringify({ error: 'Desktop run not found' }));
-        return;
-      }
-      res.writeHead(200);
-      res.end(JSON.stringify(run));
-      return;
-    }
-
-    // GET /api/desktop/screenshots/:filename — Serve captured desktop screenshots
-    const desktopScreenshotMatch = url.match(/^\/api\/desktop\/screenshots\/(.+)$/);
-    if (desktopScreenshotMatch) {
-      const filename = decodeURIComponent(desktopScreenshotMatch[1]);
-      const screenshotsDir = resolve(cwd || process.cwd(), '.hawkeye', 'desktop-screenshots');
-      let filePath = resolve(screenshotsDir, filename);
-      if (!filePath.startsWith(screenshotsDir + '/')) {
-        res.writeHead(403);
-        res.end(JSON.stringify({ error: 'Forbidden' }));
-        return;
-      }
-      if (!existsSync(filePath)) {
-        const runs = loadDesktopRuns(cwd || process.cwd());
-        const candidate = runs
-          .flatMap((run) => run.results)
-          .map((result) => result.screenshotPath)
-          .find((resultPath) => {
-            if (!resultPath) return false;
-            return resultPath.split('/').pop() === filename && existsSync(resultPath);
-          });
-        if (candidate) {
-          filePath = candidate;
+    // GET /api/mcp-servers — List all MCP servers from .mcp.json
+    if (url === '/api/mcp-servers') {
+      const mcpPath = join(cwd || process.cwd(), '.mcp.json');
+      let servers: Record<string, unknown> = {};
+      try {
+        if (existsSync(mcpPath)) {
+          const raw = JSON.parse(readFileSync(mcpPath, 'utf-8'));
+          servers = (raw.mcpServers || {}) as Record<string, unknown>;
         }
-      }
-      if (!existsSync(filePath)) {
-        res.writeHead(404);
-        res.end(JSON.stringify({ error: 'Screenshot not found' }));
-        return;
-      }
-      const ext = extname(filePath).toLowerCase();
-      const mimeMap: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
-      res.setHeader('Content-Type', mimeMap[ext] || 'application/octet-stream');
+      } catch { /* ignore */ }
       res.writeHead(200);
-      res.end(readFileSync(filePath));
+      res.end(JSON.stringify(servers));
       return;
     }
 
@@ -1850,15 +2039,35 @@ async function handleApi(url: string, storage: Storage, res: ServerResponse, dbP
 
     // GET /api/interceptions — Get recent guardrail blocks + impact blocks (last 50)
     if (url === '/api/interceptions') {
-      const events = storage.getRecentBlocks(50);
+      const blocks = storage.getRecentBlocks(50);
+      const recentEvents = storage.getRecentEvents(120);
       // Also append any pending reviews
       const pendingFile = join(cwd || process.cwd(), '.hawkeye', 'pending-reviews.json');
       let pending: unknown[] = [];
       try {
         if (existsSync(pendingFile)) pending = JSON.parse(readFileSync(pendingFile, 'utf-8'));
       } catch {}
+
+      let impactPreviewsEnabled = false;
+      try {
+        const policy = loadPolicy(cwd || process.cwd());
+        impactPreviewsEnabled = !!policy?.rules?.some((rule) => rule.enabled && rule.type === 'impact_threshold');
+      } catch {}
+
+      const recentActions = recentEvents.ok
+        ? recentEvents.value.map((event: { type: string; data: string; cost_usd: number }) => ({
+            ...event,
+            risk: classifyEventRisk(event),
+          }))
+        : [];
+
       res.writeHead(200);
-      res.end(JSON.stringify({ blocks: events, pendingReviews: pending }));
+      res.end(JSON.stringify({
+        blocks,
+        recentActions,
+        pendingReviews: pending,
+        impactPreviewsEnabled,
+      }));
       return;
     }
 
@@ -2200,6 +2409,21 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         return;
       }
 
+      // POST /api/sessions/:id/delete
+      const deleteMatch = url.match(/^\/api\/sessions\/([^/]+)\/delete$/);
+      if (deleteMatch) {
+        const result = storage.deleteSession(deleteMatch[1]);
+        if (result.ok) {
+          broadcast({ type: 'session_end', session: { id: deleteMatch[1], status: 'deleted' } });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } else {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: result.error?.message || 'Failed to delete session' }));
+        }
+        return;
+      }
+
       // POST /api/revert — Revert a file change
       if (url === '/api/revert') {
         const payload = JSON.parse(body);
@@ -2290,6 +2514,36 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         return;
       }
 
+      // POST /api/mcp-servers — Save MCP servers to .mcp.json
+      if (url === '/api/mcp-servers') {
+        const payload = JSON.parse(body);
+        if (typeof payload !== 'object' || payload === null) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Payload must be a JSON object' }));
+          return;
+        }
+        const mcpPath = join(cwd, '.mcp.json');
+        let mcpConfig: { mcpServers: Record<string, unknown> } = { mcpServers: {} };
+        try {
+          if (existsSync(mcpPath)) {
+            mcpConfig = JSON.parse(readFileSync(mcpPath, 'utf-8'));
+            if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+          }
+        } catch { /* ignore */ }
+        // Merge: payload keys overwrite, null values delete
+        for (const [name, config] of Object.entries(payload)) {
+          if (config === null) {
+            delete mcpConfig.mcpServers[name];
+          } else {
+            mcpConfig.mcpServers[name] = config;
+          }
+        }
+        writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + '\n', { mode: 0o600 });
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, servers: Object.keys(mcpConfig.mcpServers) }));
+        return;
+      }
+
       // POST /api/autocorrect — Toggle autocorrect or update config
       if (url === '/api/autocorrect') {
         const payload = JSON.parse(body);
@@ -2310,7 +2564,12 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         }
         
         // Build autocorrect config with validation
-        const autocorrectConfig: Record<string, unknown> = {};
+        const autocorrectConfig: {
+          enabled?: boolean;
+          dryRun?: boolean;
+          triggers?: { driftCritical: boolean; errorRepeat: number; costThreshold: number };
+          actions?: { rollbackFiles: boolean; pauseSession: boolean; injectHint: boolean; blockPattern: boolean };
+        } = {};
         
         if (payload.enabled !== undefined) {
           if (typeof payload.enabled !== 'boolean') {
@@ -2320,9 +2579,9 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
           }
           autocorrectConfig.enabled = payload.enabled;
         } else {
-          autocorrectConfig.enabled = existing.autocorrect?.enabled ?? false;
+          autocorrectConfig.enabled = (existing.autocorrect as Record<string, unknown>)?.enabled as boolean ?? false;
         }
-        
+
         if (payload.dryRun !== undefined) {
           if (typeof payload.dryRun !== 'boolean') {
             res.writeHead(400);
@@ -2331,9 +2590,11 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
           }
           autocorrectConfig.dryRun = payload.dryRun;
         } else {
-          autocorrectConfig.dryRun = existing.autocorrect?.dryRun ?? false;
+          autocorrectConfig.dryRun = (existing.autocorrect as Record<string, unknown>)?.dryRun as boolean ?? false;
         }
-        
+
+        const existingAc = (existing.autocorrect ?? {}) as Record<string, unknown>;
+
         // Validate triggers
         if (payload.triggers !== undefined) {
           if (typeof payload.triggers !== 'object' || payload.triggers === null) {
@@ -2358,9 +2619,9 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
             return;
           }
         } else {
-          autocorrectConfig.triggers = existing.autocorrect?.triggers ?? { driftCritical: true, errorRepeat: 3, costThreshold: 85 };
+          autocorrectConfig.triggers = (existingAc.triggers as typeof autocorrectConfig.triggers) ?? { driftCritical: true, errorRepeat: 3, costThreshold: 85 };
         }
-        
+
         // Validate actions
         if (payload.actions !== undefined) {
           if (typeof payload.actions !== 'object' || payload.actions === null) {
@@ -2375,7 +2636,7 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
             blockPattern: payload.actions.blockPattern ?? true,
           };
         } else {
-          autocorrectConfig.actions = existing.autocorrect?.actions ?? { rollbackFiles: true, pauseSession: true, injectHint: true, blockPattern: true };
+          autocorrectConfig.actions = (existingAc.actions as typeof autocorrectConfig.actions) ?? { rollbackFiles: true, pauseSession: true, injectHint: true, blockPattern: true };
         }
         
         existing.autocorrect = autocorrectConfig;
@@ -2442,84 +2703,68 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
             }
           }
           if (savedPaths.length > 0) {
-            // Update task with attachment info and append paths to prompt for agent reference
+            // Persist the enriched prompt so the daemon receives the attachment paths.
+            const attachmentNote = `\n\n[Attached images: ${savedPaths.map((p) => join(cwd, '.hawkeye', 'task-attachments', p)).join(', ')}]`;
+            task.prompt += attachmentNote;
             const tasks = loadTasks(cwd);
             const idx = tasks.findIndex((t) => t.id === task.id);
             if (idx >= 0) {
-              (tasks[idx] as any).attachments = savedPaths;
+              tasks[idx] = {
+                ...tasks[idx],
+                prompt: task.prompt,
+                attachments: savedPaths,
+              };
               saveTasks(cwd, tasks);
             }
-            task.prompt += `\n\n[Attached images: ${savedPaths.map(p => join(cwd, '.hawkeye', 'task-attachments', p)).join(', ')}]`;
           }
         }
-        broadcast({ type: 'task_created', task });
         res.writeHead(201);
         res.end(JSON.stringify(task));
         return;
       }
 
-      // POST /api/desktop/run — Generate and execute a desktop automation run
-      if (url === '/api/desktop/run') {
-        const payload = JSON.parse(body);
-        if (!payload.prompt || typeof payload.prompt !== 'string' || !payload.prompt.trim()) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: 'prompt is required' }));
+      // POST /api/tasks/clear-finished — Remove completed/failed/cancelled tasks from the queue
+      if (url === '/api/tasks/clear-finished') {
+        const tasks = loadTasks(cwd);
+        const nextTasks = tasks.filter((task) => task.status === 'pending' || task.status === 'running');
+        const removed = tasks.length - nextTasks.length;
+        saveTasks(cwd, nextTasks);
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, removed }));
+        return;
+      }
+
+      // POST /api/tasks/:id/retry — Clone a finished task back into the queue
+      const retryMatch = url.match(/^\/api\/tasks\/([^/]+)\/retry$/);
+      if (retryMatch) {
+        const sourceId = retryMatch[1];
+        const tasks = loadTasks(cwd);
+        const source = tasks.find((task) => task.id === sourceId);
+        if (!source) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: 'Task not found' }));
           return;
         }
 
-        const run = startDesktopPrompt({
-          prompt: payload.prompt.trim(),
-          agentCommand: typeof payload.agent === 'string' && payload.agent.trim() ? payload.agent.trim() : 'claude',
-          cwd,
-          dryRun: Boolean(payload.dryRun),
-          trustLevel:
-            payload.trustLevel === 'strict' || payload.trustLevel === 'permissive'
-              ? payload.trustLevel
-              : 'normal',
-          emit: broadcast,
-        });
-        res.writeHead(202);
-        res.end(JSON.stringify(run));
+        const retryTask = createTask(cwd, source.prompt, source.agent);
+        if (source.attachments && source.attachments.length > 0) {
+          const nextTasks = loadTasks(cwd);
+          const idx = nextTasks.findIndex((task) => task.id === retryTask.id);
+          if (idx >= 0) {
+            nextTasks[idx] = {
+              ...nextTasks[idx],
+              attachments: [...source.attachments],
+            };
+            saveTasks(cwd, nextTasks);
+          }
+        }
+
+        res.writeHead(201);
+        res.end(JSON.stringify(retryTask));
         return;
       }
 
-      // POST /api/desktop/reviews/:id/approve — Approve a paused desktop review gate
-      const desktopApproveMatch = url.match(/^\/api\/desktop\/reviews\/([^/]+)\/approve$/);
-      if (desktopApproveMatch) {
-        const review = await approveDesktopReview(cwd, desktopApproveMatch[1], broadcast);
-        res.writeHead(200);
-        res.end(JSON.stringify(review));
-        return;
-      }
-
-      // POST /api/desktop/reviews/:id/deny — Deny a paused desktop review gate
-      const desktopDenyMatch = url.match(/^\/api\/desktop\/reviews\/([^/]+)\/deny$/);
-      if (desktopDenyMatch) {
-        const review = denyDesktopReview(cwd, desktopDenyMatch[1], broadcast);
-        res.writeHead(200);
-        res.end(JSON.stringify(review));
-        return;
-      }
-
-      // POST /api/desktop/runs/:id/cancel — Cancel an active desktop run
-      const desktopCancelMatch = url.match(/^\/api\/desktop\/runs\/([^/]+)\/cancel$/);
-      if (desktopCancelMatch) {
-        const run = cancelDesktopRun(cwd, desktopCancelMatch[1], broadcast);
-        res.writeHead(200);
-        res.end(JSON.stringify(run));
-        return;
-      }
-
-      // POST /api/desktop/runs/:id/delete — Delete a completed/failed desktop run
-      const desktopDeleteMatch = url.match(/^\/api\/desktop\/runs\/([^/]+)\/delete$/);
-      if (desktopDeleteMatch) {
-        const result = deleteDesktopRun(cwd, desktopDeleteMatch[1]);
-        res.writeHead(200);
-        res.end(JSON.stringify(result));
-        return;
-      }
-
-      // POST /api/tasks/:id/cancel — Cancel a pending task
+      // POST /api/tasks/:id/cancel — Cancel a pending or running task
       const cancelMatch = url.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
       if (cancelMatch) {
         const taskId = cancelMatch[1];
@@ -2530,6 +2775,41 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
           res.end(JSON.stringify({ error: 'Task not found' }));
           return;
         }
+
+        if (task.status === 'running') {
+          const daemonStatus = readDaemonStatus(cwd);
+          const canKillRunningTask = daemonStatus
+            && isDaemonStatusFresh(daemonStatus)
+            && daemonStatus.currentTaskId === task.id
+            && typeof daemonStatus.currentTaskPid === 'number';
+
+          if (!canKillRunningTask || !daemonStatus?.currentTaskPid) {
+            task.status = 'cancelled';
+            task.completedAt = new Date().toISOString();
+            task.error = 'Cancelled after the daemon heartbeat was missing. Hawkeye treated the task as orphaned.';
+            saveTasks(cwd, tasks);
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true, orphaned: true }));
+            return;
+          }
+
+          try {
+            process.kill(daemonStatus.currentTaskPid, 'SIGTERM');
+          } catch (err) {
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: `Failed to stop running task: ${(err as Error).message}` }));
+            return;
+          }
+
+          task.status = 'cancelled';
+          task.completedAt = new Date().toISOString();
+          task.error = 'Cancelled from dashboard.';
+          saveTasks(cwd, tasks);
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
         if (task.status !== 'pending') {
           res.writeHead(400);
           res.end(JSON.stringify({ error: `Cannot cancel task with status '${task.status}'` }));
@@ -2538,7 +2818,6 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         task.status = 'cancelled';
         task.completedAt = new Date().toISOString();
         saveTasks(cwd, tasks);
-        broadcast({ type: 'task_cancelled', task });
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -2823,12 +3102,13 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
             // Auto-deliver via follow-up for completed agents
             const deliveryPrompt = `[INTER-AGENT MESSAGE from ${msg.fromName} (${fromAgent?.role || 'dashboard'})]\n${msg.content}\n\nRespond to this message while staying in your role as ${target.role}. If you need to communicate back, describe what you'd tell them.`;
 
-            const agentCmd = target.command.trim().split(/\s+/)[0]?.split('/').pop() || target.command;
-            const isClaude = agentCmd === 'claude';
+            const commsEnv = buildLiveAgentEnv(cwd, target.command);
+            const resolvedTargetCmd = resolveAgentCommand(target.command, cwd, commsEnv);
+            const isClaude = inferAgentName(target.command) === 'claude';
             const extraArgs =
-              target.permissions === 'full' ? getAgentFullAccessArgs(target.command) : [];
+              target.permissions === 'full' ? getAgentFullAccessArgs(resolvedTargetCmd) : [];
 
-            const { cmd, args } = buildAgentInvocation(target.command, deliveryPrompt, {
+            const { cmd, args } = buildAgentInvocation(resolvedTargetCmd, deliveryPrompt, {
               continueConversation: isClaude,
               extraArgs,
             });
@@ -2838,7 +3118,7 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
               target.finishedAt = null;
               target.exitCode = null;
 
-              const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+              const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: commsEnv });
               target.pid = child.pid || null;
               agentProcesses.set(target.id, child);
               broadcast({ type: 'agent_spawned', agent: { id: target.id, name: target.name, command: target.command, prompt: deliveryPrompt, status: 'running' } });
@@ -2868,11 +3148,8 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
                 target.exitCode = code;
                 target.finishedAt = new Date().toISOString();
                 agentProcesses.delete(target.id);
-                if (target.initialHash) {
-                  try {
-                    const diff = execSync(`git diff --name-only ${target.initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
-                    target.filesChanged = diff ? diff.split('\n') : target.filesChanged;
-                  } catch {}
+                if (!(storage && syncAgentStatsFromSession(target, storage))) {
+                  syncAgentStatsFromGit(target, cwd);
                 }
                 broadcast({ type: 'agent_complete', agentId: target.id, status: target.status, exitCode: code ?? undefined, filesChanged: target.filesChanged });
                 persistAgents(cwd);
@@ -2911,13 +3188,14 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         }
 
         // Continue the same agent — use --continue for Claude to keep the same conversation
-        const agentName = agent.command.trim().split(/\s+/)[0]?.split('/').pop() || agent.command;
-        const isClaude = agentName === 'claude';
+        const followUpEnv = buildLiveAgentEnv(cwd, agent.command);
+        const resolvedCmd = resolveAgentCommand(agent.command, cwd, followUpEnv);
+        const isClaude = inferAgentName(agent.command) === 'claude';
 
         const extraArgs =
-          agent.permissions === 'full' ? getAgentFullAccessArgs(agent.command) : [];
+          agent.permissions === 'full' ? getAgentFullAccessArgs(resolvedCmd) : [];
 
-        const { cmd, args } = buildAgentInvocation(agent.command, p.message, {
+        const { cmd, args } = buildAgentInvocation(resolvedCmd, p.message, {
           continueConversation: isClaude, // --continue for Claude = same session
           extraArgs,
         });
@@ -2929,7 +3207,7 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         agent.prompt = p.message; // update prompt to latest follow-up
 
         try {
-          const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+          const child = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: followUpEnv });
           agent.pid = child.pid || null;
           agentProcesses.set(agent.id, child);
 
@@ -2964,17 +3242,8 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
             agent.finishedAt = new Date().toISOString();
             agentProcesses.delete(agent.id);
 
-            // Update files changed (cumulative)
-            if (agent.initialHash) {
-              try {
-                const diff = execSync(`git diff --name-only ${agent.initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 }).trim();
-                agent.filesChanged = diff ? diff.split('\n') : agent.filesChanged;
-                const stat = execSync(`git diff --stat ${agent.initialHash}`, { cwd, encoding: 'utf-8', timeout: 10000 });
-                const addMatch = stat.match(/(\d+) insertions?/);
-                const delMatch = stat.match(/(\d+) deletions?/);
-                if (addMatch) agent.linesAdded = parseInt(addMatch[1], 10);
-                if (delMatch) agent.linesRemoved = parseInt(delMatch[1], 10);
-              } catch {}
+            if (!(storage && syncAgentStatsFromSession(agent, storage))) {
+              syncAgentStatsFromGit(agent, cwd);
             }
 
             broadcast({

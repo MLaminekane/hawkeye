@@ -41,3 +41,9 @@ step.txt
 
 # CLI bundled dashboard (created by prepack)
 packages/cli/dashboard/
+
+# MCP config (contains personal API tokens — use .mcp.example.json as template)
+.mcp.json
+
+# Generated export files
+hawkeye.html

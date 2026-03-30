@@ -67,7 +67,7 @@ export function Layout() {
   ];
 
   return (
-    <div className="relative min-h-screen bg-hawk-bg">
+    <div className="relative min-h-screen bg-[var(--hawk-canvas)]">
       <div className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
         <div className="absolute -left-24 top-12 h-64 w-64 rounded-full bg-hawk-orange/10 blur-3xl" />
         <div className="absolute right-[-70px] top-32 h-72 w-72 rounded-full bg-hawk-green/10 blur-3xl" />
@@ -76,7 +76,7 @@ export function Layout() {
       <nav className="sticky top-0 z-50 border-b border-hawk-border-subtle bg-hawk-bg/75 backdrop-blur-2xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6 sm:py-3.5">
           <Link to="/" className="flex shrink-0 items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-hawk-orange text-xs font-bold text-black shadow-[0_0_0_3px_rgba(255,107,43,0.18)]">
+            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-hawk-orange text-xs font-bold text-white shadow-[0_0_0_3px_rgba(255,107,43,0.18)]">
               H
             </div>
             <span className="hidden font-display text-base font-semibold tracking-wide text-hawk-text sm:inline">

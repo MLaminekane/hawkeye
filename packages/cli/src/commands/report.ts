@@ -19,7 +19,12 @@ import {
   buildPostMortemPrompt,
   parsePostMortemResponse,
 } from '@mklamine/hawkeye-core';
-import type { PostMortemInput, PostMortemResult, SessionRow, EventRow } from '@mklamine/hawkeye-core';
+import type {
+  PostMortemInput,
+  PostMortemResult,
+  SessionRow,
+  EventRow,
+} from '@mklamine/hawkeye-core';
 import { loadConfig } from '../config.js';
 import { fireWebhooks } from '../webhooks.js';
 import { loadTasks, type Task } from './daemon.js';
@@ -90,14 +95,15 @@ export async function generateMorningReport(
   // Get all sessions, filter by start time
   const allResult = storage.listSessions({ limit: 500 });
   const allSessions = allResult.ok ? allResult.value : [];
-  const relevantSessions = allSessions.filter(
-    (s) => new Date(s.started_at).getTime() >= sinceMs,
-  );
+  const relevantSessions = allSessions.filter((s) => new Date(s.started_at).getTime() >= sinceMs);
 
   // Set up LLM if post-mortem requested
-  let llm: { complete: (prompt: string, opts?: { maxTokens?: number }) => Promise<string> } | null = null;
+  let llm: { complete: (prompt: string, opts?: { maxTokens?: number }) => Promise<string> } | null =
+    null;
   if (options?.runPostMortem) {
-    const { provider, model, ollamaUrl } = config.drift;
+    const { provider, model, ollamaUrl, lmstudioUrl } = config.drift;
+    const endpointUrl =
+      provider === 'ollama' ? ollamaUrl : provider === 'lmstudio' ? lmstudioUrl : undefined;
     if (config.apiKeys) {
       const keyMap: Record<string, string> = {
         anthropic: 'ANTHROPIC_API_KEY',
@@ -114,7 +120,7 @@ export async function generateMorningReport(
       }
     }
     try {
-      llm = createLlmProvider(provider, model, ollamaUrl);
+      llm = createLlmProvider(provider, model, endpointUrl);
     } catch {
       // LLM not available — skip post-mortem
     }
@@ -328,7 +334,9 @@ export function renderTerminalReport(report: MorningReport): void {
   console.log('');
 
   // Summary
-  console.log(`  ${chalk.dim('Period:')}      ${report.overnightStartedAt} → ${report.overnightEndedAt}`);
+  console.log(
+    `  ${chalk.dim('Period:')}      ${report.overnightStartedAt} → ${report.overnightEndedAt}`,
+  );
   console.log(`  ${chalk.dim('Duration:')}    ${report.totalDurationMinutes} minutes`);
   console.log(`  ${chalk.dim('Sessions:')}    ${report.totalSessions}`);
   console.log(`  ${chalk.dim('Total cost:')}  ${chalk.cyan('$' + report.totalCostUsd.toFixed(4))}`);
@@ -364,7 +372,9 @@ export function renderTerminalReport(report: MorningReport): void {
     );
 
     if (s.stats.errors > 0) {
-      console.log(`    ${chalk.red(`${s.stats.errors} errors`)}${s.stats.guardrailBlocks > 0 ? `  ${chalk.yellow(`${s.stats.guardrailBlocks} guardrail blocks`)}` : ''}`);
+      console.log(
+        `    ${chalk.red(`${s.stats.errors} errors`)}${s.stats.guardrailBlocks > 0 ? `  ${chalk.yellow(`${s.stats.guardrailBlocks} guardrail blocks`)}` : ''}`,
+      );
     }
 
     if (s.driftSummary.criticalEpisodes > 0) {
@@ -375,12 +385,16 @@ export function renderTerminalReport(report: MorningReport): void {
 
     if (s.filesChanged.length > 0) {
       const shown = s.filesChanged.slice(0, 5);
-      console.log(`    ${chalk.dim('Files:')} ${shown.join(', ')}${s.filesChanged.length > 5 ? ` (+${s.filesChanged.length - 5} more)` : ''}`);
+      console.log(
+        `    ${chalk.dim('Files:')} ${shown.join(', ')}${s.filesChanged.length > 5 ? ` (+${s.filesChanged.length - 5} more)` : ''}`,
+      );
     }
 
     if (s.topErrors.length > 0) {
       for (const err of s.topErrors.slice(0, 3)) {
-        console.log(`    ${chalk.red('•')} ${err.message.slice(0, 80)} ${chalk.dim(`(×${err.count})`)}`);
+        console.log(
+          `    ${chalk.red('•')} ${err.message.slice(0, 80)} ${chalk.dim(`(×${err.count})`)}`,
+        );
       }
     }
 
@@ -392,7 +406,9 @@ export function renderTerminalReport(report: MorningReport): void {
           : pm.outcome === 'partial'
             ? chalk.yellow
             : chalk.red;
-      console.log(`    ${chalk.dim('Outcome:')} ${outcomeColor(pm.outcome)}  ${pm.summary.slice(0, 100)}`);
+      console.log(
+        `    ${chalk.dim('Outcome:')} ${outcomeColor(pm.outcome)}  ${pm.summary.slice(0, 100)}`,
+      );
       if (pm.recommendations.length > 0) {
         console.log(`    ${chalk.dim('Recommendations:')}`);
         for (const rec of pm.recommendations.slice(0, 3)) {

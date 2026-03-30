@@ -14,6 +14,7 @@ export interface DriftSettings {
   contextWindow: number;
   autoPause?: boolean;
   ollamaUrl?: string;
+  lmstudioUrl?: string;
 }
 
 export interface RecordingSettings {
@@ -40,6 +41,15 @@ export interface ApiKeysSettings {
   deepseek?: string;
   mistral?: string;
   google?: string;
+  // Plugin API keys
+  notion?: string;
+  slack?: string;
+  github?: string;
+  figma?: string;
+  linear?: string;
+  trello?: string;
+  jira?: string;
+  [key: string]: string | undefined;
 }
 
 export interface WebhookSettings {
@@ -77,7 +87,8 @@ export interface HawkeyeConfig {
 // ─── Provider models ─────────────────────────────────────────
 
 export const PROVIDER_MODELS: Record<string, string[]> = {
-  ollama: ['llama4', 'llama3.2', 'mistral', 'codellama', 'deepseek-coder', 'phi3'],
+  ollama: [],   // Populated dynamically from `ollama list` via /api/providers/local
+  lmstudio: [], // Populated dynamically from LM Studio via /api/providers/local
   anthropic: [
     'claude-sonnet-4-6',
     'claude-opus-4-6',
@@ -105,12 +116,7 @@ export const PROVIDER_MODELS: Record<string, string[]> = {
     'codestral-latest',
     'devstral-latest',
   ],
-  google: [
-    'gemini-2.5-pro',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-2.0-flash',
-  ],
+  google: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'],
 };
 
 // ─── Defaults ────────────────────────────────────────────────
@@ -127,6 +133,7 @@ export function getDefaultConfig(): HawkeyeConfig {
       contextWindow: 10,
       autoPause: true,
       ollamaUrl: 'http://localhost:11434',
+      lmstudioUrl: 'http://localhost:1234/v1',
     },
     recording: {
       ignorePatterns: [],
@@ -142,7 +149,20 @@ export function getDefaultConfig(): HawkeyeConfig {
         type: 'file_protect',
         enabled: true,
         action: 'block',
-        config: { paths: ['.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519', '*.credentials', '*.secret'] },
+        config: {
+          paths: [
+            '.env',
+            '.env.*',
+            '*.pem',
+            '*.key',
+            '*.p12',
+            '*.pfx',
+            'id_rsa',
+            'id_ed25519',
+            '*.credentials',
+            '*.secret',
+          ],
+        },
       },
       {
         name: 'dangerous_commands',
@@ -151,10 +171,20 @@ export function getDefaultConfig(): HawkeyeConfig {
         action: 'block',
         config: {
           patterns: [
-            'rm -rf /', 'rm -rf ~', 'rm -rf .', 'sudo rm',
-            'DROP TABLE', 'DROP DATABASE', 'TRUNCATE TABLE',
-            'curl * | bash', 'curl * | sh', 'wget * | bash', 'wget * | sh',
-            'chmod 777', 'mkfs*', 'dd if=*of=/dev/*',
+            'rm -rf /',
+            'rm -rf ~',
+            'rm -rf .',
+            'sudo rm',
+            'DROP TABLE',
+            'DROP DATABASE',
+            'TRUNCATE TABLE',
+            'curl * | bash',
+            'curl * | sh',
+            'wget * | bash',
+            'wget * | sh',
+            'chmod 777',
+            'mkfs*',
+            'dd if=*of=/dev/*',
             '> /dev/sda',
           ],
         },
@@ -178,7 +208,9 @@ export function getDefaultConfig(): HawkeyeConfig {
         type: 'directory_scope',
         enabled: true,
         action: 'block',
-        config: { blockedDirs: ['/etc', '/usr', '/var', '/sys', '/boot', '~/.ssh', '~/.gnupg', '~/.aws'] },
+        config: {
+          blockedDirs: ['/etc', '/usr', '/var', '/sys', '/boot', '~/.ssh', '~/.gnupg', '~/.aws'],
+        },
       },
       {
         name: 'network_lock',
@@ -220,6 +252,15 @@ export function configPath(cwd: string): string {
   return join(cwd, '.hawkeye', 'config.json');
 }
 
+export function normalizeLmStudioUrl(url?: string): string {
+  const trimmed = (url || 'http://localhost:1234/v1').trim();
+  const withoutTrailingSlash = trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
+  if (withoutTrailingSlash.endsWith('/v1')) {
+    return withoutTrailingSlash;
+  }
+  return `${withoutTrailingSlash}/v1`;
+}
+
 export function loadConfig(cwd: string): HawkeyeConfig {
   const p = configPath(cwd);
   if (existsSync(p)) {
@@ -227,19 +268,34 @@ export function loadConfig(cwd: string): HawkeyeConfig {
       const raw = JSON.parse(readFileSync(p, 'utf-8'));
       // Merge with defaults to fill missing fields
       const def = getDefaultConfig();
+      const drift = { ...def.drift, ...raw.drift };
+      drift.lmstudioUrl = normalizeLmStudioUrl(drift.lmstudioUrl);
       return {
-        drift: { ...def.drift, ...raw.drift },
+        drift,
         guardrails: raw.guardrails || def.guardrails,
         apiKeys: { ...def.apiKeys, ...raw.apiKeys },
         recording: { ...def.recording, ...raw.recording },
         dashboard: { ...def.dashboard, ...raw.dashboard },
         webhooks: raw.webhooks || [],
-        autocorrect: raw.autocorrect ? {
-          enabled: raw.autocorrect.enabled ?? false,
-          dryRun: raw.autocorrect.dryRun ?? false,
-          triggers: { driftCritical: true, errorRepeat: 3, costThreshold: 85, ...raw.autocorrect.triggers },
-          actions: { rollbackFiles: true, pauseSession: true, injectHint: true, blockPattern: true, ...raw.autocorrect.actions },
-        } : undefined,
+        autocorrect: raw.autocorrect
+          ? {
+              enabled: raw.autocorrect.enabled ?? false,
+              dryRun: raw.autocorrect.dryRun ?? false,
+              triggers: {
+                driftCritical: true,
+                errorRepeat: 3,
+                costThreshold: 85,
+                ...raw.autocorrect.triggers,
+              },
+              actions: {
+                rollbackFiles: true,
+                pauseSession: true,
+                injectHint: true,
+                blockPattern: true,
+                ...raw.autocorrect.actions,
+              },
+            }
+          : undefined,
       };
     } catch {
       return getDefaultConfig();
@@ -255,7 +311,15 @@ export function saveConfig(cwd: string, config: HawkeyeConfig): void {
     chmodSync(dir, 0o700);
   }
   const p = configPath(cwd);
-  writeFileSync(p, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  const normalizedConfig: HawkeyeConfig = {
+    ...config,
+    drift: {
+      ...config.drift,
+      lmstudioUrl: normalizeLmStudioUrl(config.drift.lmstudioUrl),
+    },
+  };
+  config.drift.lmstudioUrl = normalizedConfig.drift.lmstudioUrl;
+  writeFileSync(p, JSON.stringify(normalizedConfig, null, 2), { encoding: 'utf-8', mode: 0o600 });
 }
 
 // ─── Developer identity ───────────────────────────────────────

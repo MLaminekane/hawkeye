@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Storage, type AgentSession } from '@mklamine/hawkeye-core';
-import { buildAgentInvocation } from '../agent-command.js';
-import { gatherContext, shouldContinueSession, type Task } from '../daemon.js';
+import { buildAgentInvocation, getAgentFullAccessArgs } from '../agent-command.js';
+import { extractCodexFinalResponse, gatherContext, injectConfiguredApiKeys, isLightweightPrompt, shouldContinueSession, shouldInjectTaskContext, type Task } from '../daemon.js';
 import { ensureHawkeyeDir, getTraceDbPath, openTraceStorage, resolveSession } from '../storage-helpers.js';
 
 const tempDirs: string[] = [];
@@ -115,7 +115,7 @@ describe('daemon/swarm/serve agent invocation', () => {
 
     expect(buildAgentInvocation('codex', 'ship it')).toEqual({
       cmd: 'codex',
-      args: ['-q', 'ship it'],
+      args: ['exec', 'ship it'],
       agentName: 'codex',
     });
 
@@ -124,6 +124,12 @@ describe('daemon/swarm/serve agent invocation', () => {
       args: ['--flag', 'hello world'],
       agentName: 'echo',
     });
+  });
+
+  it('maps full-access flags per agent runtime', () => {
+    expect(getAgentFullAccessArgs('claude')).toEqual(['--dangerously-skip-permissions']);
+    expect(getAgentFullAccessArgs('codex')).toEqual(['--dangerously-bypass-approvals-and-sandbox']);
+    expect(getAgentFullAccessArgs('aider')).toEqual([]);
   });
 
   it('keeps daemon context building safe outside git repos and only continues Claude sessions', () => {
@@ -147,6 +153,78 @@ describe('daemon/swarm/serve agent invocation', () => {
     expect(context).toContain('[Task history');
     expect(() => gatherContext(cwd)).not.toThrow();
     expect(shouldContinueSession('claude', [recentTask])).toBe(true);
+    expect(
+      shouldContinueSession('claude', [
+        {
+          ...recentTask,
+          id: 'task-2',
+          agent: 'codex',
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      shouldContinueSession('claude', [
+        {
+          ...recentTask,
+          id: 'task-3',
+          agent: 'claude-api/claude-sonnet-4-6',
+        },
+      ]),
+    ).toBe(false);
     expect(shouldContinueSession('/bin/echo', [recentTask])).toBe(false);
+  });
+
+  it('skips injected daemon context for aider-backed local provider tasks', () => {
+    expect(shouldInjectTaskContext('claude')).toBe(true);
+    expect(shouldInjectTaskContext('codex')).toBe(false);
+    expect(shouldInjectTaskContext('aider')).toBe(false);
+    expect(shouldInjectTaskContext('aider --model sonnet')).toBe(false);
+    expect(shouldInjectTaskContext('ollama/qwen3.5:cloud')).toBe(false);
+    expect(shouldInjectTaskContext('lmstudio/my-model')).toBe(false);
+    expect(shouldInjectTaskContext('ollama')).toBe(false);
+  });
+
+  it('treats tiny generic prompts as lightweight and leaves repo-aware prompts alone', () => {
+    expect(isLightweightPrompt('salut')).toBe(true);
+    expect(isLightweightPrompt('hello')).toBe(true);
+    expect(isLightweightPrompt('test')).toBe(true);
+    expect(isLightweightPrompt('que penses tu du projet ?')).toBe(true);
+    expect(isLightweightPrompt('what do you think of the project?')).toBe(true);
+    expect(isLightweightPrompt('fix the compare page header')).toBe(false);
+    expect(isLightweightPrompt('look at packages/dashboard/src/pages/TasksPage.tsx')).toBe(false);
+  });
+
+  it('extracts the final codex answer without the execution transcript', () => {
+    const output = [
+      'OpenAI Codex v0.116.0 (research preview)',
+      '--------',
+      'workdir: /repo',
+      'model: gpt-5.4',
+      'user',
+      '[User request]',
+      'que penses tu du projet ?',
+      'codex',
+      'Je vais parcourir la structure du repo.',
+      'exec',
+      '/bin/zsh -lc "sed -n 1,40 README.md"',
+      'codex',
+      'Bon projet, avec une vraie thèse produit.',
+      'tokens used',
+      '8470',
+    ].join('\n');
+
+    expect(extractCodexFinalResponse(output)).toBe('Bon projet, avec une vraie thèse produit.');
+  });
+
+  it('removes ANTHROPIC_API_KEY for Claude Code subscription tasks', () => {
+    const cwd = createTempProject();
+
+    const merged = injectConfiguredApiKeys({
+      ANTHROPIC_API_KEY: 'env-key',
+      OPENAI_API_KEY: 'openai-key',
+    }, cwd, 'claude');
+
+    expect(merged.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(merged.OPENAI_API_KEY).toBe('openai-key');
   });
 });

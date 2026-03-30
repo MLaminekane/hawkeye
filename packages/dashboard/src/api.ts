@@ -17,6 +17,27 @@ export interface SessionData {
   developer: string | null;
 }
 
+export interface SessionStatsData {
+  total_events: number;
+  command_count: number;
+  file_count: number;
+  llm_count: number;
+  api_count: number;
+  git_count: number;
+  error_count: number;
+  guardrail_count: number;
+  total_cost_usd: number;
+  total_duration_ms: number;
+}
+
+export interface SessionComparisonData {
+  session: SessionData;
+  stats: SessionStatsData;
+  durationMs: number;
+  filesChanged: string[];
+  topCostFiles: Array<{ path: string; cost: number }>;
+}
+
 export interface EventData {
   id: string;
   session_id: string;
@@ -28,6 +49,27 @@ export interface EventData {
   drift_flag: string | null;
   cost_usd: number;
   duration_ms: number;
+}
+
+export type InterceptionRisk = 'safe' | 'low' | 'medium' | 'high' | 'critical';
+
+export interface PendingReviewData {
+  id: string;
+  timestamp: string;
+  sessionId: string;
+  command: string;
+  matchedPattern: string;
+}
+
+export interface InterceptionEventData extends EventData {
+  risk: InterceptionRisk;
+}
+
+export interface InterceptionsData {
+  blocks: EventData[];
+  recentActions: InterceptionEventData[];
+  pendingReviews: PendingReviewData[];
+  impactPreviewsEnabled: boolean;
 }
 
 export interface DriftSnapshot {
@@ -51,6 +93,16 @@ export interface TaskData {
   error?: string;
   sessionId?: string;
   attachments?: string[];
+}
+
+export interface DaemonStatusData {
+  running: boolean;
+  agent: string | null;
+  startedAt: string | null;
+  lastHeartbeatAt: string | null;
+  intervalSec: number | null;
+  currentTaskId: string | null;
+  currentTaskPid: number | null;
 }
 
 export interface RcaCausalStep {
@@ -267,6 +319,18 @@ export interface LiveAgentData {
   costUsd: number;
 }
 
+export interface AgentMessageData {
+  id: string;
+  from: string;
+  fromName: string;
+  to: string | null;
+  toRole: string | null;
+  content: string;
+  type: 'direct' | 'broadcast' | 'decision' | 'request' | 'response';
+  timestamp: string;
+  read: boolean;
+}
+
 export interface AgentEventData {
   id: string;
   session_id: string;
@@ -343,7 +407,7 @@ export interface SwarmFullData {
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json() as Promise<T>;
 }
@@ -369,6 +433,7 @@ export interface SettingsData {
     contextWindow: number;
     autoPause?: boolean;
     ollamaUrl?: string;
+    lmstudioUrl?: string;
   };
   guardrails: Array<{
     name: string;
@@ -395,8 +460,19 @@ export interface SettingsData {
     enabled: boolean;
     dryRun: boolean;
     triggers: { driftCritical: boolean; errorRepeat: number; costThreshold: number };
-    actions: { rollbackFiles: boolean; pauseSession: boolean; injectHint: boolean; blockPattern: boolean };
+    actions: {
+      rollbackFiles: boolean;
+      pauseSession: boolean;
+      injectHint: boolean;
+      blockPattern: boolean;
+    };
   };
+}
+
+export interface McpServerEntry {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
 }
 
 export interface ImpactPreviewData {
@@ -452,11 +528,9 @@ export interface GlobalStatsData {
 }
 
 export const api = {
-  listSessions: (limit = 50) =>
-    fetchJson<SessionData[]>(`${API_BASE}/sessions?limit=${limit}`),
+  listSessions: (limit = 50) => fetchJson<SessionData[]>(`${API_BASE}/sessions?limit=${limit}`),
 
-  getSession: (id: string) =>
-    fetchJson<SessionData>(`${API_BASE}/sessions/${id}`),
+  getSession: (id: string) => fetchJson<SessionData>(`${API_BASE}/sessions/${id}`),
 
   getEvents: (sessionId: string) =>
     fetchJson<EventData[]>(`${API_BASE}/sessions/${sessionId}/events`),
@@ -464,71 +538,92 @@ export const api = {
   getDriftSnapshots: (sessionId: string) =>
     fetchJson<DriftSnapshot[]>(`${API_BASE}/sessions/${sessionId}/drift`),
 
-  getSettings: () =>
-    fetchJson<SettingsData>(`${API_BASE}/settings`),
+  getSettings: () => fetchJson<SettingsData>(`${API_BASE}/settings`),
 
   saveSettings: (settings: SettingsData) =>
     postJson<{ ok: boolean }>(`${API_BASE}/settings`, settings),
 
-  getProviders: () =>
-    fetchJson<Record<string, string[]>>(`${API_BASE}/providers`),
+  getProviders: () => fetchJson<Record<string, string[]>>(`${API_BASE}/providers`),
 
-  getStats: () =>
-    fetchJson<GlobalStatsData>(`${API_BASE}/stats`),
+  getLocalProviders: () =>
+    fetchJson<Record<string, { available: boolean; models: string[]; url: string }>>(`${API_BASE}/providers/local`),
 
-  pauseSession: (id: string) =>
-    postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/pause`, {}),
+  getStats: () => fetchJson<GlobalStatsData>(`${API_BASE}/stats`),
 
-  resumeSession: (id: string) =>
-    postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/resume`, {}),
+  pauseSession: (id: string) => postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/pause`, {}),
+
+  resumeSession: (id: string) => postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/resume`, {}),
 
   endSession: (id: string, status: 'completed' | 'aborted' = 'completed') =>
     postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/end`, { status }),
 
+  deleteSession: (id: string) =>
+    postJson<{ ok: boolean }>(`${API_BASE}/sessions/${id}/delete`, {}),
+
   forkSession: (sessionId: string, upToSequence: number) =>
-    postJson<{ ok: boolean; forkedSessionId: string }>(`${API_BASE}/sessions/${sessionId}/fork`, { upToSequence }),
+    postJson<{ ok: boolean; forkedSessionId: string }>(`${API_BASE}/sessions/${sessionId}/fork`, {
+      upToSequence,
+    }),
 
   revertFile: (eventId: string) =>
-    postJson<{ ok: boolean; path?: string; error?: string }>(`${API_BASE}/revert`, { event_id: eventId }),
+    postJson<{ ok: boolean; path?: string; error?: string }>(`${API_BASE}/revert`, {
+      event_id: eventId,
+    }),
 
   compareSessions: (ids: string[]) =>
-    fetchJson<Record<string, unknown>[]>(`${API_BASE}/compare?ids=${ids.join(',')}`),
+    fetchJson<SessionComparisonData[]>(`${API_BASE}/compare?ids=${ids.join(',')}`),
 
   getPendingReviews: () =>
-    fetchJson<Array<{ id: string; timestamp: string; sessionId: string; command: string; matchedPattern: string }>>(`${API_BASE}/pending-reviews`),
+    fetchJson<
+      Array<{
+        id: string;
+        timestamp: string;
+        sessionId: string;
+        command: string;
+        matchedPattern: string;
+      }>
+    >(`${API_BASE}/pending-reviews`),
 
   approveReview: (id: string, scope: 'session' | 'always' = 'session') =>
     postJson<{ ok: boolean }>(`${API_BASE}/review-approve`, { id, scope }),
 
-  denyReview: (id: string) =>
-    postJson<{ ok: boolean }>(`${API_BASE}/review-deny`, { id }),
+  denyReview: (id: string) => postJson<{ ok: boolean }>(`${API_BASE}/review-deny`, { id }),
 
-  listTasks: () =>
-    fetchJson<TaskData[]>(`${API_BASE}/tasks`),
+  listTasks: () => fetchJson<TaskData[]>(`${API_BASE}/tasks`),
 
-  createTask: (prompt: string, agent = 'claude', attachments?: Array<{ name: string; data: string }>) =>
-    postJson<TaskData>(`${API_BASE}/tasks`, { prompt, agent, attachments }),
+  getDaemonStatus: () => fetchJson<DaemonStatusData>(`${API_BASE}/daemon/status`),
 
-  cancelTask: (id: string) =>
-    postJson<{ ok: boolean }>(`${API_BASE}/tasks/${id}/cancel`, {}),
+  createTask: (
+    prompt: string,
+    agent = 'claude',
+    attachments?: Array<{ name: string; data: string }>,
+  ) => postJson<TaskData>(`${API_BASE}/tasks`, { prompt, agent, attachments }),
+
+  retryTask: (id: string) => postJson<TaskData>(`${API_BASE}/tasks/${id}/retry`, {}),
+
+  cancelTask: (id: string) => postJson<{ ok: boolean }>(`${API_BASE}/tasks/${id}/cancel`, {}),
+
+  clearFinishedTasks: () => postJson<{ ok: boolean; removed: number }>(`${API_BASE}/tasks/clear-finished`, {}),
 
   getTaskJournal: async (): Promise<string> => {
-    const res = await fetch(`${API_BASE}/tasks/journal`);
+    const res = await fetch(`${API_BASE}/tasks/journal`, { cache: 'no-store' });
     if (!res.ok) throw new Error(`API error: ${res.status}`);
     return res.text();
   },
 
-  clearTaskJournal: () =>
-    postJson<{ ok: boolean }>(`${API_BASE}/tasks/journal/clear`, {}),
+  clearTaskJournal: () => postJson<{ ok: boolean }>(`${API_BASE}/tasks/journal/clear`, {}),
 
-  getLastImpact: () =>
-    fetchJson<ImpactPreviewData | null>(`${API_BASE}/impact`),
+  getMcpServers: () => fetchJson<Record<string, McpServerEntry>>(`${API_BASE}/mcp-servers`),
+
+  saveMcpServers: (payload: Record<string, McpServerEntry | null>) =>
+    postJson<{ ok: boolean; servers: string[] }>(`${API_BASE}/mcp-servers`, payload),
+
+  getLastImpact: () => fetchJson<ImpactPreviewData | null>(`${API_BASE}/impact`),
 
   getInterceptions: () =>
-    fetchJson<{ blocks: EventData[]; pendingReviews: Array<{ id: string; timestamp: string; sessionId: string; command: string; matchedPattern: string }> }>(`${API_BASE}/interceptions`),
+    fetchJson<InterceptionsData>(`${API_BASE}/interceptions`),
 
-  getPolicies: () =>
-    fetchJson<PolicyData | null>(`${API_BASE}/policies`),
+  getPolicies: () => fetchJson<PolicyData | null>(`${API_BASE}/policies`),
 
   savePolicies: (policy: PolicyData) =>
     postJson<{ ok: boolean; errors?: PolicyValidationError[] }>(`${API_BASE}/policies`, policy),
@@ -545,8 +640,7 @@ export const api = {
   getCumulativeMemory: (limit = 20) =>
     fetchJson<CumulativeMemoryData>(`${API_BASE}/memory/cumulative?limit=${limit}`),
 
-  getHallucinations: () =>
-    fetchJson<HallucinationItemData[]>(`${API_BASE}/memory/hallucinations`),
+  getHallucinations: () => fetchJson<HallucinationItemData[]>(`${API_BASE}/memory/hallucinations`),
 
   triggerIncident: (sessionId: string) =>
     postJson<IncidentData>(`${API_BASE}/sessions/${sessionId}/incident`, {}),
@@ -571,27 +665,35 @@ export const api = {
   getAllCorrections: (limit = 50) =>
     fetchJson<CorrectionRecordData[]>(`${API_BASE}/corrections?limit=${limit}`),
 
-  getActiveCorrection: () =>
-    fetchJson<CorrectionHintData | null>(`${API_BASE}/active-correction`),
+  getActiveCorrection: () => fetchJson<CorrectionHintData | null>(`${API_BASE}/active-correction`),
 
-  saveAutocorrect: (config: { enabled: boolean; dryRun: boolean; triggers: Record<string, unknown>; actions: Record<string, unknown> }) =>
-    postJson<{ ok: boolean }>(`${API_BASE}/autocorrect`, config),
+  saveAutocorrect: (config: {
+    enabled: boolean;
+    dryRun: boolean;
+    triggers: Record<string, unknown>;
+    actions: Record<string, unknown>;
+  }) => postJson<{ ok: boolean }>(`${API_BASE}/autocorrect`, config),
 
-  clearActiveCorrection: () =>
-    postJson<{ ok: boolean }>(`${API_BASE}/autocorrect/clear`, {}),
+  clearActiveCorrection: () => postJson<{ ok: boolean }>(`${API_BASE}/autocorrect/clear`, {}),
 
   // ─── CI Report ───
 
   getCIReport: (sessionId: string) =>
-    fetchJson<{ markdown: string; risk: string; passed: boolean; flags: string[]; sensitiveFiles: string[]; dangerousCommands: string[]; failedCommands: string[] }>(`${API_BASE}/sessions/${sessionId}/ci-report`),
+    fetchJson<{
+      markdown: string;
+      risk: string;
+      passed: boolean;
+      flags: string[];
+      sensitiveFiles: string[];
+      dangerousCommands: string[];
+      failedCommands: string[];
+    }>(`${API_BASE}/sessions/${sessionId}/ci-report`),
 
   // ─── Swarm ───
 
-  listSwarms: (limit = 20) =>
-    fetchJson<SwarmData[]>(`${API_BASE}/swarms?limit=${limit}`),
+  listSwarms: (limit = 20) => fetchJson<SwarmData[]>(`${API_BASE}/swarms?limit=${limit}`),
 
-  getSwarm: (id: string) =>
-    fetchJson<SwarmData>(`${API_BASE}/swarms/${id}`),
+  getSwarm: (id: string) => fetchJson<SwarmData>(`${API_BASE}/swarms/${id}`),
 
   getSwarmAgents: (swarmId: string) =>
     fetchJson<SwarmAgentData[]>(`${API_BASE}/swarms/${swarmId}/agents`),
@@ -599,8 +701,7 @@ export const api = {
   getSwarmConflicts: (swarmId: string) =>
     fetchJson<SwarmConflictData[]>(`${API_BASE}/swarms/${swarmId}/conflicts`),
 
-  getSwarmFull: (swarmId: string) =>
-    fetchJson<SwarmFullData>(`${API_BASE}/swarms/${swarmId}/full`),
+  getSwarmFull: (swarmId: string) => fetchJson<SwarmFullData>(`${API_BASE}/swarms/${swarmId}/full`),
 
   cancelSwarm: (swarmId: string) =>
     postJson<{ ok: boolean }>(`${API_BASE}/swarms/${swarmId}/cancel`, {}),
@@ -619,29 +720,68 @@ export const api = {
 
   // ─── Live Agents ───
 
-  listAgents: () =>
-    fetchJson<LiveAgentData[]>(`${API_BASE}/agents`),
+  listAgents: () => fetchJson<LiveAgentData[]>(`${API_BASE}/agents`),
 
-  getAgent: (id: string) =>
-    fetchJson<LiveAgentData>(`${API_BASE}/agents/${id}`),
+  getAgent: (id: string) => fetchJson<LiveAgentData>(`${API_BASE}/agents/${id}`),
 
-  spawnAgent: (name: string, command: string, prompt: string, role: string = 'worker', personality: string = '', permissions: string = 'full') =>
-    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/spawn`, { name, command, prompt, role, personality, permissions }),
+  spawnAgent: (
+    name: string,
+    command: string,
+    prompt: string,
+    role: string = 'worker',
+    personality: string = '',
+    permissions: string = 'full',
+  ) =>
+    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/spawn`, {
+      name,
+      command,
+      prompt,
+      role,
+      personality,
+      permissions,
+    }),
 
   getAgentEvents: (id: string, limit: number = 20) =>
     fetchJson<AgentEventData[]>(`${API_BASE}/agents/${id}/events?limit=${limit}`),
 
-  stopAgent: (id: string) =>
-    postJson<{ ok: boolean }>(`${API_BASE}/agents/${id}/stop`, {}),
+  stopAgent: (id: string) => postJson<{ ok: boolean }>(`${API_BASE}/agents/${id}/stop`, {}),
 
-  removeAgent: (id: string) =>
-    postJson<{ ok: boolean }>(`${API_BASE}/agents/${id}/remove`, {}),
+  removeAgent: (id: string) => postJson<{ ok: boolean }>(`${API_BASE}/agents/${id}/remove`, {}),
 
   sendAgentMessage: (id: string, message: string) =>
-    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/${id}/message`, { message }),
+    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/${id}/message`, {
+      message,
+    }),
 
   updateAgentPermissions: (id: string, permissions: PermissionLevel) =>
-    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/${id}/permissions`, { permissions }),
+    postJson<{ ok: boolean; agent: LiveAgentData }>(`${API_BASE}/agents/${id}/permissions`, {
+      permissions,
+    }),
+
+  // ─── Inter-Agent Comms ───
+
+  getAgentMessages: () => fetchJson<AgentMessageData[]>(`${API_BASE}/agents/messages`),
+
+  getAgentInbox: (agentId: string) =>
+    fetchJson<AgentMessageData[]>(`${API_BASE}/agents/${agentId}/inbox`),
+
+  sendAgentComm: (msg: {
+    from?: string;
+    fromName?: string;
+    to?: string;
+    toRole?: string;
+    content: string;
+    type?: string;
+  }) =>
+    postJson<{ ok: boolean; message: AgentMessageData; delivered: string[] }>(
+      `${API_BASE}/agents/comms`,
+      msg,
+    ),
+
+  clearAgentMessages: () =>
+    fetch(`${API_BASE}/agents/messages`, { method: 'DELETE' }).then(
+      (r) => r.json() as Promise<{ ok: boolean }>,
+    ),
 };
 
 // ─── WebSocket client ────────────────────────────────────────
@@ -659,17 +799,38 @@ export type WsMessage =
   | { type: 'task_running'; task: TaskData }
   | { type: 'task_completed'; task: TaskData }
   | { type: 'task_failed'; task: TaskData }
-  | { type: 'impact_preview'; timestamp: string; sessionId: string; toolName: string; toolInput: Record<string, unknown>; impact: ImpactPreviewData['impact'] }
-  | { type: 'action_stream'; sessionId: string; event: EventData; risk: 'safe' | 'low' | 'medium' | 'high' | 'critical' }
+  | { type: 'daemon_status'; status: DaemonStatusData }
+  | {
+      type: 'impact_preview';
+      timestamp: string;
+      sessionId: string;
+      toolName: string;
+      toolInput: Record<string, unknown>;
+      impact: ImpactPreviewData['impact'];
+    }
+  | {
+      type: 'action_stream';
+      sessionId: string;
+      event: EventData;
+      risk: 'safe' | 'low' | 'medium' | 'high' | 'critical';
+    }
   | { type: 'incident'; sessionId: string; incident: IncidentData }
   | { type: 'autocorrect'; sessionId: string; correction: CorrectionRecordData }
   | { type: 'swarm'; event: string; swarmId: string; [key: string]: unknown }
   | { type: 'agent_spawned'; agent: LiveAgentData }
   | { type: 'agent_output'; agentId: string; chunk: string }
-  | { type: 'agent_complete'; agentId: string; status: string; exitCode?: number; filesChanged?: string[] }
+  | {
+      type: 'agent_complete';
+      agentId: string;
+      status: string;
+      exitCode?: number;
+      filesChanged?: string[];
+    }
   | { type: 'agent_removed'; agentId: string }
   | { type: 'agent_session_linked'; agentId: string; sessionId: string }
-  | { type: 'agent_stats'; agentId: string; drift: number | null; cost: number; actions: number };
+  | { type: 'agent_stats'; agentId: string; drift: number | null; cost: number; actions: number }
+  | { type: 'agent_message'; message: AgentMessageData }
+  | { type: 'agent_permissions'; agentId: string; permissions: PermissionLevel };
 
 type WsListener = (msg: WsMessage) => void;
 
@@ -685,7 +846,10 @@ class HawkeyeWs {
   }
 
   connect(): void {
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
@@ -695,7 +859,11 @@ class HawkeyeWs {
       this.ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data as string) as WsMessage;
-          if (msg.type === 'session_end' && msg.session.id === '__reload__' && msg.session.status === 'reload') {
+          if (
+            msg.type === 'session_end' &&
+            msg.session.id === '__reload__' &&
+            msg.session.status === 'reload'
+          ) {
             window.location.reload();
             return;
           }

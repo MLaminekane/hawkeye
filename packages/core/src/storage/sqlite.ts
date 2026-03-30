@@ -459,6 +459,38 @@ export class Storage {
     }
   }
 
+  getRecentEvents(limit = 100): Result<EventRow[]> {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM events
+           WHERE type IN (
+             'command',
+             'file_read',
+             'file_write',
+             'file_delete',
+             'file_rename',
+             'api_call',
+             'llm_call',
+             'git_commit',
+             'git_checkout',
+             'git_push',
+             'git_pull',
+             'git_merge',
+             'error',
+             'guardrail_trigger',
+             'guardrail_block'
+           )
+           ORDER BY timestamp DESC
+           LIMIT ?`,
+        )
+        .all(limit) as EventRow[];
+      return { ok: true, value: rows };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
   getNextSequence(sessionId: string): number {
     const row = this.db
       .prepare('SELECT COALESCE(MAX(sequence), 0) as max_seq FROM events WHERE session_id = ?')

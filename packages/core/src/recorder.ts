@@ -1,10 +1,7 @@
 import { v4 as uuid } from 'uuid';
 import { execSync } from 'node:child_process';
 import { Storage } from './storage/sqlite.js';
-import {
-  createTerminalInterceptor,
-  type TerminalInterceptor,
-} from './interceptors/terminal.js';
+import { createTerminalInterceptor, type TerminalInterceptor } from './interceptors/terminal.js';
 import {
   createFilesystemInterceptor,
   type FilesystemInterceptor,
@@ -14,15 +11,8 @@ import {
   type NetworkInterceptor,
   type NetworkLockConfig,
 } from './interceptors/network.js';
-import {
-  createDriftEngine,
-  type DriftEngine,
-  type DriftCheckResult,
-} from './drift/engine.js';
-import {
-  createGuardrailEnforcer,
-  type GuardrailEnforcer,
-} from './guardrails/enforcer.js';
+import { createDriftEngine, type DriftEngine, type DriftCheckResult } from './drift/engine.js';
+import { createGuardrailEnforcer, type GuardrailEnforcer } from './guardrails/enforcer.js';
 import type { GuardrailRuleConfig, GuardrailViolation } from './guardrails/rules.js';
 import { Logger } from './logger.js';
 import type { SessionRow, EventRow } from './storage/sqlite.js';
@@ -61,7 +51,10 @@ export interface RecorderOptions {
 export type EventHandler = (event: TraceEvent) => void;
 export type DriftAlertHandler = (result: DriftCheckResult) => void;
 export type GuardrailViolationHandler = (violation: GuardrailViolation) => void;
-export type ReviewGateHandler = (violation: GuardrailViolation, event: TraceEvent) => Promise<'approve' | 'deny' | 'skip'>;
+export type ReviewGateHandler = (
+  violation: GuardrailViolation,
+  event: TraceEvent,
+) => Promise<'approve' | 'deny' | 'skip'>;
 
 export interface Recorder {
   readonly sessionId: string;
@@ -109,6 +102,7 @@ const DEFAULT_DRIFT_CONFIG: DriftConfig = {
   contextWindow: 10,
   autoPause: false,
   ollamaUrl: 'http://localhost:11434',
+  lmstudioUrl: 'http://localhost:1234/v1',
 };
 
 export function createRecorder(options: RecorderOptions): Recorder {
@@ -120,7 +114,11 @@ export function createRecorder(options: RecorderOptions): Recorder {
   // Detect developer from git config
   let developer: string | undefined;
   try {
-    developer = execSync('git config user.name', { encoding: 'utf-8', cwd: options.workingDir, timeout: 3000 }).trim();
+    developer = execSync('git config user.name', {
+      encoding: 'utf-8',
+      cwd: options.workingDir,
+      timeout: 3000,
+    }).trim();
   } catch {
     developer = process.env.USER || process.env.USERNAME;
   }
@@ -214,41 +212,43 @@ export function createRecorder(options: RecorderOptions): Recorder {
           // If a review gate handler is registered, trigger async approval
           if (reviewGateHandler) {
             const handler = reviewGateHandler;
-            handler(v, event).then((decision) => {
-              if (decision === 'approve') {
-                // Add pattern to session-level allowlist for future events
-                if (v.matchedPattern) {
-                  reviewGateAllowlist.add(v.matchedPattern);
+            handler(v, event)
+              .then((decision) => {
+                if (decision === 'approve') {
+                  // Add pattern to session-level allowlist for future events
+                  if (v.matchedPattern) {
+                    reviewGateAllowlist.add(v.matchedPattern);
+                  }
+                  logger.info(`Review gate approved: ${v.description}`);
+                } else if (decision === 'deny') {
+                  // Mark the event as blocked retroactively
+                  logger.warn(`Review gate denied: ${v.description}`);
+                  // Insert a guardrail_trigger event to record the denial
+                  const denySeq = storage.getNextSequence(sessionId);
+                  storage.insertEvent({
+                    id: uuid(),
+                    sessionId,
+                    timestamp: new Date(),
+                    sequence: denySeq,
+                    type: 'guardrail_trigger',
+                    data: {
+                      ruleName: v.ruleName,
+                      severity: v.severity,
+                      description: v.description,
+                      blockedAction: type,
+                      originalType: type,
+                    } as unknown as TraceEvent['data'],
+                    durationMs: 0,
+                    costUsd: 0,
+                  });
+                } else {
+                  // 'skip' — allow just this once, no allowlist addition
+                  logger.info(`Review gate skipped (one-time allow): ${v.description}`);
                 }
-                logger.info(`Review gate approved: ${v.description}`);
-              } else if (decision === 'deny') {
-                // Mark the event as blocked retroactively
-                logger.warn(`Review gate denied: ${v.description}`);
-                // Insert a guardrail_trigger event to record the denial
-                const denySeq = storage.getNextSequence(sessionId);
-                storage.insertEvent({
-                  id: uuid(),
-                  sessionId,
-                  timestamp: new Date(),
-                  sequence: denySeq,
-                  type: 'guardrail_trigger',
-                  data: {
-                    ruleName: v.ruleName,
-                    severity: v.severity,
-                    description: v.description,
-                    blockedAction: type,
-                    originalType: type,
-                  } as unknown as TraceEvent['data'],
-                  durationMs: 0,
-                  costUsd: 0,
-                });
-              } else {
-                // 'skip' — allow just this once, no allowlist addition
-                logger.info(`Review gate skipped (one-time allow): ${v.description}`);
-              }
-            }).catch((err) => {
-              logger.error(`Review gate handler error: ${String(err)}`);
-            });
+              })
+              .catch((err) => {
+                logger.error(`Review gate handler error: ${String(err)}`);
+              });
           } else {
             // No handler registered — treat as blocked (safe default)
             logger.warn(`Event blocked by review gate (no handler): ${v.description}`);
@@ -318,7 +318,9 @@ export function createRecorder(options: RecorderOptions): Recorder {
 
     // Notify event subscribers
     for (const handler of eventHandlers) {
-      try { handler(event); } catch {}
+      try {
+        handler(event);
+      } catch {}
     }
 
     // Track for drift detection
@@ -426,10 +428,7 @@ export function createRecorder(options: RecorderOptions): Recorder {
 
       // Initialize Guardrails
       if (options.guardrails?.enabled && options.guardrails.rules.length > 0) {
-        guardrailEnforcer = createGuardrailEnforcer(
-          options.guardrails.rules,
-          options.workingDir,
-        );
+        guardrailEnforcer = createGuardrailEnforcer(options.guardrails.rules, options.workingDir);
         logger.info(`Guardrails enabled (${options.guardrails.rules.length} rules)`);
       }
 
@@ -450,9 +449,12 @@ export function createRecorder(options: RecorderOptions): Recorder {
       fsInterceptor.start();
 
       // Terminal interceptor
-      terminalInterceptor = createTerminalInterceptor((cmdEvent: CommandEvent) => {
-        recordEvent('command', cmdEvent);
-      }, { maxStdoutBytes: options.maxStdoutBytes });
+      terminalInterceptor = createTerminalInterceptor(
+        (cmdEvent: CommandEvent) => {
+          recordEvent('command', cmdEvent);
+        },
+        { maxStdoutBytes: options.maxStdoutBytes },
+      );
 
       // Network interceptor (captures LLM calls and API calls)
       if (options.captureNetwork !== false) {
@@ -461,7 +463,7 @@ export function createRecorder(options: RecorderOptions): Recorder {
         if (options.guardrails?.enabled) {
           const networkLockRule = options.guardrails.rules.find(
             (r) => r.type === 'network_lock',
-          ) as (import('./guardrails/rules.js').NetworkLockRule) | undefined;
+          ) as import('./guardrails/rules.js').NetworkLockRule | undefined;
           if (networkLockRule) {
             networkLockConfig = {
               enabled: true,

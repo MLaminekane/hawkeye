@@ -76,7 +76,7 @@ describe('dashboard api', () => {
     const { api } = await loadApiModule();
 
     await expect(api.listSessions(10)).resolves.toEqual(sessions);
-    expect(fetchMock).toHaveBeenCalledWith('/api/sessions?limit=10');
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions?limit=10', { cache: 'no-store' });
   });
 
   it('posts the default completed status when ending a session', async () => {
@@ -92,13 +92,66 @@ describe('dashboard api', () => {
     });
   });
 
+  it('posts to delete a session', async () => {
+    fetchMock.mockResolvedValue(createJsonResponse({ ok: true }));
+
+    const { api } = await loadApiModule();
+
+    await expect(api.deleteSession('session-42')).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session-42/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+  });
+
   it('returns plain text for the task journal endpoint', async () => {
     fetchMock.mockResolvedValue(createTextResponse('journal contents'));
 
     const { api } = await loadApiModule();
 
     await expect(api.getTaskJournal()).resolves.toBe('journal contents');
-    expect(fetchMock).toHaveBeenCalledWith('/api/tasks/journal');
+    expect(fetchMock).toHaveBeenCalledWith('/api/tasks/journal', { cache: 'no-store' });
+  });
+
+  it('requests daemon status without caching', async () => {
+    const status = { running: true, agent: 'claude' };
+    fetchMock.mockResolvedValue(createJsonResponse(status));
+
+    const { api } = await loadApiModule();
+
+    await expect(api.getDaemonStatus()).resolves.toEqual(status);
+    expect(fetchMock).toHaveBeenCalledWith('/api/daemon/status', { cache: 'no-store' });
+  });
+
+  it('requests session comparison data with the selected ids', async () => {
+    const comparison = [{ session: { id: 'a' } }];
+    fetchMock.mockResolvedValue(createJsonResponse(comparison));
+
+    const { api } = await loadApiModule();
+
+    await expect(api.compareSessions(['a', 'b'])).resolves.toEqual(comparison);
+    expect(fetchMock).toHaveBeenCalledWith('/api/compare?ids=a,b', { cache: 'no-store' });
+  });
+
+  it('posts to retry and clear finished tasks', async () => {
+    fetchMock.mockResolvedValue(createJsonResponse({ ok: true }));
+
+    const { api } = await loadApiModule();
+
+    await api.retryTask('task-42');
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/tasks/task-42/retry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+
+    await api.clearFinishedTasks();
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/tasks/clear-finished', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
   });
 
   it('throws a readable error when a request fails', async () => {

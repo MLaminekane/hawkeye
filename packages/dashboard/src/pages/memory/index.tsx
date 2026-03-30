@@ -7,7 +7,7 @@ import {
   type MemoryItemData,
   type MemoryDiffItemData,
   type HallucinationItemData,
-} from '../api';
+} from '../../api';
 
 type Tab = 'cumulative' | 'diff' | 'hallucinations';
 
@@ -392,7 +392,7 @@ export function MemoryPage() {
                   type="button"
                   onClick={() => void runDiff()}
                   disabled={!sessionA || !sessionB || sessionA === sessionB}
-                  className="mt-3 inline-flex w-full items-center justify-center rounded-[18px] bg-hawk-orange px-4 py-2.5 text-sm font-semibold text-black transition-all hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="mt-3 inline-flex w-full items-center justify-center rounded-[18px] bg-hawk-orange px-4 py-2.5 text-sm font-semibold text-white transition-all hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Compare Memories
                 </button>

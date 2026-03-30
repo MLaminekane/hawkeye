@@ -1,25 +1,27 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { api, hawkeyeWs, type EventData } from '../api';
+import { api, hawkeyeWs } from '../../api';
+import {
+  buildInitialActionFeed,
+  createImpactPreviewAction,
+  formatCurrency,
+  formatTimestamp,
+  getActionHighlights,
+  getFilterLabel,
+  getSortLabel,
+  parseEventToAction,
+  shortSessionId,
+  sortActions,
+  summarizeCounts,
+  timeAgo,
+  truncateMiddle,
+  type ActionItem,
+  type FilterKey,
+  type Risk,
+  type SortKey,
+} from './utils';
 
 // ── Types ──
-
-type Risk = 'safe' | 'low' | 'medium' | 'high' | 'critical';
-type FilterKey = 'all' | 'risky' | 'blocked' | 'writes' | 'commands';
-
-interface ActionItem {
-  id: string;
-  timestamp: string;
-  type: string;
-  risk: Risk;
-  summary: string;
-  details: string[];
-  toolName: string;
-  sessionId: string;
-  status: 'allowed' | 'warned' | 'blocked' | 'pending';
-  cost: number;
-  raw?: Record<string, unknown>;
-}
 
 // ── Constants ──
 
@@ -65,165 +67,6 @@ const TYPE_ICONS: Record<string, string> = {
   review_gate: '\u231B',
 };
 
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const s = Math.floor(diff / 1000);
-  if (s < 5) return 'now';
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  return `${h}h`;
-}
-
-function formatTimestamp(dateStr: string): string {
-  const date = new Date(dateStr);
-  if (Number.isNaN(date.getTime())) return dateStr;
-  return date.toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
-
-function shortSessionId(sessionId: string | null | undefined): string {
-  if (!sessionId) return 'unknown';
-  return sessionId.length > 8 ? sessionId.slice(0, 8) : sessionId;
-}
-
-function truncateMiddle(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  const visible = Math.max(6, maxLength - 3);
-  const front = Math.ceil(visible / 2);
-  const back = Math.floor(visible / 2);
-  return `${value.slice(0, front)}...${value.slice(-back)}`;
-}
-
-function formatCurrency(amount: number): string {
-  if (amount <= 0) return '$0.0000';
-  if (amount < 0.01) return `$${amount.toFixed(4)}`;
-  return `$${amount.toFixed(2)}`;
-}
-
-function summarizeCounts(items: ActionItem[]) {
-  return {
-    total: items.length,
-    blocked: items.filter((item) => item.status === 'blocked').length,
-    pending: items.filter((item) => item.status === 'pending').length,
-  };
-}
-
-function getFilterLabel(filter: FilterKey): string {
-  if (filter === 'all') return 'All activity';
-  if (filter === 'risky') return 'Risky only';
-  if (filter === 'blocked') return 'Blocked / pending';
-  if (filter === 'writes') return 'Mutations';
-  return 'Commands';
-}
-
-function getActionHighlights(raw?: Record<string, unknown>) {
-  if (!raw) return [];
-
-  const candidates: Array<[string, unknown]> = [
-    ['Path', raw.path],
-    ['Rule', raw.ruleName],
-    ['Model', raw.model],
-    ['Branch', raw.branch],
-    ['Action', raw.actionTaken || raw.action],
-    ['Exit', raw.exitCode],
-  ];
-
-  return candidates
-    .filter(([, value]) => value != null && String(value).trim() !== '')
-    .slice(0, 4)
-    .map(([label, value]) => ({
-      label,
-      value: label === 'Path' ? truncateMiddle(String(value), 42) : String(value).slice(0, 48),
-    }));
-}
-
-function parseEventToAction(event: EventData, risk: Risk, sessionId: string): ActionItem {
-  let data: Record<string, unknown> = {};
-  try { data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data; } catch {}
-
-  const type = event.type;
-  let summary: string;
-  let toolName = type;
-  const details: string[] = [];
-  let status: ActionItem['status'] = 'allowed';
-
-  if (type === 'command') {
-    toolName = 'Bash';
-    const command = String(data.command || '');
-    const args = Array.isArray(data.args) ? data.args.map(String).join(' ') : '';
-    summary = `${command}${args ? ` ${args}` : ''}`.slice(0, 150);
-    if (data.exitCode && data.exitCode !== 0) {
-      details.push(`Exit code: ${data.exitCode}`);
-      status = 'warned';
-    }
-  } else if (type === 'file_write') {
-    toolName = data.action === 'write' ? 'Write' : data.action === 'append' ? 'Append' : 'Edit';
-    const path = String(data.path || '');
-    const name = path.split('/').pop() || path;
-    if (data.linesAdded || data.linesRemoved) {
-      summary = `${name} (+${data.linesAdded || 0}/-${data.linesRemoved || 0})`;
-    } else {
-      summary = name;
-    }
-    if (data.diff) details.push(String(data.diff).slice(0, 300));
-  } else if (type === 'file_read') {
-    toolName = 'Read';
-    const path = String(data.path || '');
-    summary = path.split('/').pop() || path;
-  } else if (type === 'llm_call') {
-    toolName = 'LLM';
-    const tokens = Number(data.totalTokens || 0);
-    const cost = Number(data.costUsd || event.cost_usd || 0);
-    summary = `${String(data.model || 'unknown').split('/').pop()} — ${tokens.toLocaleString()} tokens`;
-    if (cost > 0) details.push(`Cost: $${cost.toFixed(4)}`);
-  } else if (type.startsWith('git_')) {
-    toolName = 'Git';
-    summary = `${String(data.operation || type.replace('git_', ''))}`;
-    if (data.branch) summary += ` ${data.branch}`;
-    if (data.message) summary += `: ${String(data.message).slice(0, 60)}`;
-    if (data.commitHash) details.push(`Hash: ${String(data.commitHash).slice(0, 8)}`);
-  } else if (type === 'error') {
-    toolName = 'Error';
-    summary = String(data.message || 'Unknown error').slice(0, 150);
-    status = 'warned';
-  } else if (type === 'guardrail_block' || type === 'guardrail_trigger') {
-    toolName = 'Guardrail';
-    summary = String(data.description || 'Action blocked').slice(0, 150);
-    status = 'blocked';
-    if (data.ruleName) details.push(`Rule: ${String(data.ruleName)}`);
-    if (data.path) details.push(`Path: ${truncateMiddle(String(data.path), 72)}`);
-    if (data.blockedAction) details.push(`Blocked action: ${String(data.blockedAction).slice(0, 120)}`);
-    if (data.impactPreview) {
-      const ip = data.impactPreview as Record<string, unknown>;
-      if (Array.isArray(ip.details)) {
-        for (const d of ip.details) details.push(String(d));
-      }
-    }
-  } else {
-    summary = type;
-  }
-
-  return {
-    id: event.id,
-    timestamp: event.timestamp,
-    type,
-    risk,
-    summary,
-    details,
-    toolName,
-    sessionId,
-    status,
-    cost: event.cost_usd || 0,
-    raw: data,
-  };
-}
-
 // ── Notification helper ──
 
 let notifPermission: NotificationPermission = typeof Notification !== 'undefined' ? Notification.permission : 'denied';
@@ -249,72 +92,64 @@ function sendNotification(title: string, body: string) {
 
 // ── Page Component ──
 
-// Module-level state so navigating away and back preserves the feed
-let cachedActions: ActionItem[] = [];
-let cachedCounts = { total: 0, blocked: 0, pending: 0 };
-
 export function InterceptionPage() {
-  const [actions, setActions] = useState<ActionItem[]>(cachedActions);
-  const [loading, setLoading] = useState(cachedActions.length === 0);
+  const [actions, setActions] = useState<ActionItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterKey>('all');
+  const [sort, setSort] = useState<SortKey>('latest');
   const [search, setSearch] = useState('');
   const [liveMode, setLiveMode] = useState(true);
   const [autoscroll, setAutoscroll] = useState(true);
+  const [impactPreviewsEnabled, setImpactPreviewsEnabled] = useState(false);
+  const [feedback, setFeedback] = useState<{ tone: 'success' | 'error' | 'info'; message: string } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const [counts, setCounts] = useState(cachedCounts);
+  const counts = useMemo(() => summarizeCounts(actions), [actions]);
 
   // Request notification permission on mount
   useEffect(() => { requestNotifPermission(); }, []);
 
-  // Load initial blocks
   useEffect(() => {
-    if (cachedActions.length > 0) { setLoading(false); return; }
-    api.getInterceptions().then((data) => {
-      const items: ActionItem[] = [];
-      for (const block of data.blocks) {
-        const parsed = parseEventToAction(block, 'critical', block.session_id);
-        parsed.status = 'blocked';
-        items.push(parsed);
-      }
-      for (const review of data.pendingReviews) {
-        items.push({
-          id: review.id,
-          timestamp: review.timestamp,
-          type: 'review_gate',
-          risk: 'high',
-          summary: `Review required: ${review.command.slice(0, 100)}`,
-          details: [`Pattern: ${review.matchedPattern}`],
-          toolName: 'Bash',
-          sessionId: review.sessionId,
-          status: 'pending',
-          cost: 0,
-        });
-      }
-      items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-      cachedActions = items;
-      cachedCounts = summarizeCounts(items);
-      setActions(items);
-      setCounts(cachedCounts);
-      setLoading(false);
-    }).catch(() => setLoading(false));
+    if (!feedback) return;
+    const timeout = window.setTimeout(() => setFeedback(null), 2600);
+    return () => window.clearTimeout(timeout);
+  }, [feedback]);
+
+  const prependAction = useCallback((item: ActionItem) => {
+    setActions((prev) => [item, ...prev.filter((existing) => existing.id !== item.id)].slice(0, 500));
+  }, []);
+
+  const removeAction = useCallback((id: string) => {
+    setActions((prev) => prev.filter((item) => item.id !== id));
+    setExpandedId((prev) => (prev === id ? null : prev));
+  }, []);
+
+  const clearFeed = useCallback(() => {
+    setActions([]);
+    setExpandedId(null);
+    setFeedback({ tone: 'info', message: 'Feed cleared' });
+  }, []);
+
+  // Load initial feed snapshot
+  useEffect(() => {
+    api.getInterceptions()
+      .then((data) => {
+        setActions(buildInitialActionFeed(data));
+        setImpactPreviewsEnabled(data.impactPreviewsEnabled);
+        setLoading(false);
+      })
+      .catch(() => {
+        setFeedback({ tone: 'error', message: 'Unable to load the firewall feed' });
+        setLoading(false);
+      });
   }, []);
 
   // WebSocket: stream all actions
   useEffect(() => {
-    if (!liveMode) return;
-
     const unsub = hawkeyeWs.subscribe((msg) => {
-      if (msg.type === 'action_stream') {
+      if (msg.type === 'action_stream' && liveMode) {
         const item = parseEventToAction(msg.event, msg.risk, msg.sessionId);
-        setActions((prev) => {
-          const next = [item, ...prev].slice(0, 500);
-          cachedActions = next;
-          const nextCounts = summarizeCounts(next);
-          cachedCounts = nextCounts;
-          setCounts(nextCounts);
-          return next;
-        });
+        prependAction(item);
 
         // Browser notification for blocked actions
         if (item.status === 'blocked' || item.risk === 'critical') {
@@ -330,64 +165,47 @@ export function InterceptionPage() {
         }
       }
 
-      if (msg.type === 'impact_preview') {
-        const item: ActionItem = {
-          id: `impact-${msg.timestamp}`,
-          timestamp: msg.timestamp,
-          type: 'impact_preview',
-          risk: msg.impact.risk,
-          summary: msg.impact.summary,
-          details: msg.impact.details,
-          toolName: msg.toolName,
-          sessionId: msg.sessionId,
-          status: msg.impact.risk === 'critical' ? 'blocked' : msg.impact.risk === 'high' ? 'warned' : 'allowed',
-          cost: 0,
-        };
-        setActions((prev) => {
-          const next = [item, ...prev].slice(0, 500);
-          cachedActions = next;
-          const nextCounts = summarizeCounts(next);
-          cachedCounts = nextCounts;
-          setCounts(nextCounts);
-          return next;
-        });
+      if (msg.type === 'impact_preview' && liveMode) {
+        prependAction(createImpactPreviewAction(msg));
 
         if (msg.impact.risk === 'critical') {
           sendNotification('Hawkeye: Critical Risk Detected', msg.impact.summary.slice(0, 100));
         }
       }
+
+      if (msg.type === 'review_approved') {
+        removeAction(msg.reviewId);
+        setFeedback({ tone: 'success', message: 'Review approved' });
+      }
+
+      if (msg.type === 'review_denied') {
+        removeAction(msg.reviewId);
+        setFeedback({ tone: 'success', message: 'Review denied' });
+      }
     });
 
     return unsub;
-  }, [liveMode, autoscroll]);
+  }, [autoscroll, liveMode, prependAction, removeAction]);
 
   const handleApprove = useCallback(async (id: string) => {
     try {
       await api.approveReview(id, 'session');
-      setActions((prev) => {
-        const next = prev.filter((i) => i.id !== id);
-        cachedActions = next;
-        const nextCounts = summarizeCounts(next);
-        cachedCounts = nextCounts;
-        setCounts(nextCounts);
-        return next;
-      });
-    } catch {}
-  }, []);
+      removeAction(id);
+      setFeedback({ tone: 'success', message: 'Review approved' });
+    } catch {
+      setFeedback({ tone: 'error', message: 'Approve failed' });
+    }
+  }, [removeAction]);
 
   const handleDeny = useCallback(async (id: string) => {
     try {
       await api.denyReview(id);
-      setActions((prev) => {
-        const next = prev.filter((i) => i.id !== id);
-        cachedActions = next;
-        const nextCounts = summarizeCounts(next);
-        cachedCounts = nextCounts;
-        setCounts(nextCounts);
-        return next;
-      });
-    } catch {}
-  }, []);
+      removeAction(id);
+      setFeedback({ tone: 'success', message: 'Review denied' });
+    } catch {
+      setFeedback({ tone: 'error', message: 'Deny failed' });
+    }
+  }, [removeAction]);
 
   const riskyCount = useMemo(
     () => actions.filter((item) => item.risk === 'high' || item.risk === 'critical' || item.status === 'pending').length,
@@ -415,7 +233,7 @@ export function InterceptionPage() {
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    return actions.filter((item) => {
+    const matching = actions.filter((item) => {
       const matchesFilter =
         filter === 'all'
           ? true
@@ -440,7 +258,9 @@ export function InterceptionPage() {
 
       return searchable.includes(query);
     });
-  }, [actions, filter, search]);
+
+    return sortActions(matching, sort);
+  }, [actions, filter, search, sort]);
 
   return (
     <div className="space-y-5">
@@ -475,7 +295,7 @@ export function InterceptionPage() {
                 Retention 500 events
               </span>
               <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2.5 py-1 font-mono text-hawk-text2">
-                Impact previews enabled
+                Impact previews {impactPreviewsEnabled ? 'enabled' : 'disabled'}
               </span>
             </div>
 
@@ -508,6 +328,12 @@ export function InterceptionPage() {
 
           <div className="space-y-4">
             <div className="flex flex-wrap justify-start gap-2 xl:justify-end">
+              <button
+                onClick={clearFeed}
+                className="rounded-[18px] border border-hawk-border-subtle bg-hawk-bg/55 px-3 py-2 font-mono text-[11px] text-hawk-text3 transition-all hover:text-hawk-orange"
+              >
+                Clear feed
+              </button>
               <button
                 onClick={() => setAutoscroll(!autoscroll)}
                 className={`rounded-[18px] border px-3 py-2 font-mono text-[11px] transition-all ${
@@ -562,7 +388,7 @@ export function InterceptionPage() {
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Search command, file, rule, session..."
-              className="w-full rounded-[16px] border border-hawk-border-subtle bg-hawk-bg/55 px-3 py-2.5 font-mono text-xs text-hawk-text placeholder-hawk-text3 outline-none transition-colors focus:border-hawk-orange/40"
+              className="w-full rounded-[16px] border border-hawk-border-subtle bg-hawk-surface px-3 py-2.5 font-mono text-xs text-hawk-text placeholder:text-hawk-text3 outline-none transition-colors focus:border-hawk-orange/40"
             />
           </div>
         </div>
@@ -575,6 +401,20 @@ export function InterceptionPage() {
               label={getFilterLabel(item)}
               count={filterCounts[item]}
               onClick={() => setFilter(item)}
+            />
+          ))}
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-hawk-text3">Sort</span>
+          {(['latest', 'risk', 'type', 'session'] as const).map((item) => (
+            <FilterChip
+              key={item}
+              active={sort === item}
+              label={getSortLabel(item)}
+              count={0}
+              hideCount
+              onClick={() => setSort(item)}
             />
           ))}
         </div>
@@ -593,6 +433,17 @@ export function InterceptionPage() {
               {filtered.length} shown / {counts.total} tracked
             </span>
           </div>
+          {feedback && (
+            <div className={`mt-3 rounded-[14px] border px-3 py-2 font-mono text-[11px] ${
+              feedback.tone === 'error'
+                ? 'border-red-400/20 bg-red-400/8 text-red-400'
+                : feedback.tone === 'success'
+                  ? 'border-hawk-green/20 bg-hawk-green/8 text-hawk-green'
+                  : 'border-hawk-orange/20 bg-hawk-orange/8 text-hawk-orange'
+            }`}>
+              {feedback.message}
+            </div>
+          )}
         </div>
 
         <div ref={listRef} className="max-h-[68vh] space-y-2 overflow-auto p-2.5">
@@ -684,11 +535,13 @@ function FilterChip({
   active,
   label,
   count,
+  hideCount = false,
   onClick,
 }: {
   active: boolean;
   label: string;
   count: number;
+  hideCount?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -701,9 +554,11 @@ function FilterChip({
       }`}
     >
       <span>{label}</span>
-      <span className={`rounded-full px-1.5 py-0.5 text-[9px] ${active ? 'bg-hawk-orange/10 text-hawk-orange' : 'bg-hawk-surface2 text-hawk-text2'}`}>
-        {count}
-      </span>
+      {!hideCount && (
+        <span className={`rounded-full px-1.5 py-0.5 text-[9px] ${active ? 'bg-hawk-orange/10 text-hawk-orange' : 'bg-hawk-surface2 text-hawk-text2'}`}>
+          {count}
+        </span>
+      )}
     </button>
   );
 }
@@ -741,7 +596,18 @@ function ActionRow({
 
   return (
     <div className={`overflow-hidden rounded-[16px] border transition-all ${shellTone}`}>
-      <button onClick={onToggle} className="w-full px-3 py-2.5 text-left">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onToggle();
+          }
+        }}
+        className="w-full cursor-pointer px-3 py-2.5 text-left"
+      >
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
           <div className="flex min-w-0 flex-1 items-start gap-3">
             <div className="flex items-center pt-1">
@@ -775,7 +641,6 @@ function ActionRow({
 
               <div className="mt-2 flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-hawk-text3">
                 <span>{item.type.replaceAll('_', ' ')}</span>
-                <span>{shortSessionId(item.sessionId)}</span>
                 <span>{formatTimestamp(item.timestamp)}</span>
               </div>
             </div>
@@ -787,13 +652,22 @@ function ActionRow({
                 {formatCurrency(item.cost)}
               </span>
             )}
+            {item.sessionId && (
+              <Link
+                to={`/session/${item.sessionId}`}
+                onClick={(event) => event.stopPropagation()}
+                className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-hawk-text2 transition-colors hover:border-hawk-orange/30 hover:text-hawk-orange"
+              >
+                {shortSessionId(item.sessionId)}
+              </Link>
+            )}
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-hawk-text3">
               {timeAgo(item.timestamp)}
             </span>
             <span className="text-hawk-text3">{expanded ? '▾' : '▸'}</span>
           </div>
         </div>
-      </button>
+      </div>
 
       {expanded && (
         <div className="border-t border-hawk-border-subtle/60 px-3 py-2.5">

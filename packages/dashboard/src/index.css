@@ -6,6 +6,7 @@
 
 /* Dark theme (default) */
 html.dark {
+  --hawk-canvas: #0d0e13;
   --hawk-bg: #060608;
   --hawk-surface: #111117;
   --hawk-surface2: #18181f;
@@ -22,6 +23,7 @@ html.dark {
 
 /* Light theme */
 html.light {
+  --hawk-canvas: #F8F8FA;
   --hawk-bg: #F8F8FA;
   --hawk-surface: #FFFFFF;
   --hawk-surface2: #F0F0F5;
@@ -36,8 +38,14 @@ html.light {
   --hawk-text3: #8888A0;
 }
 
+@media (max-width: 767px) {
+  html.dark {
+    --hawk-canvas: #191c1d;
+  }
+}
+
 body {
-  background-color: var(--hawk-bg);
+  background-color: var(--hawk-canvas);
   background-image:
     radial-gradient(1000px 500px at 10% -10%, var(--hawk-glow-a), transparent 60%),
     radial-gradient(800px 440px at 100% 0%, var(--hawk-glow-b), transparent 62%),

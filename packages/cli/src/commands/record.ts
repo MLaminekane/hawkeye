@@ -4,7 +4,13 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync, openSync } from 'node:fs';
 import { ReadStream } from 'node:tty';
 import chalk from 'chalk';
-import { createRecorder, Logger, type DriftCheckResult, type GuardrailViolation, type GuardrailRuleConfig } from '@mklamine/hawkeye-core';
+import {
+  createRecorder,
+  Logger,
+  type DriftCheckResult,
+  type GuardrailViolation,
+  type GuardrailRuleConfig,
+} from '@mklamine/hawkeye-core';
 import { RecordOverlay } from './record-overlay.js';
 import { loadConfig, getDefaultConfig } from '../config.js';
 import { fireWebhooks } from '../webhooks.js';
@@ -23,9 +29,7 @@ export const recordCommand = new Command('record')
   .action(async (commandArgs: string[], options) => {
     if (commandArgs.length === 0) {
       console.error(chalk.red('Error: No command specified.'));
-      console.error(
-        chalk.dim('Usage: hawkeye record -o "objective" -- <command>'),
-      );
+      console.error(chalk.dim('Usage: hawkeye record -o "objective" -- <command>'));
       process.exit(1);
     }
 
@@ -54,12 +58,18 @@ export const recordCommand = new Command('record')
     // For Claude Code, recommend hooks instead of record (preload doesn't work with bundled runtime)
     if (agent === 'claude-code') {
       console.log(chalk.yellow('  Note: Claude Code uses a bundled Node.js runtime.'));
-      console.log(chalk.yellow('  For full event capture (LLM costs, drift, guardrails), use hooks:'));
+      console.log(
+        chalk.yellow('  For full event capture (LLM costs, drift, guardrails), use hooks:'),
+      );
       console.log('');
       console.log(chalk.cyan('    hawkeye hooks install'));
-      console.log(chalk.dim('    Then use Claude Code normally — events are captured automatically.'));
+      console.log(
+        chalk.dim('    Then use Claude Code normally — events are captured automatically.'),
+      );
       console.log('');
-      console.log(chalk.dim('  Continuing with record mode (file events + partial network capture)...'));
+      console.log(
+        chalk.dim('  Continuing with record mode (file events + partial network capture)...'),
+      );
       console.log('');
     }
 
@@ -85,11 +95,26 @@ export const recordCommand = new Command('record')
     }
 
     // Auto-detect drift provider from model (e.g. "deepseek/deepseek-chat" → deepseek)
-    let driftProvider = config.drift.provider as 'ollama' | 'anthropic' | 'openai' | 'deepseek' | 'mistral' | 'google';
+    let driftProvider = config.drift.provider as
+      | 'ollama'
+      | 'anthropic'
+      | 'openai'
+      | 'lmstudio'
+      | 'deepseek'
+      | 'mistral'
+      | 'google';
     let driftModel = config.drift.model;
     if (options.model && options.model.includes('/')) {
       const detectedProvider = options.model.split('/')[0].toLowerCase();
-      const validProviders = ['ollama', 'anthropic', 'openai', 'deepseek', 'mistral', 'google'];
+      const validProviders = [
+        'ollama',
+        'anthropic',
+        'openai',
+        'lmstudio',
+        'deepseek',
+        'mistral',
+        'google',
+      ];
       if (validProviders.includes(detectedProvider)) {
         driftProvider = detectedProvider as typeof driftProvider;
         // Use a sensible default drift model for the detected provider
@@ -97,6 +122,7 @@ export const recordCommand = new Command('record')
           deepseek: 'deepseek-chat',
           openai: 'gpt-4o',
           anthropic: 'claude-sonnet-4-6',
+          lmstudio: options.model.split('/').slice(1).join('/'),
           mistral: 'mistral-large-latest',
           google: 'gemini-2.0-flash',
           ollama: 'llama3.2',
@@ -115,26 +141,48 @@ export const recordCommand = new Command('record')
       ignoredPaths: config.recording?.ignorePatterns,
       maxStdoutBytes: config.recording?.maxStdoutBytes,
       capturePrompts: config.recording?.captureLlmContent,
-      drift: options.drift !== false
-        ? {
-            enabled: config.drift.enabled,
-            checkEvery: config.drift.checkEvery,
-            provider: driftProvider,
-            model: driftModel,
-            thresholds: { warning: config.drift.warningThreshold, critical: config.drift.criticalThreshold },
-            contextWindow: config.drift.contextWindow,
-            autoPause: config.drift.autoPause ?? false,
-            ollamaUrl: config.drift.ollamaUrl,
-          }
-        : { enabled: false, checkEvery: 5, provider: 'ollama' as const, model: '', thresholds: { warning: 60, critical: 30 }, contextWindow: 10, autoPause: false },
-      guardrails: options.guardrails !== false
-        ? {
-            enabled: true,
-            rules: config.guardrails
-              .filter((r) => r.enabled)
-              .map((r) => ({ name: r.name, type: r.type, action: r.action, ...r.config }) as GuardrailRuleConfig),
-          }
-        : { enabled: false, rules: [] },
+      drift:
+        options.drift !== false
+          ? {
+              enabled: config.drift.enabled,
+              checkEvery: config.drift.checkEvery,
+              provider: driftProvider,
+              model: driftModel,
+              thresholds: {
+                warning: config.drift.warningThreshold,
+                critical: config.drift.criticalThreshold,
+              },
+              contextWindow: config.drift.contextWindow,
+              autoPause: config.drift.autoPause ?? false,
+              ollamaUrl: config.drift.ollamaUrl,
+              lmstudioUrl: config.drift.lmstudioUrl,
+            }
+          : {
+              enabled: false,
+              checkEvery: 5,
+              provider: 'ollama' as const,
+              model: '',
+              thresholds: { warning: 60, critical: 30 },
+              contextWindow: 10,
+              autoPause: false,
+            },
+      guardrails:
+        options.guardrails !== false
+          ? {
+              enabled: true,
+              rules: config.guardrails
+                .filter((r) => r.enabled)
+                .map(
+                  (r) =>
+                    ({
+                      name: r.name,
+                      type: r.type,
+                      action: r.action,
+                      ...r.config,
+                    }) as GuardrailRuleConfig,
+                ),
+            }
+          : { enabled: false, rules: [] },
     });
 
     // Live terminal overlay
@@ -158,12 +206,8 @@ export const recordCommand = new Command('record')
       overlay.stop();
       recorder.stop(status);
       console.log('');
-      console.log(
-        chalk.green(`● Session ${status}: ${chalk.bold(recorder.sessionId)}`),
-      );
-      console.log(
-        chalk.dim(`  View: hawkeye stats ${recorder.sessionId}`),
-      );
+      console.log(chalk.green(`● Session ${status}: ${chalk.bold(recorder.sessionId)}`));
+      console.log(chalk.dim(`  View: hawkeye stats ${recorder.sessionId}`));
     };
 
     // Read a single keypress from /dev/tty (works even when stdin is inherited by child)
@@ -236,8 +280,12 @@ export const recordCommand = new Command('record')
           console.error(chalk.dim(`  │  Suggestion: ${result.suggestion}`));
         }
         console.error('  │');
-        console.error(`  │  ${chalk.green('[C]')}ontinue   ${chalk.yellow('[P]')}ause   ${chalk.red('[A]')}bort`);
-        console.error(chalk.red('  └────────────────────────────────────────────────────────────┘'));
+        console.error(
+          `  │  ${chalk.green('[C]')}ontinue   ${chalk.yellow('[P]')}ause   ${chalk.red('[A]')}bort`,
+        );
+        console.error(
+          chalk.red('  └────────────────────────────────────────────────────────────┘'),
+        );
 
         promptDriftAction().then((action) => {
           promptingDrift = false;
@@ -293,14 +341,20 @@ export const recordCommand = new Command('record')
     recorder.onReviewGate(async (violation, _event) => {
       overlay.stop();
       console.error('');
-      console.error(chalk.yellow('  ┌─ REVIEW GATE ─────────────────────────────────────────────┐'));
+      console.error(
+        chalk.yellow('  ┌─ REVIEW GATE ─────────────────────────────────────────────┐'),
+      );
       console.error(chalk.yellow(`  │  ${violation.description}`));
       if (violation.matchedPattern) {
         console.error(chalk.dim(`  │  Pattern: "${violation.matchedPattern}"`));
       }
       console.error('  │');
-      console.error(`  │  ${chalk.green('[A]')}pprove   ${chalk.red('[D]')}eny   ${chalk.yellow('[S]')}kip (once)`);
-      console.error(chalk.yellow('  └────────────────────────────────────────────────────────────┘'));
+      console.error(
+        `  │  ${chalk.green('[A]')}pprove   ${chalk.red('[D]')}eny   ${chalk.yellow('[S]')}kip (once)`,
+      );
+      console.error(
+        chalk.yellow('  └────────────────────────────────────────────────────────────┘'),
+      );
 
       const action = await promptReviewAction();
       if (action === 'approve') {
@@ -320,7 +374,12 @@ export const recordCommand = new Command('record')
       eventCount++;
       if (event.costUsd) totalCostUsd += event.costUsd;
       const summary = getEventSummary(event);
-      overlay.update({ eventCount, costUsd: totalCostUsd, lastEventType: event.type, lastEventSummary: summary });
+      overlay.update({
+        eventCount,
+        costUsd: totalCostUsd,
+        lastEventType: event.type,
+        lastEventSummary: summary,
+      });
     });
 
     recorder.start();
@@ -331,9 +390,7 @@ export const recordCommand = new Command('record')
     writeFileSync(preloadPath, generatePreloadScript());
 
     // Build network lock env var for the preload script
-    const networkLockRule = config.guardrails.find(
-      (r) => r.type === 'network_lock' && r.enabled,
-    );
+    const networkLockRule = config.guardrails.find((r) => r.type === 'network_lock' && r.enabled);
     const networkLockEnv: Record<string, string> = {};
     if (networkLockRule && options.guardrails !== false) {
       networkLockEnv.HAWKEYE_NETWORK_LOCK = JSON.stringify({
@@ -355,13 +412,22 @@ export const recordCommand = new Command('record')
       if (fileProtect || commandBlock || directoryScope) {
         guardrailEnv.HAWKEYE_GUARDRAILS = JSON.stringify({
           fileProtect: fileProtect
-            ? { paths: (fileProtect.config as Record<string, unknown>).paths, action: fileProtect.action }
+            ? {
+                paths: (fileProtect.config as Record<string, unknown>).paths,
+                action: fileProtect.action,
+              }
             : null,
           commandBlock: commandBlock
-            ? { patterns: (commandBlock.config as Record<string, unknown>).patterns, action: commandBlock.action }
+            ? {
+                patterns: (commandBlock.config as Record<string, unknown>).patterns,
+                action: commandBlock.action,
+              }
             : null,
           directoryScope: directoryScope
-            ? { blockedDirs: (directoryScope.config as Record<string, unknown>).blockedDirs, action: directoryScope.action }
+            ? {
+                blockedDirs: (directoryScope.config as Record<string, unknown>).blockedDirs,
+                action: directoryScope.action,
+              }
             : null,
           workingDir: cwd,
         });
@@ -405,7 +471,15 @@ export const recordCommand = new Command('record')
 
     // Listen for LLM events, network block events, and guardrail block events from child process via IPC
     childProcess.on('message', (msg: unknown) => {
-      const m = msg as { type?: string; event?: Record<string, unknown>; hostname?: string; url?: string; reason?: string; guardType?: string; detail?: string };
+      const m = msg as {
+        type?: string;
+        event?: Record<string, unknown>;
+        hostname?: string;
+        url?: string;
+        reason?: string;
+        guardType?: string;
+        detail?: string;
+      };
       if (m?.type === 'hawkeye:llm' && m.event) {
         recorder.recordLlmEvent(m.event as unknown as import('@mklamine/hawkeye-core').LlmEvent);
       } else if (m?.type === 'hawkeye:network_block' && m.hostname && m.reason) {
@@ -438,13 +512,17 @@ export const recordCommand = new Command('record')
 
     process.on('SIGINT', () => {
       cleanup('aborted');
-      try { childProcess?.kill('SIGINT'); } catch {}
+      try {
+        childProcess?.kill('SIGINT');
+      } catch {}
       process.exit(130);
     });
 
     process.on('SIGTERM', () => {
       cleanup('aborted');
-      try { childProcess?.kill('SIGTERM'); } catch {}
+      try {
+        childProcess?.kill('SIGTERM');
+      } catch {}
       process.exit(143);
     });
   });
@@ -452,15 +530,24 @@ export const recordCommand = new Command('record')
 function getEventSummary(event: import('@mklamine/hawkeye-core').TraceEvent): string {
   const d = event.data as unknown as Record<string, unknown>;
   switch (event.type) {
-    case 'command': return `${d.command || ''} ${((d.args as string[]) || []).join(' ')}`.trim();
-    case 'file_write': return `Modified ${d.path || ''}`;
-    case 'file_delete': return `Deleted ${d.path || ''}`;
-    case 'file_read': return `Read ${d.path || ''}`;
-    case 'llm_call': return `${d.provider}/${d.model} (${d.totalTokens || 0} tokens)`;
-    case 'api_call': return `${d.method || 'GET'} ${d.url || ''}`;
-    case 'guardrail_trigger': return String(d.description || d.ruleName || '');
-    case 'error': return String(d.message || d.error || 'Error');
-    default: return event.type;
+    case 'command':
+      return `${d.command || ''} ${((d.args as string[]) || []).join(' ')}`.trim();
+    case 'file_write':
+      return `Modified ${d.path || ''}`;
+    case 'file_delete':
+      return `Deleted ${d.path || ''}`;
+    case 'file_read':
+      return `Read ${d.path || ''}`;
+    case 'llm_call':
+      return `${d.provider}/${d.model} (${d.totalTokens || 0} tokens)`;
+    case 'api_call':
+      return `${d.method || 'GET'} ${d.url || ''}`;
+    case 'guardrail_trigger':
+      return String(d.description || d.ruleName || '');
+    case 'error':
+      return String(d.message || d.error || 'Error');
+    default:
+      return event.type;
   }
 }
 
@@ -495,6 +582,7 @@ const LLM_HOSTS = new Set([
   'api.deepseek.com', 'api.mistral.ai',
   'generativelanguage.googleapis.com',
   'localhost:11434', '127.0.0.1:11434',
+  'localhost:1234', '127.0.0.1:1234',
 ]);
 
 // ── Network Lock (blocking) ──
@@ -905,6 +993,7 @@ function sendEvent(event) {
 function detectProvider(hostname, port, path, headers) {
   const hostPort = port ? hostname + ':' + port : hostname;
   if (LLM_HOSTS.has(hostPort) || LLM_HOSTS.has(hostname)) {
+    if (hostPort === 'localhost:1234' || hostPort === '127.0.0.1:1234') return 'lmstudio';
     if (hostname.includes('anthropic')) return 'anthropic';
     if (hostname.includes('openai')) return 'openai';
     if (hostname.includes('deepseek')) return 'deepseek';
@@ -937,7 +1026,7 @@ function extractTokens(provider, body) {
   if (provider === 'anthropic') {
     return { model: body.model || 'unknown', input: u.input_tokens || 0, output: u.output_tokens || 0 };
   }
-  if (provider === 'openai') {
+  if (provider === 'openai' || provider === 'lmstudio') {
     return { model: body.model || 'unknown', input: u.prompt_tokens || 0, output: u.completion_tokens || 0 };
   }
   return { model: body.model || 'unknown', input: body.prompt_eval_count || 0, output: body.eval_count || 0 };

@@ -24,6 +24,8 @@ export const LLM_ENDPOINTS: Record<string, LlmEndpointConfig> = {
   'generativelanguage.googleapis.com': { provider: 'google', tokenExtractor: extractGoogleTokens },
   'localhost:11434': { provider: 'ollama', tokenExtractor: extractOllamaTokens },
   '127.0.0.1:11434': { provider: 'ollama', tokenExtractor: extractOllamaTokens },
+  'localhost:1234': { provider: 'lmstudio', tokenExtractor: extractOpenAITokens },
+  '127.0.0.1:1234': { provider: 'lmstudio', tokenExtractor: extractOpenAITokens },
 };
 
 // Path + header based detection for proxied/custom-port LLM calls
@@ -70,10 +72,10 @@ export const COST_TABLE: Record<string, { input: number; output: number }> = {
   'gpt-4.1-nano': { input: 0.1, output: 0.4 },
   'gpt-5': { input: 1.25, output: 10 },
   'gpt-5-mini': { input: 0.25, output: 2 },
-  'o3': { input: 2, output: 8 },
+  o3: { input: 2, output: 8 },
   'o3-mini': { input: 1.1, output: 4.4 },
   'o4-mini': { input: 1.1, output: 4.4 },
-  'o1': { input: 15, output: 60 },
+  o1: { input: 15, output: 60 },
   // DeepSeek
   'deepseek-chat': { input: 0.28, output: 0.42 },
   'deepseek-reasoner': { input: 0.28, output: 0.42 },
@@ -89,10 +91,10 @@ export const COST_TABLE: Record<string, { input: number; output: number }> = {
   'gemini-2.5-flash-lite': { input: 0.1, output: 0.4 },
   'gemini-2.0-flash': { input: 0.1, output: 0.4 },
   // Ollama (local, free)
-  'llama4': { input: 0, output: 0 },
+  llama4: { input: 0, output: 0 },
   'llama3.2': { input: 0, output: 0 },
-  'mistral': { input: 0, output: 0 },
-  'codellama': { input: 0, output: 0 },
+  mistral: { input: 0, output: 0 },
+  codellama: { input: 0, output: 0 },
   'deepseek-coder': { input: 0, output: 0 },
 };
 
@@ -140,8 +142,13 @@ export function extractOllamaTokens(body: unknown): TokenInfo {
   };
 }
 
-export function estimateCost(model: string, promptTokens: number, completionTokens: number): number {
-  const costs = COST_TABLE[model] ?? Object.entries(COST_TABLE).find(([k]) => model.startsWith(k))?.[1];
+export function estimateCost(
+  model: string,
+  promptTokens: number,
+  completionTokens: number,
+): number {
+  const costs =
+    COST_TABLE[model] ?? Object.entries(COST_TABLE).find(([k]) => model.startsWith(k))?.[1];
   if (!costs) return 0;
   return (promptTokens * costs.input + completionTokens * costs.output) / 1_000_000;
 }
@@ -155,7 +162,7 @@ export function extractPromptText(provider: string, reqBody: Record<string, unkn
     return typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
   }
 
-  if (provider === 'openai') {
+  if (provider === 'openai' || provider === 'lmstudio') {
     const messages = reqBody.messages as Array<{ role: string; content: string }> | undefined;
     if (!messages) return '';
     const last = messages[messages.length - 1];
@@ -173,10 +180,13 @@ export function extractResponseText(provider: string, resBody: Record<string, un
   if (provider === 'anthropic') {
     const content = resBody.content as Array<{ type: string; text?: string }> | undefined;
     if (!content) return '';
-    return content.filter((c) => c.type === 'text').map((c) => c.text).join('');
+    return content
+      .filter((c) => c.type === 'text')
+      .map((c) => c.text)
+      .join('');
   }
 
-  if (provider === 'openai') {
+  if (provider === 'openai' || provider === 'lmstudio') {
     const choices = resBody.choices as Array<{ message: { content: string } }> | undefined;
     if (!choices?.[0]) return '';
     return choices[0].message.content;
@@ -189,7 +199,10 @@ export function extractResponseText(provider: string, resBody: Record<string, un
   return '';
 }
 
-export function extractToolCalls(provider: string, resBody: Record<string, unknown>): string[] | undefined {
+export function extractToolCalls(
+  provider: string,
+  resBody: Record<string, unknown>,
+): string[] | undefined {
   if (provider === 'anthropic') {
     const content = resBody.content as Array<{ type: string; name?: string }> | undefined;
     if (!content) return undefined;
@@ -197,8 +210,10 @@ export function extractToolCalls(provider: string, resBody: Record<string, unkno
     return tools.length > 0 ? tools : undefined;
   }
 
-  if (provider === 'openai') {
-    const choices = resBody.choices as Array<{ message: { tool_calls?: Array<{ function: { name: string } }> } }> | undefined;
+  if (provider === 'openai' || provider === 'lmstudio') {
+    const choices = resBody.choices as
+      | Array<{ message: { tool_calls?: Array<{ function: { name: string } }> } }>
+      | undefined;
     const tools = choices?.[0]?.message?.tool_calls?.map((t) => t.function.name);
     return tools && tools.length > 0 ? tools : undefined;
   }

@@ -14,7 +14,12 @@ import {
   type CausalStep,
 } from '@mklamine/hawkeye-core';
 import { loadConfig } from '../config.js';
-import { formatAmbiguousSessionMessage, openTraceStorage, resolveSession, traceDbExists } from './storage-helpers.js';
+import {
+  formatAmbiguousSessionMessage,
+  openTraceStorage,
+  resolveSession,
+  traceDbExists,
+} from './storage-helpers.js';
 
 const o = chalk.hex('#ff5f1f');
 
@@ -85,8 +90,13 @@ export const analyzeCommand = new Command('analyze')
         const driftConfig = config.drift || {};
         const provider = driftConfig.provider || 'ollama';
         const model = driftConfig.model || 'llama3.2';
-        const apiKey = (config.apiKeys as Record<string, string> | undefined)?.[provider] || '';
-        const llm = createLlmProvider(provider, model, apiKey);
+        const endpointUrl =
+          provider === 'ollama'
+            ? driftConfig.ollamaUrl
+            : provider === 'lmstudio'
+              ? driftConfig.lmstudioUrl
+              : undefined;
+        const llm = createLlmProvider(provider, model, endpointUrl);
 
         process.stderr.write(chalk.gray(`  Analyzing with ${provider}/${model}...\n`));
         const prompt = buildRcaPrompt(rcaSession, rcaEvents, result);
@@ -99,9 +109,7 @@ export const analyzeCommand = new Command('analyze')
 
     // Output
     if (opts.json) {
-      const output = llmEnhanced
-        ? { ...result, llm: llmEnhanced }
-        : result;
+      const output = llmEnhanced ? { ...result, llm: llmEnhanced } : result;
       console.log(JSON.stringify(output, null, 2));
     } else {
       printRcaReport(result, llmEnhanced, match.id);
@@ -126,18 +134,20 @@ function printRcaReport(
   console.log(hr);
 
   // Outcome badge
-  const outcomeBadge = result.outcome === 'success'
-    ? chalk.bgGreen.black(' SUCCESS ')
-    : result.outcome === 'failure'
-      ? chalk.bgRed.white(' FAILURE ')
-      : result.outcome === 'partial'
-        ? chalk.bgYellow.black(' PARTIAL ')
-        : chalk.bgGray.white(' UNKNOWN ');
-  const confBadge = result.confidence === 'high'
-    ? chalk.green(`confidence: ${result.confidence}`)
-    : result.confidence === 'medium'
-      ? chalk.yellow(`confidence: ${result.confidence}`)
-      : chalk.red(`confidence: ${result.confidence}`);
+  const outcomeBadge =
+    result.outcome === 'success'
+      ? chalk.bgGreen.black(' SUCCESS ')
+      : result.outcome === 'failure'
+        ? chalk.bgRed.white(' FAILURE ')
+        : result.outcome === 'partial'
+          ? chalk.bgYellow.black(' PARTIAL ')
+          : chalk.bgGray.white(' UNKNOWN ');
+  const confBadge =
+    result.confidence === 'high'
+      ? chalk.green(`confidence: ${result.confidence}`)
+      : result.confidence === 'medium'
+        ? chalk.yellow(`confidence: ${result.confidence}`)
+        : chalk.red(`confidence: ${result.confidence}`);
 
   console.log();
   console.log(`  ${outcomeBadge}  ${confBadge}`);
@@ -152,7 +162,11 @@ function printRcaReport(
     console.log();
     console.log(o('  PRIMARY ERROR') + chalk.gray(` (event #${result.primaryError.sequence})`));
     console.log(chalk.red(`  ${result.primaryError.description}`));
-    console.log(chalk.gray(`  at ${new Date(result.primaryError.timestamp).toLocaleTimeString()} — ${result.primaryError.type}`));
+    console.log(
+      chalk.gray(
+        `  at ${new Date(result.primaryError.timestamp).toLocaleTimeString()} — ${result.primaryError.type}`,
+      ),
+    );
   }
 
   // LLM Root Cause
@@ -194,10 +208,17 @@ function printRcaReport(
     console.log();
     console.log(o('  DRIFT ANALYSIS'));
     const da = result.driftAnalysis;
-    const trendColor = da.trend === 'declining' ? chalk.red : da.trend === 'volatile' ? chalk.yellow : chalk.green;
-    console.log(`  Trend: ${trendColor(da.trend)} — Score range: ${da.lowestScore} → ${da.highestScore}`);
+    const trendColor =
+      da.trend === 'declining' ? chalk.red : da.trend === 'volatile' ? chalk.yellow : chalk.green;
+    console.log(
+      `  Trend: ${trendColor(da.trend)} — Score range: ${da.lowestScore} → ${da.highestScore}`,
+    );
     if (da.inflectionPoint) {
-      console.log(chalk.yellow(`  Inflection at event #${da.inflectionPoint.sequence}: ${da.inflectionPoint.scoreBefore} → ${da.inflectionPoint.scoreAfter}`));
+      console.log(
+        chalk.yellow(
+          `  Inflection at event #${da.inflectionPoint.sequence}: ${da.inflectionPoint.scoreBefore} → ${da.inflectionPoint.scoreAfter}`,
+        ),
+      );
       console.log(chalk.gray(`  Trigger: ${da.inflectionPoint.triggerDescription}`));
     }
   }
@@ -219,11 +240,16 @@ function printRcaReport(
 
 function getRelevanceIcon(step: CausalStep): string {
   switch (step.relevance) {
-    case 'root_cause': return chalk.red('●');
-    case 'contributing': return chalk.yellow('◐');
-    case 'effect': return chalk.gray('○');
-    case 'context': return chalk.blue('◇');
-    default: return ' ';
+    case 'root_cause':
+      return chalk.red('●');
+    case 'contributing':
+      return chalk.yellow('◐');
+    case 'effect':
+      return chalk.gray('○');
+    case 'context':
+      return chalk.blue('◇');
+    default:
+      return ' ';
   }
 }
 

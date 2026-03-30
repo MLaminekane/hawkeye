@@ -1,17 +1,15 @@
-import { useDeferredValue, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { api, hawkeyeWs, type SessionData, type GlobalStatsData } from '../api';
-
-let cachedSessions: SessionData[] | null = null;
-let cachedStats: GlobalStatsData | null = null;
+import { api, hawkeyeWs, type GlobalStatsData, type SessionData } from '../../api';
 
 type SortKey = 'date' | 'actions' | 'cost' | 'drift';
 type SortDir = 'asc' | 'desc';
-type StatusFilter = 'all' | 'recording' | 'completed' | 'aborted';
+type StatusFilter = 'all' | 'recording' | 'paused' | 'completed' | 'aborted';
 
 const STATUS_OPTIONS: Array<{ id: StatusFilter; label: string }> = [
   { id: 'all', label: 'All' },
   { id: 'recording', label: 'Live' },
+  { id: 'paused', label: 'Paused' },
   { id: 'completed', label: 'Completed' },
   { id: 'aborted', label: 'Aborted' },
 ];
@@ -22,6 +20,10 @@ const SORT_OPTIONS: Array<{ key: SortKey; label: string }> = [
   { key: 'cost', label: 'Cost' },
   { key: 'drift', label: 'Drift' },
 ];
+
+const INITIAL_LIMIT = 200;
+const LIMIT_STEP = 100;
+const WS_REFRESH_DELAY_MS = 750;
 
 const currencyFormatter = new Intl.NumberFormat(undefined, {
   style: 'currency',
@@ -36,9 +38,10 @@ const compactNumberFormatter = new Intl.NumberFormat(undefined, {
 });
 
 export function SessionsPage() {
-  const [sessions, setSessions] = useState<SessionData[]>(cachedSessions || []);
-  const [stats, setStats] = useState<GlobalStatsData | null>(cachedStats);
-  const [loading, setLoading] = useState(cachedSessions === null);
+  const [sessions, setSessions] = useState<SessionData[]>([]);
+  const [stats, setStats] = useState<GlobalStatsData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('date');
@@ -48,41 +51,87 @@ export function SessionsPage() {
   const [driftMin, setDriftMin] = useState('');
   const [driftMax, setDriftMax] = useState('');
   const [showFilters, setShowFilters] = useState(false);
+  const [sessionLimit, setSessionLimit] = useState(INITIAL_LIMIT);
+  const [liveNow, setLiveNow] = useState(Date.now());
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
 
   const deferredSearch = useDeferredValue(search.trim().toLowerCase());
+  const refreshTimeoutRef = useRef<number | null>(null);
+
+  const load = useCallback(
+    async (mode: 'initial' | 'refresh' = 'refresh') => {
+      if (mode === 'initial') {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
+
+      try {
+        const [sessionData, statsData] = await Promise.all([
+          api.listSessions(sessionLimit),
+          api.getStats(),
+        ]);
+        setSessions(sessionData);
+        setStats(statsData);
+      } catch {
+        if (mode === 'initial') {
+          setFeedback({ tone: 'error', message: 'Unable to load sessions right now' });
+        }
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [sessionLimit],
+  );
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimeoutRef.current !== null) return;
+    refreshTimeoutRef.current = window.setTimeout(() => {
+      refreshTimeoutRef.current = null;
+      void load('refresh');
+    }, WS_REFRESH_DELAY_MS);
+  }, [load]);
 
   useEffect(() => {
-    const load = () => {
-      api
-        .listSessions(200)
-        .then((data) => {
-          cachedSessions = data;
-          setSessions(data);
-          setLoading(false);
-        })
-        .catch(() => setLoading(false));
+    void load('initial');
+  }, [load]);
 
-      api
-        .getStats()
-        .then((result) => {
-          cachedStats = result;
-          setStats(result);
-        })
-        .catch(() => {});
-    };
-
-    load();
-
+  useEffect(() => {
     const unsubscribe = hawkeyeWs.subscribe((message) => {
-      if (message.type === 'event' || message.type === 'drift_update') {
-        load();
+      if (
+        message.type === 'event' ||
+        message.type === 'drift_update' ||
+        message.type === 'session_end' ||
+        message.type === 'session_pause' ||
+        message.type === 'session_resume'
+      ) {
+        scheduleRefresh();
       }
     });
 
     return () => {
       unsubscribe();
+      if (refreshTimeoutRef.current !== null) {
+        window.clearTimeout(refreshTimeoutRef.current);
+      }
     };
-  }, []);
+  }, [scheduleRefresh]);
+
+  useEffect(() => {
+    if (!feedback) return;
+    const timeout = window.setTimeout(() => setFeedback(null), 2600);
+    return () => window.clearTimeout(timeout);
+  }, [feedback]);
+
+  useEffect(() => {
+    const hasLiveSessions = sessions.some((session) => session.status === 'recording');
+    if (!hasLiveSessions) return;
+
+    const interval = window.setInterval(() => setLiveNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [sessions]);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -96,13 +145,18 @@ export function SessionsPage() {
   const statusCounts = useMemo(() => {
     return sessions.reduce<Record<StatusFilter, number>>(
       (acc, session) => {
-        if (session.status === 'recording' || session.status === 'completed' || session.status === 'aborted') {
+        if (
+          session.status === 'recording' ||
+          session.status === 'paused' ||
+          session.status === 'completed' ||
+          session.status === 'aborted'
+        ) {
           acc[session.status] += 1;
         }
         acc.all += 1;
         return acc;
       },
-      { all: 0, recording: 0, completed: 0, aborted: 0 },
+      { all: 0, recording: 0, paused: 0, completed: 0, aborted: 0 },
     );
   }, [sessions]);
 
@@ -160,8 +214,7 @@ export function SessionsPage() {
 
       switch (sortKey) {
         case 'date':
-          comparison =
-            new Date(left.started_at).getTime() - new Date(right.started_at).getTime();
+          comparison = new Date(left.started_at).getTime() - new Date(right.started_at).getTime();
           break;
         case 'actions':
           comparison = left.total_actions - right.total_actions;
@@ -189,58 +242,56 @@ export function SessionsPage() {
 
   const overview = useMemo(() => {
     const totalSessions = stats?.total_sessions ?? sessions.length;
-    const activeSessions = stats?.active_sessions ?? statusCounts.recording;
-    const totalCost = stats?.total_cost_usd ?? sessions.reduce((sum, session) => sum + session.total_cost_usd, 0);
-    const totalActions = stats?.total_actions ?? sessions.reduce((sum, session) => sum + session.total_actions, 0);
-    const totalTokens = stats?.total_tokens ?? 0;
-
-    const driftSessions = sessions.filter(
-      (session) => session.final_drift_score !== null,
-    );
-    const averageDrift =
-      stats?.avg_drift_score ??
-      (driftSessions.length > 0
-        ? driftSessions.reduce((sum, session) => sum + (session.final_drift_score || 0), 0) /
-          driftSessions.length
-        : 0);
+    const activeSessions =
+      stats?.active_sessions ??
+      sessions.filter((session) => session.status === 'recording' || session.status === 'paused').length;
+    const totalCost =
+      stats?.total_cost_usd ?? sessions.reduce((sum, session) => sum + session.total_cost_usd, 0);
+    const averageDrift = (() => {
+      if (stats?.avg_drift_score != null) return stats.avg_drift_score;
+      const driftSessions = sessions.filter((session) => session.final_drift_score !== null);
+      if (driftSessions.length === 0) return 0;
+      return (
+        driftSessions.reduce((sum, session) => sum + (session.final_drift_score || 0), 0) /
+        driftSessions.length
+      );
+    })();
 
     return {
       totalSessions,
       activeSessions,
       totalCost,
-      totalActions,
-      totalTokens,
       averageDrift,
     };
-  }, [sessions, stats, statusCounts.recording]);
+  }, [sessions, stats]);
 
-  const latestSession = useMemo(() => {
-    return [...sessions].sort(
-      (left, right) =>
-        new Date(right.started_at).getTime() - new Date(left.started_at).getTime(),
-    )[0] || null;
-  }, [sessions]);
+  const latestSession = useMemo(
+    () =>
+      [...sessions].sort(
+        (left, right) => new Date(right.started_at).getTime() - new Date(left.started_at).getTime(),
+      )[0] || null,
+    [sessions],
+  );
 
-  const riskiestSession = useMemo(() => {
-    return sessions
-      .filter((session) => session.final_drift_score !== null)
-      .sort(
-        (left, right) =>
-          (left.final_drift_score ?? Infinity) - (right.final_drift_score ?? Infinity),
-      )[0] || null;
-  }, [sessions]);
+  const riskiestSession = useMemo(
+    () =>
+      sessions
+        .filter((session) => session.final_drift_score !== null)
+        .sort(
+          (left, right) =>
+            (left.final_drift_score ?? Infinity) - (right.final_drift_score ?? Infinity),
+        )[0] || null,
+    [sessions],
+  );
 
-  const priciestSession = useMemo(() => {
-    return [...sessions].sort((left, right) => right.total_cost_usd - left.total_cost_usd)[0] || null;
-  }, [sessions]);
+  const priciestSession = useMemo(
+    () => [...sessions].sort((left, right) => right.total_cost_usd - left.total_cost_usd)[0] || null,
+    [sessions],
+  );
 
-  const maxActions = useMemo(() => {
-    return Math.max(...filteredSessions.map((session) => session.total_actions), 1);
-  }, [filteredSessions]);
-
-  const maxCost = useMemo(() => {
-    return Math.max(...filteredSessions.map((session) => session.total_cost_usd), 0.01);
-  }, [filteredSessions]);
+  const loadedTotal = sessions.length;
+  const availableTotal = stats?.total_sessions ?? loadedTotal;
+  const canLoadMore = loadedTotal < availableTotal;
 
   const clearAdvancedFilters = () => {
     setDateFrom('');
@@ -254,6 +305,28 @@ export function SessionsPage() {
     setSearch('');
     clearAdvancedFilters();
   };
+
+  const handleDelete = useCallback(
+    async (sessionId: string) => {
+      if (deletingId) return;
+      if (!window.confirm(`Delete session ${sessionId.slice(0, 8)}? This removes its events and derived data.`)) {
+        return;
+      }
+
+      setDeletingId(sessionId);
+      try {
+        await api.deleteSession(sessionId);
+        setSessions((previous) => previous.filter((session) => session.id !== sessionId));
+        setFeedback({ tone: 'success', message: 'Session deleted' });
+        await load('refresh');
+      } catch {
+        setFeedback({ tone: 'error', message: 'Delete failed' });
+      } finally {
+        setDeletingId(null);
+      }
+    },
+    [deletingId, load],
+  );
 
   if (loading) {
     return (
@@ -284,78 +357,61 @@ export function SessionsPage() {
     <div className="space-y-5">
       <section className="relative overflow-hidden rounded-[22px] border border-hawk-border-subtle bg-hawk-surface/70 p-3.5 shadow-[0_28px_80px_-45px_rgba(0,0,0,0.95)] sm:p-4">
         <div className="pointer-events-none absolute inset-0">
-          <div className="absolute -left-16 top-0 h-56 w-56 rounded-full bg-hawk-orange/10 blur-3xl" />
-          <div className="absolute right-[-60px] top-12 h-64 w-64 rounded-full bg-emerald-400/8 blur-3xl" />
-          <div className="absolute bottom-[-70px] left-1/3 h-56 w-56 rounded-full bg-sky-400/8 blur-3xl" />
+          <div className="absolute -left-16 top-0 h-56 w-56 rounded-full bg-hawk-orange/8 blur-3xl" />
+          <div className="absolute right-[-60px] top-12 h-64 w-64 rounded-full bg-emerald-400/6 blur-3xl" />
         </div>
 
-        <div className="relative grid gap-4 xl:grid-cols-[1.08fr_0.92fr]">
+        <div className="relative grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
           <div className="space-y-4">
             <div className="inline-flex items-center gap-2 rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">
-              <span className="inline-block h-2 w-2 rounded-full bg-hawk-orange" />
+              <span className={`inline-block h-2 w-2 rounded-full ${overview.activeSessions > 0 ? 'bg-hawk-orange' : 'bg-hawk-text3'}`} />
               Session Observatory
             </div>
 
             <div className="max-w-2xl">
               <h1 className="font-display text-xl font-semibold tracking-tight text-hawk-text sm:text-2xl">
-                See what your agents did, how much it cost, and which runs deserve attention first.
+                Review recent runs, jump into the right session fast, and keep the list clean.
               </h1>
               <p className="mt-2 max-w-xl text-sm leading-6 text-hawk-text2">
-                The page is redesigned to work like an overview board: quick signal at the top, sharper controls in the middle, and session cards you can scan without reading every line.
+                Live updates are throttled, running durations stay fresh, and older sessions can be removed directly from the board.
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-2.5 xl:grid-cols-4">
-              <OverviewCard
-                label="Sessions"
-                value={String(overview.totalSessions)}
-                hint={`${overview.activeSessions} active right now`}
-                toneClass="text-hawk-orange"
-              />
-              <OverviewCard
-                label="Total Cost"
-                value={formatMoney(overview.totalCost)}
-                hint={`${formatCount(overview.totalTokens)} tokens tracked`}
-                toneClass="text-amber-400"
-              />
-              <OverviewCard
-                label="Action Volume"
-                value={formatCount(overview.totalActions)}
-                hint={`${Math.round(overview.totalActions / Math.max(overview.totalSessions, 1))} avg per session`}
-              />
-              <OverviewCard
-                label="Average Drift"
-                value={`${Math.round(overview.averageDrift)}/100`}
-                hint={getDriftLabel(overview.averageDrift)}
-                toneClass={getDriftTextClass(overview.averageDrift)}
-              />
+            <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
+              <OverviewCard label="Sessions" value={String(overview.totalSessions)} hint={`${loadedTotal} loaded`} toneClass="text-hawk-orange" />
+              <OverviewCard label="Live now" value={String(overview.activeSessions)} hint="Recording or paused" />
+              <OverviewCard label="Total cost" value={formatMoney(overview.totalCost)} hint="Across all tracked runs" toneClass="text-amber-400" />
+              <OverviewCard label="Avg drift" value={`${Math.round(overview.averageDrift)}/100`} hint={getDriftLabel(overview.averageDrift)} toneClass={getDriftTextClass(overview.averageDrift)} />
             </div>
           </div>
 
-          <div className="rounded-[20px] border border-hawk-border-subtle bg-hawk-bg/55 p-3">
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">
-              Quick Signals
+          <div className="rounded-[18px] border border-hawk-border-subtle bg-hawk-bg/45 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">
+                Quick Signals
+              </div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text3">
+                {refreshing ? 'Refreshing…' : 'Stable'}
+              </div>
             </div>
+
             <div className="mt-3 space-y-2.5">
               <InsightCard
                 title="Latest movement"
                 headline={latestSession ? latestSession.objective : 'No recent session'}
                 detail={
                   latestSession
-                    ? `${formatRelativeDate(latestSession.started_at)} · ${latestSession.agent || 'unknown agent'}`
+                    ? `${formatRelativeDate(latestSession.started_at, liveNow)} · ${latestSession.agent || 'unknown agent'}`
                     : 'Waiting for the next run'
                 }
-                toneClass="text-hawk-text"
+                session={latestSession}
               />
               <InsightCard
                 title="Most expensive run"
                 headline={priciestSession ? formatMoney(priciestSession.total_cost_usd) : formatMoney(0)}
-                detail={
-                  priciestSession
-                    ? priciestSession.objective
-                    : 'No spend recorded yet'
-                }
+                detail={priciestSession ? priciestSession.objective : 'No spend recorded yet'}
                 toneClass="text-amber-400"
+                session={priciestSession}
               />
               <InsightCard
                 title="Lowest drift score"
@@ -365,40 +421,15 @@ export function SessionsPage() {
                     : 'No drift signal'
                 }
                 detail={
-                  riskiestSession
-                    ? riskiestSession.objective
-                    : 'Need at least one scored session'
+                  riskiestSession ? riskiestSession.objective : 'Need at least one scored session'
                 }
                 toneClass={
                   riskiestSession && riskiestSession.final_drift_score !== null
                     ? getDriftTextClass(riskiestSession.final_drift_score)
                     : 'text-hawk-text'
                 }
+                session={riskiestSession}
               />
-            </div>
-
-            <div className="mt-3 rounded-[16px] border border-hawk-border-subtle bg-hawk-surface/55 p-3">
-              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">
-                Live Presence
-              </div>
-              <div className="mt-2 flex items-center gap-3">
-                <div className="flex h-9 w-9 items-center justify-center rounded-[12px] bg-hawk-orange/12">
-                  <span className="relative flex h-3 w-3">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-hawk-orange opacity-70" />
-                    <span className="relative inline-flex h-3 w-3 rounded-full bg-hawk-orange" />
-                  </span>
-                </div>
-                <div>
-                  <div className="text-base font-semibold text-hawk-text">
-                    {statusCounts.recording} live session{statusCounts.recording === 1 ? '' : 's'}
-                  </div>
-                  <div className="text-sm text-hawk-text2">
-                    {statusCounts.recording > 0
-                      ? 'Telemetry is still changing underneath this page.'
-                      : 'No session is recording at the moment.'}
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -410,10 +441,10 @@ export function SessionsPage() {
             <div className="relative min-w-[260px] flex-1 xl:max-w-xl">
               <input
                 type="text"
-                placeholder="Search objective, agent, developer, model, branch, or session id"
+                placeholder="Search objective, agent, model, branch, or session id"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                className="w-full rounded-[18px] border border-hawk-border-subtle bg-hawk-bg/55 px-4 py-2.5 pl-11 text-sm text-hawk-text placeholder:text-hawk-text3/45 focus:border-hawk-orange/50 focus:outline-none"
+                className="w-full rounded-[18px] border border-hawk-border-subtle bg-hawk-surface px-4 py-2.5 pl-11 text-sm text-hawk-text placeholder:text-hawk-text3 focus:border-hawk-orange/50 focus:outline-none"
               />
               <svg
                 width="16"
@@ -543,7 +574,11 @@ export function SessionsPage() {
           <div className="flex flex-wrap items-center gap-3 text-sm text-hawk-text2">
             <span>
               Showing <span className="font-semibold text-hawk-text">{filteredSessions.length}</span> of{' '}
-              <span className="font-semibold text-hawk-text">{sessions.length}</span> sessions
+              <span className="font-semibold text-hawk-text">{loadedTotal}</span> loaded sessions
+            </span>
+            <span className="hidden h-1 w-1 rounded-full bg-hawk-border sm:inline-block" />
+            <span>
+              {loadedTotal} / {availableTotal} fetched
             </span>
             {activeFilterCount > 0 && (
               <>
@@ -551,7 +586,23 @@ export function SessionsPage() {
                 <span>{activeFilterCount} filter{activeFilterCount === 1 ? '' : 's'} active</span>
               </>
             )}
+            {refreshing && (
+              <>
+                <span className="hidden h-1 w-1 rounded-full bg-hawk-border sm:inline-block" />
+                <span>Refreshing…</span>
+              </>
+            )}
           </div>
+
+          {feedback && (
+            <div className={`rounded-[14px] border px-3 py-2 font-mono text-[11px] ${
+              feedback.tone === 'error'
+                ? 'border-red-400/20 bg-red-400/8 text-red-400'
+                : 'border-hawk-green/20 bg-hawk-green/8 text-hawk-green'
+            }`}>
+              {feedback.message}
+            </div>
+          )}
         </div>
       </section>
 
@@ -564,21 +615,36 @@ export function SessionsPage() {
           <button
             type="button"
             onClick={clearAllFilters}
-            className="mt-5 rounded-2xl bg-hawk-orange px-4 py-3 text-sm font-semibold text-black transition-all hover:brightness-105"
+            className="mt-5 rounded-2xl bg-hawk-orange px-4 py-3 text-sm font-semibold text-white transition-all hover:brightness-105"
           >
             Reset filters
           </button>
         </div>
       ) : (
-        <div className="grid gap-3.5 xl:grid-cols-2">
-          {filteredSessions.map((session) => (
-            <SessionCard
-              key={session.id}
-              session={session}
-              maxActions={maxActions}
-              maxCost={maxCost}
-            />
-          ))}
+        <div className="space-y-3.5">
+          <div className="grid gap-3.5 xl:grid-cols-2">
+            {filteredSessions.map((session) => (
+              <SessionCard
+                key={session.id}
+                session={session}
+                now={liveNow}
+                deleting={deletingId === session.id}
+                onDelete={() => void handleDelete(session.id)}
+              />
+            ))}
+          </div>
+
+          {canLoadMore && (
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={() => setSessionLimit((current) => current + LIMIT_STEP)}
+                className="rounded-[16px] border border-hawk-border-subtle bg-hawk-bg/55 px-4 py-2 font-mono text-[11px] uppercase tracking-[0.16em] text-hawk-text2 transition-colors hover:border-hawk-orange/30 hover:text-hawk-orange"
+              >
+                Load more sessions
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -597,7 +663,7 @@ function OverviewCard({
   toneClass?: string;
 }) {
   return (
-    <div className="rounded-[18px] border border-hawk-border-subtle bg-hawk-bg/55 p-3 shadow-[0_16px_40px_-30px_rgba(0,0,0,0.9)]">
+    <div className="rounded-[16px] border border-hawk-border-subtle bg-hawk-bg/55 p-3">
       <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">{label}</div>
       <div className={`mt-1 font-display text-lg font-semibold ${toneClass}`}>{value}</div>
       <div className="mt-1 text-xs text-hawk-text2">{hint}</div>
@@ -609,19 +675,34 @@ function InsightCard({
   title,
   headline,
   detail,
+  session,
   toneClass = 'text-hawk-text',
 }: {
   title: string;
   headline: string;
   detail: string;
+  session: SessionData | null;
   toneClass?: string;
 }) {
-  return (
-    <div className="rounded-[16px] border border-hawk-border-subtle bg-hawk-surface/55 p-3">
+  const body = (
+    <>
       <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">{title}</div>
       <div className={`mt-1 text-sm font-semibold ${toneClass}`}>{headline}</div>
       <div className="mt-1 text-xs leading-5 text-hawk-text2">{detail}</div>
-    </div>
+    </>
+  );
+
+  if (!session) {
+    return <div className="rounded-[16px] border border-hawk-border-subtle bg-hawk-surface/55 p-3">{body}</div>;
+  }
+
+  return (
+    <Link
+      to={`/session/${session.id}`}
+      className="block rounded-[16px] border border-hawk-border-subtle bg-hawk-surface/55 p-3 transition-colors hover:border-hawk-orange/20 hover:text-hawk-text"
+    >
+      {body}
+    </Link>
   );
 }
 
@@ -642,135 +723,103 @@ function FilterField({
 
 function SessionCard({
   session,
-  maxActions,
-  maxCost,
+  now,
+  deleting,
+  onDelete,
 }: {
   session: SessionData;
-  maxActions: number;
-  maxCost: number;
+  now: number;
+  deleting: boolean;
+  onDelete: () => void;
 }) {
   const statusTone = getStatusTone(session.status);
   const driftScore = session.final_drift_score;
   const driftTone = getDriftTone(driftScore);
-  const actionsPercent = clamp((session.total_actions / maxActions) * 100, 10, 100);
-  const costPercent = session.total_cost_usd > 0 ? clamp((session.total_cost_usd / maxCost) * 100, 8, 100) : 0;
 
   return (
-    <Link
-      to={`/session/${session.id}`}
-      className={`group relative overflow-hidden rounded-[20px] border bg-hawk-surface/75 shadow-[0_20px_48px_-38px_rgba(0,0,0,1)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_24px_56px_-38px_rgba(0,0,0,1)] ${statusTone.cardClass}`}
+    <article
+      className={`group overflow-hidden rounded-[20px] border bg-hawk-surface/75 shadow-[0_20px_48px_-38px_rgba(0,0,0,1)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_24px_56px_-38px_rgba(0,0,0,1)] ${statusTone.cardClass}`}
     >
-      <div className="pointer-events-none absolute inset-0">
-        <div className={`absolute -right-16 top-0 h-44 w-44 rounded-full blur-3xl ${statusTone.glowClass}`} />
-        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/12 to-transparent" />
-      </div>
-
-      <div className="relative p-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className={`rounded-full border px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] ${statusTone.badgeClass}`}>
-                {session.status === 'recording' ? 'Live' : session.status}
+      <div className="flex items-start justify-between gap-3 border-b border-hawk-border-subtle px-3 py-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`rounded-full border px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] ${statusTone.badgeClass}`}>
+              {session.status === 'recording' ? 'Live' : session.status}
+            </span>
+            <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text3">
+              {session.id.slice(0, 8)}
+            </span>
+            {session.agent && (
+              <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text2">
+                {session.agent}
               </span>
-              <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text3">
-                {session.id.slice(0, 8)}
+            )}
+            {session.git_branch && (
+              <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text2">
+                {session.git_branch}
               </span>
-              {session.agent && (
-                <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text2">
-                  {session.agent}
-                </span>
-              )}
-            </div>
-
-            <h2 className="mt-2 text-base font-semibold leading-6 text-hawk-text transition-colors group-hover:text-hawk-orange sm:text-lg">
-              {session.objective}
-            </h2>
-
-            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-hawk-text2">
-              {session.developer && (
-                <span className="rounded-full border border-hawk-orange/20 bg-hawk-orange/8 px-2 py-1">
-                  {session.developer}
-                </span>
-              )}
-              {session.model && (
-                <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1">
-                  {session.model}
-                </span>
-              )}
-              {session.git_branch && (
-                <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1">
-                  {session.git_branch}
-                </span>
-              )}
-              <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1">
-                {truncateMiddle(session.working_dir, 28)}
-              </span>
-            </div>
-          </div>
-
-          <div className="shrink-0 text-left sm:text-right sm:pt-0.5">
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-hawk-text3">
-              Started
-            </div>
-            <div className="mt-1 text-sm font-semibold text-hawk-text">{formatRelativeDate(session.started_at)}</div>
-            <div className="mt-1 text-xs text-hawk-text2">{formatFullDate(session.started_at)}</div>
+            )}
           </div>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2 xl:grid-cols-4">
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+          className="rounded-[14px] border border-red-400/20 bg-red-400/8 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-red-400 transition-colors hover:bg-red-400/14 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {deleting ? 'Deleting…' : 'Delete'}
+        </button>
+      </div>
+
+      <Link to={`/session/${session.id}`} className="block p-3">
+        <h2 className="text-base font-semibold leading-6 text-hawk-text transition-colors group-hover:text-hawk-orange sm:text-lg">
+          {session.objective}
+        </h2>
+
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-hawk-text2">
+          {session.developer && (
+            <span className="rounded-full border border-hawk-orange/20 bg-hawk-orange/8 px-2 py-1">
+              {session.developer}
+            </span>
+          )}
+          {session.model && (
+            <span className="rounded-full border border-hawk-border-subtle bg-hawk-bg/55 px-2 py-1">
+              {session.model}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <SessionMetric
+            label="Started"
+            value={formatRelativeDate(session.started_at, now)}
+            hint={formatFullDate(session.started_at)}
+          />
           <SessionMetric
             label="Duration"
-            value={formatDuration(session.started_at, session.ended_at)}
+            value={formatDuration(session.started_at, session.ended_at, now)}
             hint={session.status === 'recording' ? 'Still running' : 'Run length'}
           />
-          <SessionMetric
-            label="Actions"
-            value={String(session.total_actions)}
-            hint="Recorded operations"
-          />
+          <SessionMetric label="Actions" value={String(session.total_actions)} hint="Recorded operations" />
           <SessionMetric
             label="Cost"
             value={formatMoney(session.total_cost_usd)}
             hint={session.total_cost_usd > 0 ? 'Tracked spend' : 'No cost recorded'}
             toneClass={session.total_cost_usd > 0 ? 'text-amber-400' : 'text-hawk-text'}
           />
-          <SessionMetric
-            label="Drift"
-            value={driftScore !== null ? `${driftScore}/100` : '--'}
-            hint={driftScore !== null ? getDriftLabel(driftScore) : 'No drift snapshot'}
-            toneClass={getDriftTextClass(driftScore)}
-          />
-        </div>
-
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          <SignalBar
-            label="Activity Density"
-            valueLabel={`${session.total_actions} actions`}
-            percent={actionsPercent}
-            fillClass="bg-gradient-to-r from-sky-400 via-cyan-400 to-cyan-300"
-            backgroundClass="bg-hawk-bg/70"
-          />
-          <SignalBar
-            label="Spend Weight"
-            valueLabel={session.total_cost_usd > 0 ? formatMoney(session.total_cost_usd) : 'No spend'}
-            percent={costPercent}
-            fillClass="bg-gradient-to-r from-amber-500 via-orange-400 to-hawk-orange"
-            backgroundClass="bg-hawk-bg/70"
-          />
         </div>
 
         <div className="mt-3 flex items-center justify-between border-t border-hawk-border-subtle pt-3">
-          <div className="flex items-center gap-2 text-sm">
-            <span className={`rounded-full border px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] ${driftTone.badgeClass}`}>
-              {driftScore !== null ? `Drift ${driftScore}` : 'No drift signal'}
-            </span>
-          </div>
+          <span className={`rounded-full border px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] ${driftTone.badgeClass}`}>
+            {driftScore !== null ? `Drift ${driftScore}` : 'No drift signal'}
+          </span>
           <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-hawk-text3 transition-colors group-hover:text-hawk-text">
             Open session
           </span>
         </div>
-      </div>
-    </Link>
+      </Link>
+    </article>
   );
 }
 
@@ -794,45 +843,21 @@ function SessionMetric({
   );
 }
 
-function SignalBar({
-  label,
-  valueLabel,
-  percent,
-  fillClass,
-  backgroundClass,
-}: {
-  label: string;
-  valueLabel: string;
-  percent: number;
-  fillClass: string;
-  backgroundClass: string;
-}) {
-  return (
-    <div className="rounded-[16px] border border-hawk-border-subtle bg-hawk-bg/45 p-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-hawk-text3">{label}</div>
-        <div className="text-[11px] text-hawk-text2">{valueLabel}</div>
-      </div>
-      <div className={`mt-2.5 h-1.5 overflow-hidden rounded-full ${backgroundClass}`}>
-        <div
-          className={`h-full rounded-full ${fillClass}`}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 function getStatusTone(status: string): {
   badgeClass: string;
   cardClass: string;
-  glowClass: string;
 } {
   if (status === 'recording') {
     return {
       badgeClass: 'border-hawk-orange/30 bg-hawk-orange/10 text-hawk-orange',
       cardClass: 'border-hawk-orange/20',
-      glowClass: 'bg-hawk-orange/14',
+    };
+  }
+
+  if (status === 'paused') {
+    return {
+      badgeClass: 'border-sky-400/30 bg-sky-400/10 text-sky-400',
+      cardClass: 'border-sky-400/18',
     };
   }
 
@@ -840,14 +865,12 @@ function getStatusTone(status: string): {
     return {
       badgeClass: 'border-green-500/30 bg-green-500/10 text-green-400',
       cardClass: 'border-green-500/15',
-      glowClass: 'bg-green-400/12',
     };
   }
 
   return {
     badgeClass: 'border-red-500/30 bg-red-500/10 text-red-400',
     cardClass: 'border-red-500/18',
-    glowClass: 'bg-red-400/12',
   };
 }
 
@@ -885,12 +908,8 @@ function formatMoney(value: number): string {
   return currencyFormatter.format(value);
 }
 
-function formatCount(value: number): string {
-  return compactNumberFormatter.format(value);
-}
-
-function formatDuration(start: string, end: string | null): string {
-  const ms = (end ? new Date(end).getTime() : Date.now()) - new Date(start).getTime();
+function formatDuration(start: string, end: string | null, now: number): string {
+  const ms = (end ? new Date(end).getTime() : now) - new Date(start).getTime();
   const seconds = Math.max(0, Math.floor(ms / 1000));
 
   if (seconds < 60) return `${seconds}s`;
@@ -900,9 +919,9 @@ function formatDuration(start: string, end: string | null): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-function formatRelativeDate(iso: string): string {
+function formatRelativeDate(iso: string, now: number): string {
   const date = new Date(iso);
-  const diff = Date.now() - date.getTime();
+  const diff = now - date.getTime();
 
   if (diff < 60000) return 'just now';
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
@@ -920,12 +939,6 @@ function formatFullDate(iso: string): string {
   });
 }
 
-function truncateMiddle(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  const sliceLength = Math.floor((maxLength - 3) / 2);
-  return `${value.slice(0, sliceLength)}...${value.slice(-sliceLength)}`;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+function formatCount(value: number): string {
+  return compactNumberFormatter.format(value);
 }

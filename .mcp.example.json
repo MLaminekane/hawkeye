@@ -1,0 +1,41 @@
+{
+  "mcpServers": {
+    "hawkeye": {
+      "command": "node",
+      "args": [
+        "./packages/cli/dist/index.js",
+        "mcp"
+      ]
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "YOUR_GITHUB_TOKEN_HERE"
+      }
+    },
+    "notion": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@notionhq/notion-mcp-server"
+      ],
+      "env": {
+        "NOTION_API_KEY": "YOUR_NOTION_API_KEY_HERE"
+      }
+    },
+    "figma": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-figma"
+      ],
+      "env": {
+        "FIGMA_PERSONAL_ACCESS_TOKEN": "YOUR_FIGMA_TOKEN_HERE"
+      }
+    }
+  }
+}

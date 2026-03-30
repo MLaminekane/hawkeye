@@ -53,7 +53,10 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async ({ limit, status }) => {
       const result = storage.listSessions({ limit: limit ?? 50, status });
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }],
+          isError: true,
+        };
       }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result.value, null, 2) }],
@@ -70,7 +73,10 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async ({ sessionId }) => {
       const session = resolveSession(storage, sessionId);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }],
+          isError: true,
+        };
       }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(session, null, 2) }],
@@ -94,14 +100,20 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async ({ sessionId, type, limit }) => {
       const session = resolveSession(storage, sessionId);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }],
+          isError: true,
+        };
       }
       const result = storage.getEvents(session.id, {
         type: type as EventType | undefined,
         limit,
       });
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }],
+          isError: true,
+        };
       }
       const events = result.value.map((e) => ({
         ...e,
@@ -122,11 +134,17 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async ({ sessionId }) => {
       const session = resolveSession(storage, sessionId);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }],
+          isError: true,
+        };
       }
       const result = storage.getDriftSnapshots(session.id);
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }],
+          isError: true,
+        };
       }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result.value, null, 2) }],
@@ -143,11 +161,17 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async ({ sessionId }) => {
       const session = resolveSession(storage, sessionId);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }],
+          isError: true,
+        };
       }
       const result = storage.getSessionStats(session.id);
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }],
+          isError: true,
+        };
       }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result.value, null, 2) }],
@@ -162,7 +186,10 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async () => {
       const result = storage.getGlobalStats();
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }],
+          isError: true,
+        };
       }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result.value, null, 2) }],
@@ -174,12 +201,18 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     'compare_sessions',
     'Compare multiple sessions side by side: stats, duration, files changed, and top cost files.',
     {
-      sessionIds: z.array(z.string()).min(2).describe('Array of session IDs to compare (minimum 2)'),
+      sessionIds: z
+        .array(z.string())
+        .min(2)
+        .describe('Array of session IDs to compare (minimum 2)'),
     },
     async ({ sessionIds }) => {
       const result = storage.compareSessions(sessionIds);
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }],
+          isError: true,
+        };
       }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result.value, null, 2) }],
@@ -196,11 +229,17 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async ({ sessionId }) => {
       const session = resolveSession(storage, sessionId);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }],
+          isError: true,
+        };
       }
       const result = storage.getViolations(session.id);
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }],
+          isError: true,
+        };
       }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result.value, null, 2) }],
@@ -217,11 +256,17 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async ({ sessionId }) => {
       const session = resolveSession(storage, sessionId);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Session not found: ${sessionId}` }],
+          isError: true,
+        };
       }
       const result = storage.getCostByFile(session.id);
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${result.error.message}` }],
+          isError: true,
+        };
       }
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result.value, null, 2) }],
@@ -241,13 +286,13 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID or prefix. If omitted, uses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
-          content: [{ type: 'text' as const, text: 'No active session found. Start a recording first.' }],
+          content: [
+            { type: 'text' as const, text: 'No active session found. Start a recording first.' },
+          ],
           isError: true,
         };
       }
@@ -263,7 +308,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         session_id: session.id,
         objective: session.objective,
         status: session.status,
-        current_drift_score: session.final_drift_score ?? (latest?.score ?? null),
+        current_drift_score: session.final_drift_score ?? latest?.score ?? null,
         drift_flag: latest?.flag ?? 'unknown',
         drift_reason: latest?.reason ?? null,
         total_checks: snapshots.length,
@@ -296,9 +341,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID or prefix. If omitted, uses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -334,9 +377,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID or prefix. If omitted, uses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -356,7 +397,12 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
           totalCost = eventsResult.value.reduce((sum, e) => sum + e.cost_usd, 0);
           totalTokens = eventsResult.value.reduce((sum, e) => {
             const d = tryParseJson(e.data);
-            return sum + ((d && typeof d === 'object' && 'totalTokens' in d) ? (d as { totalTokens: number }).totalTokens : 0);
+            return (
+              sum +
+              (d && typeof d === 'object' && 'totalTokens' in d
+                ? (d as { totalTokens: number }).totalTokens
+                : 0)
+            );
           }, 0);
           totalActions = eventsResult.value.length;
         }
@@ -422,7 +468,8 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     async ({ action_type, target }) => {
       const config = loadConfigSafe(workingDir);
       const enabledRules = config.guardrails.filter((r: GuardrailRuleSetting) => r.enabled);
-      const violations: Array<{ rule: string; type: string; severity: string; reason: string }> = [];
+      const violations: Array<{ rule: string; type: string; severity: string; reason: string }> =
+        [];
 
       for (const rule of enabledRules) {
         if (action_type === 'command' && rule.type === 'command_block') {
@@ -454,7 +501,9 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         }
 
         if (
-          (action_type === 'file_write' || action_type === 'file_read' || action_type === 'file_delete') &&
+          (action_type === 'file_write' ||
+            action_type === 'file_read' ||
+            action_type === 'file_delete') &&
           rule.type === 'file_protect'
         ) {
           const paths = (rule.config.paths || []) as string[];
@@ -471,7 +520,9 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         }
 
         if (
-          (action_type === 'file_write' || action_type === 'file_read' || action_type === 'file_delete') &&
+          (action_type === 'file_write' ||
+            action_type === 'file_read' ||
+            action_type === 'file_delete') &&
           rule.type === 'directory_scope'
         ) {
           const blockedDirs = (rule.config.blockedDirs || []) as string[];
@@ -504,9 +555,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
           }
 
           if (allowedHosts.length > 0) {
-            const isAllowed = allowedHosts.some(
-              (p) => target === p || target.endsWith('.' + p),
-            );
+            const isAllowed = allowedHosts.some((p) => target === p || target.endsWith('.' + p));
             if (!isAllowed) {
               violations.push({
                 rule: rule.name,
@@ -549,17 +598,14 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID. If omitted, uses the most recent active session.'),
       type: z
         .enum(['decision', 'command', 'error'])
-        .describe('Event type: decision (reasoning/choice), command (action taken), error (problem encountered)'),
+        .describe(
+          'Event type: decision (reasoning/choice), command (action taken), error (problem encountered)',
+        ),
       description: z.string().describe('What happened — a concise description of the event'),
-      reasoning: z
-        .string()
-        .optional()
-        .describe('Why this action was taken (for decision events)'),
+      reasoning: z.string().optional().describe('Why this action was taken (for decision events)'),
     },
     async ({ sessionId, type, description, reasoning }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -582,7 +628,12 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         eventData = { message: description, source: 'agent' } as TraceEvent['data'];
       } else {
         eventType = 'command';
-        eventData = { command: description, args: [], cwd: workingDir, exitCode: 0 } as TraceEvent['data'];
+        eventData = {
+          command: description,
+          args: [],
+          cwd: workingDir,
+          exitCode: 0,
+        } as TraceEvent['data'];
       }
 
       const event: TraceEvent = {
@@ -598,7 +649,9 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       const result = storage.insertEvent(event);
       if (!result.ok) {
         return {
-          content: [{ type: 'text' as const, text: `Error logging event: ${result.error.message}` }],
+          content: [
+            { type: 'text' as const, text: `Error logging event: ${result.error.message}` },
+          ],
           isError: true,
         };
       }
@@ -607,13 +660,17 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         content: [
           {
             type: 'text' as const,
-            text: JSON.stringify({
-              logged: true,
-              event_id: eventId,
-              session_id: session.id,
-              type: eventType,
-              sequence,
-            }, null, 2),
+            text: JSON.stringify(
+              {
+                logged: true,
+                event_id: eventId,
+                session_id: session.id,
+                type: eventType,
+                sequence,
+              },
+              null,
+              2,
+            ),
           },
         ],
       };
@@ -630,9 +687,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID or prefix. If omitted, uses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -653,13 +708,21 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         (e) => e.type === 'file_write' || e.type === 'file_delete' || e.type === 'file_rename',
       );
 
-      const fileMap = new Map<string, { action: string; count: number; linesAdded: number; linesRemoved: number }>();
+      const fileMap = new Map<
+        string,
+        { action: string; count: number; linesAdded: number; linesRemoved: number }
+      >();
 
       for (const e of fileEvents) {
         const data = tryParseJson(e.data) as Record<string, unknown> | null;
         if (!data) continue;
         const path = (data.path || data.oldPath || 'unknown') as string;
-        const existing = fileMap.get(path) || { action: e.type, count: 0, linesAdded: 0, linesRemoved: 0 };
+        const existing = fileMap.get(path) || {
+          action: e.type,
+          count: 0,
+          linesAdded: 0,
+          linesRemoved: 0,
+        };
         existing.count++;
         existing.action = e.type;
         existing.linesAdded += (data.linesAdded as number) || 0;
@@ -716,9 +779,8 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         session = resolveSession(storage, sessionId);
       } else {
         const completedResult = storage.listSessions({ limit: 1, status: 'completed' });
-        session = completedResult.ok && completedResult.value.length > 0
-          ? completedResult.value[0]
-          : null;
+        session =
+          completedResult.ok && completedResult.value.length > 0 ? completedResult.value[0] : null;
         if (!session) session = findActiveSession(storage);
       }
 
@@ -735,14 +797,25 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       const driftSnapshots = driftResult.ok ? driftResult.value : [];
 
       const rcaEvents = events.map((e) => ({
-        id: e.id, sequence: e.sequence, timestamp: e.timestamp, type: e.type,
-        data: e.data, drift_score: e.drift_score, drift_flag: e.drift_flag, cost_usd: e.cost_usd,
+        id: e.id,
+        sequence: e.sequence,
+        timestamp: e.timestamp,
+        type: e.type,
+        data: e.data,
+        drift_score: e.drift_score,
+        drift_flag: e.drift_flag,
+        cost_usd: e.cost_usd,
       }));
 
       const rcaSession = {
-        id: session.id, objective: session.objective || '', agent: session.agent || '',
-        status: session.status, started_at: session.started_at, ended_at: session.ended_at,
-        total_cost_usd: session.total_cost_usd, final_drift_score: session.final_drift_score,
+        id: session.id,
+        objective: session.objective || '',
+        agent: session.agent || '',
+        status: session.status,
+        started_at: session.started_at,
+        ended_at: session.ended_at,
+        total_cost_usd: session.total_cost_usd,
+        final_drift_score: session.final_drift_score,
       };
 
       const result = analyzeRootCause(rcaSession, rcaEvents, driftSnapshots);
@@ -755,31 +828,68 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
   // ─── Memory helper ───
 
-  function loadOrExtractMemories(session: { id: string; objective: string; agent: string | null; status: string; started_at: string; ended_at: string | null }): MemoryItem[] {
+  function loadOrExtractMemories(session: {
+    id: string;
+    objective: string;
+    agent: string | null;
+    status: string;
+    started_at: string;
+    ended_at: string | null;
+  }): MemoryItem[] {
     const cached = storage.getMemoryItems(session.id);
     if (cached.ok && cached.value && cached.value.length > 0) {
       return cached.value.map((r) => ({
-        id: r.id, sessionId: r.session_id, sequence: r.sequence, timestamp: r.timestamp,
-        category: r.category as MemoryItem['category'], key: r.key, content: r.content,
-        evidence: r.evidence, confidence: r.confidence as MemoryItem['confidence'],
-        supersedes: r.supersedes ?? undefined, contradicts: r.contradicts ?? undefined,
+        id: r.id,
+        sessionId: r.session_id,
+        sequence: r.sequence,
+        timestamp: r.timestamp,
+        category: r.category as MemoryItem['category'],
+        key: r.key,
+        content: r.content,
+        evidence: r.evidence,
+        confidence: r.confidence as MemoryItem['confidence'],
+        supersedes: r.supersedes ?? undefined,
+        contradicts: r.contradicts ?? undefined,
       }));
     }
 
     const eventsResult = storage.getEvents(session.id);
     const events = (eventsResult.ok ? eventsResult.value : []).map((e) => ({
-      id: e.id, sequence: e.sequence, timestamp: e.timestamp, type: e.type,
-      data: e.data, drift_score: e.drift_score, cost_usd: e.cost_usd,
+      id: e.id,
+      sequence: e.sequence,
+      timestamp: e.timestamp,
+      type: e.type,
+      data: e.data,
+      drift_score: e.drift_score,
+      cost_usd: e.cost_usd,
     }));
 
-    const memSession = { id: session.id, objective: session.objective, agent: session.agent, status: session.status, started_at: session.started_at, ended_at: session.ended_at };
+    const memSession = {
+      id: session.id,
+      objective: session.objective,
+      agent: session.agent,
+      status: session.status,
+      started_at: session.started_at,
+      ended_at: session.ended_at,
+    };
     const memories = extractMemories(memSession, events);
 
-    storage.upsertMemoryItems(session.id, memories.map((m) => ({
-      id: m.id, session_id: m.sessionId, sequence: m.sequence, timestamp: m.timestamp,
-      category: m.category, key: m.key, content: m.content, evidence: m.evidence,
-      confidence: m.confidence, supersedes: m.supersedes ?? null, contradicts: m.contradicts ?? null,
-    })));
+    storage.upsertMemoryItems(
+      session.id,
+      memories.map((m) => ({
+        id: m.id,
+        session_id: m.sessionId,
+        sequence: m.sequence,
+        timestamp: m.timestamp,
+        category: m.category,
+        key: m.key,
+        content: m.content,
+        evidence: m.evidence,
+        confidence: m.confidence,
+        supersedes: m.supersedes ?? null,
+        contradicts: m.contradicts ?? null,
+      })),
+    );
 
     return memories;
   }
@@ -788,25 +898,50 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     'memory_diff',
     'Compare what an agent remembers between two sessions. Shows learned knowledge, forgotten items, evolved understanding, contradictions, and recurring hallucinations.',
     {
-      sessionIdA: z.string().optional().describe('First session ID or prefix. If omitted, uses second-most-recent completed session.'),
-      sessionIdB: z.string().optional().describe('Second session ID or prefix. If omitted, uses most recent completed session.'),
+      sessionIdA: z
+        .string()
+        .optional()
+        .describe(
+          'First session ID or prefix. If omitted, uses second-most-recent completed session.',
+        ),
+      sessionIdB: z
+        .string()
+        .optional()
+        .describe('Second session ID or prefix. If omitted, uses most recent completed session.'),
     },
     async ({ sessionIdA, sessionIdB }) => {
       const completedResult = storage.listSessions({ limit: 5, status: 'completed' });
       const completed = completedResult.ok ? completedResult.value : [];
 
-      const sA = sessionIdA ? resolveSession(storage, sessionIdA) : completed[1] ?? null;
-      const sB = sessionIdB ? resolveSession(storage, sessionIdB) : completed[0] ?? null;
+      const sA = sessionIdA ? resolveSession(storage, sessionIdA) : (completed[1] ?? null);
+      const sB = sessionIdB ? resolveSession(storage, sessionIdB) : (completed[0] ?? null);
 
       if (!sA || !sB) {
-        return { content: [{ type: 'text' as const, text: 'Need at least 2 sessions for memory diff.' }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: 'Need at least 2 sessions for memory diff.' }],
+          isError: true,
+        };
       }
 
       const memA = loadOrExtractMemories(sA);
       const memB = loadOrExtractMemories(sB);
 
-      const msA = { id: sA.id, objective: sA.objective || '', agent: sA.agent, status: sA.status, started_at: sA.started_at, ended_at: sA.ended_at };
-      const msB = { id: sB.id, objective: sB.objective || '', agent: sB.agent, status: sB.status, started_at: sB.started_at, ended_at: sB.ended_at };
+      const msA = {
+        id: sA.id,
+        objective: sA.objective || '',
+        agent: sA.agent,
+        status: sA.status,
+        started_at: sA.started_at,
+        ended_at: sA.ended_at,
+      };
+      const msB = {
+        id: sB.id,
+        objective: sB.objective || '',
+        agent: sB.agent,
+        status: sB.status,
+        started_at: sB.started_at,
+        ended_at: sB.ended_at,
+      };
 
       const result = diffMemories(memA, memB, msA, msB);
 
@@ -834,7 +969,14 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       }
 
       const sessionMemories = sessions.map((s) => ({
-        session: { id: s.id, objective: s.objective || '', agent: s.agent, status: s.status, started_at: s.started_at, ended_at: s.ended_at },
+        session: {
+          id: s.id,
+          objective: s.objective || '',
+          agent: s.agent,
+          status: s.status,
+          started_at: s.started_at,
+          ended_at: s.ended_at,
+        },
         memories: loadOrExtractMemories(s),
       }));
 
@@ -848,18 +990,27 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     'self_assess',
     'Comprehensive self-assessment combining drift, cost, errors, and velocity into one actionable health check. Returns overall risk level (low/medium/high/critical) with specific recommendations. Call this when you sense something is off, or periodically every 15-20 actions.',
     {
-      sessionId: z.string().optional().describe('Session ID or prefix. If omitted, uses active session.'),
+      sessionId: z
+        .string()
+        .optional()
+        .describe('Session ID or prefix. If omitted, uses active session.'),
     },
     async ({ sessionId }) => {
       const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: 'No active session found.' }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: 'No active session found.' }],
+          isError: true,
+        };
       }
 
       const eventsResult = storage.getEvents(session.id);
       const events = (eventsResult.ok ? eventsResult.value : []).map((e) => ({
-        sequence: e.sequence, type: e.type, timestamp: e.timestamp,
-        data: e.data, cost_usd: e.cost_usd,
+        sequence: e.sequence,
+        type: e.type,
+        timestamp: e.timestamp,
+        data: e.data,
+        cost_usd: e.cost_usd,
       }));
       const driftResult = storage.getDriftSnapshots(session.id);
       const drifts = driftResult.ok ? driftResult.value : [];
@@ -873,7 +1024,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         driftFlag: latestDrift?.flag ?? 'unknown',
         driftSnapshots: drifts.map((d) => ({ score: d.score, flag: d.flag })),
         totalCost: session.total_cost_usd ?? 0,
-        costLimit: costLimit ? (costLimit as { value?: number }).value ?? null : null,
+        costLimit: costLimit ? ((costLimit as { value?: number }).value ?? null) : null,
         events,
         startedAt: session.started_at,
         objective: session.objective ?? '',
@@ -887,18 +1038,27 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     'auto_correct',
     'Get auto-correction recommendations AND check if Hawkeye has already taken autonomous corrections. Returns concrete actions: change_strategy, stop_retrying, refocus_objective, reduce_scope. Also returns any active correction hint from the Autonomous Control Layer. IMPORTANT: If there is an active correction, follow its agentInstructions immediately.',
     {
-      sessionId: z.string().optional().describe('Session ID or prefix. If omitted, uses active session.'),
+      sessionId: z
+        .string()
+        .optional()
+        .describe('Session ID or prefix. If omitted, uses active session.'),
     },
     async ({ sessionId }) => {
       const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: 'No active session found.' }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: 'No active session found.' }],
+          isError: true,
+        };
       }
 
       const eventsResult = storage.getEvents(session.id);
       const events = (eventsResult.ok ? eventsResult.value : []).map((e) => ({
-        sequence: e.sequence, type: e.type, timestamp: e.timestamp,
-        data: e.data, cost_usd: e.cost_usd,
+        sequence: e.sequence,
+        type: e.type,
+        timestamp: e.timestamp,
+        data: e.data,
+        cost_usd: e.cost_usd,
       }));
       const driftResult = storage.getDriftSnapshots(session.id);
       const drifts = driftResult.ok ? driftResult.value : [];
@@ -937,7 +1097,13 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
           id: r.id,
           timestamp: r.timestamp,
           trigger: r.trigger,
-          corrections: (() => { try { return JSON.parse(r.corrections); } catch { return []; } })(),
+          corrections: (() => {
+            try {
+              return JSON.parse(r.corrections);
+            } catch {
+              return [];
+            }
+          })(),
           dryRun: r.dry_run === 1,
         })),
       };
@@ -958,7 +1124,17 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
           return { content: [{ type: 'text' as const, text: JSON.stringify(hint, null, 2) }] };
         }
       } catch {}
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ active: false, message: 'No active corrections. You are on track.' }) }] };
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              active: false,
+              message: 'No active corrections. You are on track.',
+            }),
+          },
+        ],
+      };
     },
   );
 
@@ -966,43 +1142,76 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     'trigger_incident',
     'Trigger incident mode: freezes the session, captures a full snapshot, and creates an incident record. Use when you detect a critical issue or when the session should be paused for human review.',
     {
-      sessionId: z.string().optional().describe('Session ID or prefix. If omitted, uses active session.'),
+      sessionId: z
+        .string()
+        .optional()
+        .describe('Session ID or prefix. If omitted, uses active session.'),
       reason: z.string().optional().describe('Why the incident was triggered.'),
     },
     async ({ sessionId, reason }) => {
       const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
       if (!session) {
-        return { content: [{ type: 'text' as const, text: 'No active session found.' }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: 'No active session found.' }],
+          isError: true,
+        };
       }
 
       const eventsResult = storage.getEvents(session.id);
       const events = (eventsResult.ok ? eventsResult.value : []).map((e) => ({
-        sequence: e.sequence, type: e.type, timestamp: e.timestamp,
-        data: e.data, cost_usd: e.cost_usd,
+        sequence: e.sequence,
+        type: e.type,
+        timestamp: e.timestamp,
+        data: e.data,
+        cost_usd: e.cost_usd,
       }));
       const driftResult = storage.getDriftSnapshots(session.id);
       const drifts = driftResult.ok ? driftResult.value : [];
       const latestDrift = drifts[drifts.length - 1];
 
       const incidentId = `inc_${Date.now().toString(36)}`;
-      const incident = createIncidentSnapshot(incidentId, {
-        sessionId: session.id, objective: session.objective ?? '',
-        status: session.status,
-        driftScore: latestDrift?.score ?? session.final_drift_score ?? null,
-        driftFlag: latestDrift?.flag ?? null, driftReason: reason || latestDrift?.reason || null,
-        totalCost: session.total_cost_usd ?? 0, totalActions: events.length,
-      }, events, 'manual');
+      const incident = createIncidentSnapshot(
+        incidentId,
+        {
+          sessionId: session.id,
+          objective: session.objective ?? '',
+          status: session.status,
+          driftScore: latestDrift?.score ?? session.final_drift_score ?? null,
+          driftFlag: latestDrift?.flag ?? null,
+          driftReason: reason || latestDrift?.reason || null,
+          totalCost: session.total_cost_usd ?? 0,
+          totalActions: events.length,
+        },
+        events,
+        'manual',
+      );
 
       storage.insertIncident({
-        id: incident.id, sessionId: session.id, triggeredAt: incident.triggeredAt,
-        trigger: incident.trigger, severity: incident.severity,
-        driftScore: incident.driftScore, driftFlag: incident.driftFlag,
-        summary: incident.summary, snapshot: JSON.stringify(incident),
+        id: incident.id,
+        sessionId: session.id,
+        triggeredAt: incident.triggeredAt,
+        trigger: incident.trigger,
+        severity: incident.severity,
+        driftScore: incident.driftScore,
+        driftFlag: incident.driftFlag,
+        summary: incident.summary,
+        snapshot: JSON.stringify(incident),
       });
 
       storage.pauseSession(session.id);
 
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ incident, action: 'Session frozen. Incident recorded.' }, null, 2) }] };
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              { incident, action: 'Session frozen. Incident recorded.' },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
     },
   );
 
@@ -1010,7 +1219,10 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
     'list_commits',
     'List git commits made during agent sessions. Shows which agent wrote which commit, enabling intelligent revert. Use to audit what code changes agents have made.',
     {
-      sessionId: z.string().optional().describe('Session ID or prefix. If omitted, shows commits across all sessions.'),
+      sessionId: z
+        .string()
+        .optional()
+        .describe('Session ID or prefix. If omitted, shows commits across all sessions.'),
       limit: z.number().optional().describe('Max commits to return (default 20).'),
     },
     async ({ sessionId, limit }) => {
@@ -1019,11 +1231,22 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       const rows = result.ok ? result.value : [];
 
       const commits = rows.slice(0, limit || 20).map((r) => {
-        const data = (() => { try { return JSON.parse(r.data); } catch { return {}; } })();
+        const data = (() => {
+          try {
+            return JSON.parse(r.data);
+          } catch {
+            return {};
+          }
+        })();
         return {
-          sessionId: r.session_id, agent: r.agent, sequence: r.sequence, timestamp: r.timestamp,
-          commitHash: data.commitHash || data.hash || '', message: data.message || '',
-          branch: data.branch || null, filesChanged: data.filesChanged || 0,
+          sessionId: r.session_id,
+          agent: r.agent,
+          sequence: r.sequence,
+          timestamp: r.timestamp,
+          commitHash: data.commitHash || data.hash || '',
+          message: data.message || '',
+          branch: data.branch || null,
+          filesChanged: data.filesChanged || 0,
         };
       });
 
@@ -1048,9 +1271,8 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       } else {
         // Find most recent completed session
         const completedResult = storage.listSessions({ limit: 1, status: 'completed' });
-        session = completedResult.ok && completedResult.value.length > 0
-          ? completedResult.value[0]
-          : null;
+        session =
+          completedResult.ok && completedResult.value.length > 0 ? completedResult.value[0] : null;
         // Fallback to active session
         if (!session) session = findActiveSession(storage);
       }
@@ -1064,7 +1286,9 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
       // Load LLM config — need full config for provider + apiKeys
       const fullConfig = loadFullConfigSafe(workingDir);
-      const { provider, model, ollamaUrl } = fullConfig.drift;
+      const { provider, model, ollamaUrl, lmstudioUrl } = fullConfig.drift;
+      const endpointUrl =
+        provider === 'ollama' ? ollamaUrl : provider === 'lmstudio' ? lmstudioUrl : undefined;
 
       // Inject API keys from config
       if (fullConfig.apiKeys) {
@@ -1085,13 +1309,15 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
       let llm;
       try {
-        llm = createLlmProvider(provider, model, ollamaUrl);
+        llm = createLlmProvider(provider, model, endpointUrl);
       } catch (err) {
         return {
-          content: [{
-            type: 'text' as const,
-            text: `Failed to initialize LLM provider "${provider}": ${String(err)}. Configure a provider in Hawkeye settings.`,
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Failed to initialize LLM provider "${provider}": ${String(err)}. Configure a provider in Hawkeye settings.`,
+            },
+          ],
           isError: true,
         };
       }
@@ -1170,7 +1396,12 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         totalCost = events.reduce((sum, e) => sum + e.cost_usd, 0);
         totalTokens = events.reduce((sum, e) => {
           const d = tryParseJson(e.data);
-          return sum + ((d && typeof d === 'object' && 'totalTokens' in d) ? (d as { totalTokens: number }).totalTokens : 0);
+          return (
+            sum +
+            (d && typeof d === 'object' && 'totalTokens' in d
+              ? (d as { totalTokens: number }).totalTokens
+              : 0)
+          );
         }, 0);
       }
 
@@ -1200,14 +1431,20 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
         if (!parsed) {
           return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                error: 'Failed to parse LLM response',
-                raw_response: rawResponse.slice(0, 500),
-                session_id: session.id,
-              }, null, 2),
-            }],
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(
+                  {
+                    error: 'Failed to parse LLM response',
+                    raw_response: rawResponse.slice(0, 500),
+                    session_id: session.id,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
             isError: true,
           };
         }
@@ -1226,10 +1463,12 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         };
       } catch (err) {
         return {
-          content: [{
-            type: 'text' as const,
-            text: `LLM call failed: ${String(err)}. Check your ${provider} configuration and API key.`,
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `LLM call failed: ${String(err)}. Check your ${provider} configuration and API key.`,
+            },
+          ],
           isError: true,
         };
       }
@@ -1252,9 +1491,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('How the session ended (default: completed)'),
     },
     async ({ sessionId, status }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -1265,7 +1502,12 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
       if (session.status !== 'recording' && session.status !== 'paused') {
         return {
-          content: [{ type: 'text' as const, text: `Session ${session.id.slice(0, 8)} is already ${session.status}.` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Session ${session.id.slice(0, 8)} is already ${session.status}.`,
+            },
+          ],
           isError: true,
         };
       }
@@ -1279,17 +1521,23 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       }
 
       return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            ended: true,
-            session_id: session.id,
-            objective: session.objective,
-            status: status || 'completed',
-            total_actions: session.total_actions,
-            total_cost_usd: session.total_cost_usd,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                ended: true,
+                session_id: session.id,
+                objective: session.objective,
+                status: status || 'completed',
+                total_actions: session.total_actions,
+                total_cost_usd: session.total_cost_usd,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );
@@ -1304,9 +1552,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID or prefix. If omitted, pauses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -1317,7 +1563,12 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
       if (session.status !== 'recording') {
         return {
-          content: [{ type: 'text' as const, text: `Session ${session.id.slice(0, 8)} is ${session.status}, not recording.` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Session ${session.id.slice(0, 8)} is ${session.status}, not recording.`,
+            },
+          ],
           isError: true,
         };
       }
@@ -1331,10 +1582,16 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       }
 
       return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({ paused: true, session_id: session.id, objective: session.objective }, null, 2),
-        }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              { paused: true, session_id: session.id, objective: session.objective },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );
@@ -1366,7 +1623,12 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
       if (session.status !== 'paused') {
         return {
-          content: [{ type: 'text' as const, text: `Session ${session.id.slice(0, 8)} is ${session.status}, not paused.` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Session ${session.id.slice(0, 8)} is ${session.status}, not paused.`,
+            },
+          ],
           isError: true,
         };
       }
@@ -1380,10 +1642,16 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       }
 
       return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({ resumed: true, session_id: session.id, objective: session.objective }, null, 2),
-        }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              { resumed: true, session_id: session.id, objective: session.objective },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );
@@ -1400,9 +1668,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID or prefix. If omitted, uses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -1422,7 +1688,16 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       const events = eventsResult.value;
       if (events.length === 0) {
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ session_id: session.id, phases: [], summary: 'No events recorded.' }, null, 2) }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                { session_id: session.id, phases: [], summary: 'No events recorded.' },
+                null,
+                2,
+              ),
+            },
+          ],
         };
       }
 
@@ -1444,9 +1719,10 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       let phaseNum = 1;
 
       for (let i = 0; i < events.length; i++) {
-        const gap = i > phaseStart
-          ? new Date(events[i].timestamp).getTime() - new Date(events[i - 1].timestamp).getTime()
-          : 0;
+        const gap =
+          i > phaseStart
+            ? new Date(events[i].timestamp).getTime() - new Date(events[i - 1].timestamp).getTime()
+            : 0;
 
         const isLastEvent = i === events.length - 1;
         const isGap = gap > 30000; // 30 second gap = new phase
@@ -1537,9 +1813,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID or prefix. If omitted, uses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -1566,7 +1840,8 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         const data = tryParseJson(e.data) as Record<string, unknown> | null;
         if (data && data.exitCode && data.exitCode !== 0) {
           failedCommands.push({
-            command: `${data.command || ''} ${Array.isArray(data.args) ? (data.args as string[]).join(' ') : ''}`.trim(),
+            command:
+              `${data.command || ''} ${Array.isArray(data.args) ? (data.args as string[]).join(' ') : ''}`.trim(),
             exitCode: data.exitCode as number,
             timestamp: e.timestamp,
           });
@@ -1587,7 +1862,8 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
       const totalActions = events.length;
       const errorRate = totalActions > 0 ? errorEvents.length / totalActions : 0;
-      const failureRate = commandEvents.length > 0 ? failedCommands.length / commandEvents.length : 0;
+      const failureRate =
+        commandEvents.length > 0 ? failedCommands.length / commandEvents.length : 0;
 
       const response = {
         session_id: session.id,
@@ -1629,9 +1905,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
         .describe('Session ID or prefix. If omitted, uses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -1648,15 +1922,21 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
 
       if (currentScore !== null && currentScore >= 70) {
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              session_id: session.id,
-              drift_score: currentScore,
-              status: 'on_track',
-              message: 'You are on track (score >= 70). No correction needed.',
-            }, null, 2),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  session_id: session.id,
+                  drift_score: currentScore,
+                  status: 'on_track',
+                  message: 'You are on track (score >= 70). No correction needed.',
+                },
+                null,
+                2,
+              ),
+            },
+          ],
         };
       }
 
@@ -1669,9 +1949,13 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       for (const e of recentEvents.slice(-15)) {
         const data = tryParseJson(e.data) as Record<string, unknown> | null;
         if (e.type === 'command') {
-          recentActivity.push(`CMD: ${data?.command || '?'} ${Array.isArray(data?.args) ? (data.args as string[]).join(' ') : ''}`);
+          recentActivity.push(
+            `CMD: ${data?.command || '?'} ${Array.isArray(data?.args) ? (data.args as string[]).join(' ') : ''}`,
+          );
         } else if (e.type === 'file_write' || e.type === 'file_read') {
-          recentActivity.push(`${e.type.toUpperCase()}: ${shortenPath((data?.path || '?') as string)}`);
+          recentActivity.push(
+            `${e.type.toUpperCase()}: ${shortenPath((data?.path || '?') as string)}`,
+          );
         } else if (e.type === 'error') {
           recentActivity.push(`ERROR: ${data?.message || '?'}`);
         }
@@ -1682,11 +1966,16 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
       let llmSuggestion: string | null = null;
 
       try {
-        const { provider, model, ollamaUrl } = fullConfig.drift;
+        const { provider, model, ollamaUrl, lmstudioUrl } = fullConfig.drift;
+        const endpointUrl =
+          provider === 'ollama' ? ollamaUrl : provider === 'lmstudio' ? lmstudioUrl : undefined;
         if (fullConfig.apiKeys) {
           const keyMap: Record<string, string> = {
-            anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY',
-            deepseek: 'DEEPSEEK_API_KEY', mistral: 'MISTRAL_API_KEY', google: 'GOOGLE_API_KEY',
+            anthropic: 'ANTHROPIC_API_KEY',
+            openai: 'OPENAI_API_KEY',
+            deepseek: 'DEEPSEEK_API_KEY',
+            mistral: 'MISTRAL_API_KEY',
+            google: 'GOOGLE_API_KEY',
           };
           for (const [p, envVar] of Object.entries(keyMap)) {
             const key = (fullConfig.apiKeys as Record<string, string | undefined>)[p];
@@ -1694,7 +1983,7 @@ export function createMcpServer(storage: Storage, cwd?: string): McpServer {
           }
         }
 
-        const llm = createLlmProvider(provider, model, ollamaUrl);
+        const llm = createLlmProvider(provider, model, endpointUrl);
         const prompt = `You are an AI session analyst. An agent has drifted from its objective.
 
 OBJECTIVE: "${session.objective}"
@@ -1728,13 +2017,17 @@ Respond as JSON:
         heuristicSteps.push('You have been reading without writing. Start implementing changes.');
       }
       if (latest?.reason?.includes('repetitive')) {
-        heuristicSteps.push('You are doing repetitive actions. Step back and try a different approach.');
+        heuristicSteps.push(
+          'You are doing repetitive actions. Step back and try a different approach.',
+        );
       }
-      if (recentActivity.filter(a => a.startsWith('ERROR')).length > 3) {
+      if (recentActivity.filter((a) => a.startsWith('ERROR')).length > 3) {
         heuristicSteps.push('Multiple errors detected. Fix the root cause before continuing.');
       }
       heuristicSteps.push(`Re-read the objective: "${session.objective}"`);
-      heuristicSteps.push('Identify which part of the objective you haven\'t addressed yet and focus there.');
+      heuristicSteps.push(
+        "Identify which part of the objective you haven't addressed yet and focus there.",
+      );
 
       const response: Record<string, unknown> = {
         session_id: session.id,
@@ -1830,14 +2123,20 @@ Respond as JSON:
       }
 
       return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            query,
-            total_matches: matches.length,
-            matches,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                query,
+                total_matches: matches.length,
+                matches,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );
@@ -1872,15 +2171,19 @@ Respond as JSON:
         const data = tryParseJson(e.data) as Record<string, unknown> | null;
         if (!data) return false;
         const ePath = data.path as string;
-        return ePath === filePath || ePath.endsWith('/' + filePath) || filePath.endsWith('/' + ePath);
+        return (
+          ePath === filePath || ePath.endsWith('/' + filePath) || filePath.endsWith('/' + ePath)
+        );
       });
 
       if (!fileEvent) {
         return {
-          content: [{
-            type: 'text' as const,
-            text: `No file write/delete event found for "${filePath}" in session ${session.id.slice(0, 8)}.`,
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `No file write/delete event found for "${filePath}" in session ${session.id.slice(0, 8)}.`,
+            },
+          ],
           isError: true,
         };
       }
@@ -1908,22 +2211,32 @@ Respond as JSON:
         }
 
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              reverted: true,
-              path: fullPath,
-              session_id: session.id.slice(0, 8),
-              method: gitCommit ? `git checkout ${gitCommit.slice(0, 8)}` : 'git checkout HEAD~1',
-            }, null, 2),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  reverted: true,
+                  path: fullPath,
+                  session_id: session.id.slice(0, 8),
+                  method: gitCommit
+                    ? `git checkout ${gitCommit.slice(0, 8)}`
+                    : 'git checkout HEAD~1',
+                },
+                null,
+                2,
+              ),
+            },
+          ],
         };
       } catch (err) {
         return {
-          content: [{
-            type: 'text' as const,
-            text: `Revert failed: ${String(err)}. The file may not be tracked by git or the commit reference is invalid.`,
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Revert failed: ${String(err)}. The file may not be tracked by git or the commit reference is invalid.`,
+            },
+          ],
           isError: true,
         };
       }
@@ -1942,9 +2255,7 @@ Respond as JSON:
         .describe('Session ID or prefix. If omitted, uses the most recent active session.'),
     },
     async ({ sessionId }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -1991,9 +2302,12 @@ Respond as JSON:
       // - Files written vs read ratio (writing = making progress)
       // - Error rate (high errors = stuck)
       // - Drift score (on track = progressing)
-      const writeReadRatio = uniqueFilesRead.size > 0
-        ? uniqueFilesWritten.size / uniqueFilesRead.size
-        : (uniqueFilesWritten.size > 0 ? 1 : 0);
+      const writeReadRatio =
+        uniqueFilesRead.size > 0
+          ? uniqueFilesWritten.size / uniqueFilesRead.size
+          : uniqueFilesWritten.size > 0
+            ? 1
+            : 0;
 
       const errorRate = events.length > 0 ? errors.length / events.length : 0;
       const failRate = commands.length > 0 ? failedCmds / commands.length : 0;
@@ -2016,13 +2330,14 @@ Respond as JSON:
       progressScore = Math.max(0, Math.min(100, Math.round(progressScore)));
 
       const elapsedMs = Date.now() - new Date(session.started_at).getTime();
-      const phase = progressScore < 20
-        ? 'exploring'
-        : progressScore < 50
-          ? 'implementing'
-          : progressScore < 80
-            ? 'refining'
-            : 'finishing';
+      const phase =
+        progressScore < 20
+          ? 'exploring'
+          : progressScore < 50
+            ? 'implementing'
+            : progressScore < 80
+              ? 'refining'
+              : 'finishing';
 
       const response = {
         session_id: session.id,
@@ -2096,9 +2411,7 @@ Respond as JSON:
       objective: z.string().describe('The new objective for this session'),
     },
     async ({ sessionId, objective }) => {
-      const session = sessionId
-        ? resolveSession(storage, sessionId)
-        : findActiveSession(storage);
+      const session = sessionId ? resolveSession(storage, sessionId) : findActiveSession(storage);
 
       if (!session) {
         return {
@@ -2132,15 +2445,21 @@ Respond as JSON:
       });
 
       return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            updated: true,
-            session_id: session.id,
-            previous_objective: previousObjective,
-            new_objective: objective,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                updated: true,
+                session_id: session.id,
+                previous_objective: previousObjective,
+                new_objective: objective,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );
@@ -2152,17 +2471,25 @@ Respond as JSON:
     'List multi-agent swarm runs. Shows past and active orchestration sessions with status, cost, and agent count.',
     {
       limit: z.number().optional().describe('Max number of swarms to return (default 10)'),
-      status: z.string().optional().describe('Filter by status: pending, running, completed, failed, cancelled'),
+      status: z
+        .string()
+        .optional()
+        .describe('Filter by status: pending, running, completed, failed, cancelled'),
     },
     async ({ limit, status }) => {
       const result = storage.listSwarms({ limit: limit || 10, status });
       if (!result.ok) {
-        return { content: [{ type: 'text' as const, text: 'Failed to list swarms' }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: 'Failed to list swarms' }],
+          isError: true,
+        };
       }
 
       const swarms = result.value.map((s) => {
         let agentCount = 0;
-        try { agentCount = JSON.parse(s.config).agents?.length || 0; } catch {}
+        try {
+          agentCount = JSON.parse(s.config).agents?.length || 0;
+        } catch {}
         return {
           id: s.id,
           name: s.name,
@@ -2189,7 +2516,10 @@ Respond as JSON:
     async ({ swarmId }) => {
       const swarm = storage.getSwarm(swarmId);
       if (!swarm.ok || !swarm.value) {
-        return { content: [{ type: 'text' as const, text: `Swarm "${swarmId}" not found` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Swarm "${swarmId}" not found` }],
+          isError: true,
+        };
       }
 
       const agents = storage.getSwarmAgents(swarm.value.id);
@@ -2242,123 +2572,349 @@ Respond as JSON:
     async ({ swarmId, agentName }) => {
       const swarm = storage.getSwarm(swarmId);
       if (!swarm.ok || !swarm.value) {
-        return { content: [{ type: 'text' as const, text: `Swarm "${swarmId}" not found` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Swarm "${swarmId}" not found` }],
+          isError: true,
+        };
       }
 
       const agents = storage.getSwarmAgents(swarm.value.id);
       if (!agents.ok) {
-        return { content: [{ type: 'text' as const, text: 'Failed to get agents' }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: 'Failed to get agents' }],
+          isError: true,
+        };
       }
 
       const agent = agents.value.find((a) => a.agent_name === agentName);
       if (!agent) {
-        return { content: [{ type: 'text' as const, text: `Agent "${agentName}" not found in swarm` }], isError: true };
+        return {
+          content: [{ type: 'text' as const, text: `Agent "${agentName}" not found in swarm` }],
+          isError: true,
+        };
       }
 
       let persona: Record<string, unknown> = {};
-      try { persona = JSON.parse(agent.persona); } catch {}
+      try {
+        persona = JSON.parse(agent.persona);
+      } catch {}
 
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({
-          name: agent.agent_name,
-          role: persona.role,
-          description: persona.description,
-          scope: persona.scope,
-          status: agent.status,
-          task: agent.task_prompt,
-          duration: agent.duration_seconds,
-          exitCode: agent.exit_code,
-          filesChanged: agent.files_changed ? JSON.parse(agent.files_changed) : [],
-          linesAdded: agent.lines_added,
-          linesRemoved: agent.lines_removed,
-          cost: agent.cost_usd,
-          tokens: agent.tokens_used,
-          driftScore: agent.final_drift_score,
-          errorCount: agent.error_count,
-          mergeStatus: agent.merge_status,
-          output: agent.output?.slice(-2000),
-          sessionId: agent.session_id,
-        }, null, 2) }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                name: agent.agent_name,
+                role: persona.role,
+                description: persona.description,
+                scope: persona.scope,
+                status: agent.status,
+                task: agent.task_prompt,
+                duration: agent.duration_seconds,
+                exitCode: agent.exit_code,
+                filesChanged: agent.files_changed ? JSON.parse(agent.files_changed) : [],
+                linesAdded: agent.lines_added,
+                linesRemoved: agent.lines_removed,
+                cost: agent.cost_usd,
+                tokens: agent.tokens_used,
+                driftScore: agent.final_drift_score,
+                errorCount: agent.error_count,
+                mergeStatus: agent.merge_status,
+                output: agent.output?.slice(-2000),
+                sessionId: agent.session_id,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
+    },
+  );
+
+  // ─── Inter-Agent Communication ───────────────────────────────
+
+  server.tool(
+    'list_active_agents',
+    'List all live agents in the Hawkeye Agents Control Room. See who is working on what, their role, status, and drift score. Use this to decide who to communicate with.',
+    {},
+    async () => {
+      try {
+        const agentsFile = join(workingDir, '.hawkeye', 'agents.json');
+        if (!existsSync(agentsFile)) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'No agents found. The Agents Control Room has no active agents.',
+              },
+            ],
+          };
+        }
+        const raw = JSON.parse(readFileSync(agentsFile, 'utf-8'));
+        if (!Array.isArray(raw) || raw.length === 0) {
+          return { content: [{ type: 'text' as const, text: 'No agents found.' }] };
+        }
+        const summary = raw.map((a: Record<string, unknown>) => ({
+          id: a.id,
+          name: a.name,
+          role: a.role,
+          status: a.status,
+          prompt: typeof a.prompt === 'string' ? a.prompt.slice(0, 200) : '',
+          driftScore: a.driftScore,
+          costUsd: a.costUsd,
+          sessionId: a.sessionId,
+        }));
+        return { content: [{ type: 'text' as const, text: JSON.stringify(summary, null, 2) }] };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Error: ${String(e)}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
+    'send_agent_message',
+    'Send a message to another agent or broadcast to all agents. Use this to coordinate work, ask questions, share decisions, or request reviews. Messages are delivered automatically — completed agents will be woken up to process your message.',
+    {
+      to: z.string().optional().describe('Target agent ID or name (omit for broadcast)'),
+      toRole: z
+        .string()
+        .optional()
+        .describe('Target role instead of specific agent: lead, worker, or reviewer'),
+      content: z.string().describe('Your message content'),
+      type: z
+        .enum(['direct', 'broadcast', 'decision', 'request', 'response'])
+        .optional()
+        .describe('Message type (default: direct)'),
+    },
+    async ({ to, toRole, content, type }) => {
+      try {
+        // Resolve agent name to ID if needed
+        let toId = to || null;
+        if (to) {
+          const agentsFile = join(workingDir, '.hawkeye', 'agents.json');
+          if (existsSync(agentsFile)) {
+            const raw = JSON.parse(readFileSync(agentsFile, 'utf-8'));
+            if (Array.isArray(raw)) {
+              const match = raw.find((a: Record<string, unknown>) => a.id === to || a.name === to);
+              if (match) toId = match.id as string;
+            }
+          }
+        }
+
+        // Write message to the messages file for the server to pick up
+        const messagesFile = join(workingDir, '.hawkeye', 'agent-messages.json');
+        let messages: unknown[] = [];
+        try {
+          messages = JSON.parse(readFileSync(messagesFile, 'utf-8'));
+        } catch {}
+
+        // Try to identify calling agent from active session
+        let fromId = 'mcp-agent';
+        let fromName = 'MCP Agent';
+        const agentsFile = join(workingDir, '.hawkeye', 'agents.json');
+        if (existsSync(agentsFile)) {
+          const raw = JSON.parse(readFileSync(agentsFile, 'utf-8'));
+          if (Array.isArray(raw)) {
+            const running = raw.find((a: Record<string, unknown>) => a.status === 'running');
+            if (running) {
+              fromId = running.id as string;
+              fromName = running.name as string;
+            }
+          }
+        }
+
+        const msg = {
+          id: Math.random().toString(36).slice(2, 14),
+          from: fromId,
+          fromName,
+          to: toId,
+          toRole: toRole || null,
+          content,
+          type: type || 'direct',
+          timestamp: new Date().toISOString(),
+          read: false,
+        };
+        messages.push(msg);
+        const { writeFileSync: wf } = await import('node:fs');
+        wf(messagesFile, JSON.stringify(messages.slice(-500), null, 2));
+
+        const target = toId ? `agent ${toId}` : toRole ? `all ${toRole}s` : 'all agents';
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Message sent to ${target}. It will be delivered automatically.\n\nMessage ID: ${msg.id}`,
+            },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [{ type: 'text' as const, text: `Error sending message: ${String(e)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.tool(
+    'check_agent_inbox',
+    'Check for messages from other agents or the dashboard addressed to you. Call this periodically during long tasks to stay coordinated with the team.',
+    {
+      since: z.string().optional().describe('Only return messages after this ISO timestamp'),
+    },
+    async ({ since }) => {
+      try {
+        const messagesFile = join(workingDir, '.hawkeye', 'agent-messages.json');
+        if (!existsSync(messagesFile)) {
+          return { content: [{ type: 'text' as const, text: 'No messages yet.' }] };
+        }
+        const messages = JSON.parse(readFileSync(messagesFile, 'utf-8')) as Array<
+          Record<string, unknown>
+        >;
+
+        // Identify the calling agent
+        let myId = '';
+        let myRole = '';
+        const agentsFile = join(workingDir, '.hawkeye', 'agents.json');
+        if (existsSync(agentsFile)) {
+          const raw = JSON.parse(readFileSync(agentsFile, 'utf-8'));
+          if (Array.isArray(raw)) {
+            const running = raw.find((a: Record<string, unknown>) => a.status === 'running');
+            if (running) {
+              myId = running.id as string;
+              myRole = running.role as string;
+            }
+          }
+        }
+
+        // Filter messages for this agent
+        const inbox = messages.filter((m) => {
+          if (m.from === myId) return false;
+          if (since && typeof m.timestamp === 'string' && m.timestamp < since) return false;
+          if (m.to === myId) return true;
+          if (m.toRole && m.toRole === myRole) return true;
+          if (!m.to && !m.toRole) return true; // broadcast
+          return false;
+        });
+
+        if (inbox.length === 0) {
+          return { content: [{ type: 'text' as const, text: 'No new messages in your inbox.' }] };
+        }
+
+        const formatted = inbox
+          .map((m) => `[${m.type}] From ${m.fromName} (${m.timestamp}):\n${m.content}`)
+          .join('\n\n---\n\n');
+
+        return {
+          content: [{ type: 'text' as const, text: `${inbox.length} message(s):\n\n${formatted}` }],
+        };
+      } catch (e) {
+        return { content: [{ type: 'text' as const, text: `Error: ${String(e)}` }], isError: true };
+      }
     },
   );
 
   // ─── Resources ───────────────────────────────────────────────
 
-  server.resource('sessions_list', 'hawkeye://sessions', {
-    description: 'All recorded Hawkeye sessions',
-    mimeType: 'application/json',
-  }, async () => {
-    const result = storage.listSessions({ limit: 100 });
-    return {
-      contents: [
-        {
-          uri: 'hawkeye://sessions',
-          mimeType: 'application/json',
-          text: JSON.stringify(result.ok ? result.value : [], null, 2),
-        },
-      ],
-    };
-  });
-
-  server.resource('session_detail', 'hawkeye://session/{id}', {
-    description: 'Single session with its recent events',
-    mimeType: 'application/json',
-  }, async (uri) => {
-    const id = uri.pathname.split('/').pop() || '';
-    const sessionResult = storage.getSession(id);
-    const eventsResult = storage.getEvents(id, { limit: 50 });
-
-    const data = {
-      session: sessionResult.ok ? sessionResult.value : null,
-      events: eventsResult.ok
-        ? eventsResult.value.map((e) => ({ ...e, data: tryParseJson(e.data) }))
-        : [],
-    };
-
-    return {
-      contents: [
-        {
-          uri: uri.href,
-          mimeType: 'application/json',
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
-  });
-
-  server.resource('active_session', 'hawkeye://active', {
-    description: 'The currently active (recording) session with live stats',
-    mimeType: 'application/json',
-  }, async () => {
-    const session = findActiveSession(storage);
-    if (!session) {
+  server.resource(
+    'sessions_list',
+    'hawkeye://sessions',
+    {
+      description: 'All recorded Hawkeye sessions',
+      mimeType: 'application/json',
+    },
+    async () => {
+      const result = storage.listSessions({ limit: 100 });
       return {
-        contents: [{
-          uri: 'hawkeye://active',
-          mimeType: 'application/json',
-          text: JSON.stringify({ active: false, session: null }, null, 2),
-        }],
+        contents: [
+          {
+            uri: 'hawkeye://sessions',
+            mimeType: 'application/json',
+            text: JSON.stringify(result.ok ? result.value : [], null, 2),
+          },
+        ],
       };
-    }
+    },
+  );
 
-    const statsResult = storage.getSessionStats(session.id);
-    const driftResult = storage.getDriftSnapshots(session.id);
-    const latestDrift = driftResult.ok ? driftResult.value[driftResult.value.length - 1] : null;
+  server.resource(
+    'session_detail',
+    'hawkeye://session/{id}',
+    {
+      description: 'Single session with its recent events',
+      mimeType: 'application/json',
+    },
+    async (uri) => {
+      const id = uri.pathname.split('/').pop() || '';
+      const sessionResult = storage.getSession(id);
+      const eventsResult = storage.getEvents(id, { limit: 50 });
 
-    return {
-      contents: [{
-        uri: 'hawkeye://active',
-        mimeType: 'application/json',
-        text: JSON.stringify({
-          active: true,
-          session,
-          stats: statsResult.ok ? statsResult.value : null,
-          drift: latestDrift,
-        }, null, 2),
-      }],
-    };
-  });
+      const data = {
+        session: sessionResult.ok ? sessionResult.value : null,
+        events: eventsResult.ok
+          ? eventsResult.value.map((e) => ({ ...e, data: tryParseJson(e.data) }))
+          : [],
+      };
+
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify(data, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  server.resource(
+    'active_session',
+    'hawkeye://active',
+    {
+      description: 'The currently active (recording) session with live stats',
+      mimeType: 'application/json',
+    },
+    async () => {
+      const session = findActiveSession(storage);
+      if (!session) {
+        return {
+          contents: [
+            {
+              uri: 'hawkeye://active',
+              mimeType: 'application/json',
+              text: JSON.stringify({ active: false, session: null }, null, 2),
+            },
+          ],
+        };
+      }
+
+      const statsResult = storage.getSessionStats(session.id);
+      const driftResult = storage.getDriftSnapshots(session.id);
+      const latestDrift = driftResult.ok ? driftResult.value[driftResult.value.length - 1] : null;
+
+      return {
+        contents: [
+          {
+            uri: 'hawkeye://active',
+            mimeType: 'application/json',
+            text: JSON.stringify(
+              {
+                active: true,
+                session,
+                stats: statsResult.ok ? statsResult.value : null,
+                drift: latestDrift,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
 
   return server;
 }
@@ -2413,9 +2969,7 @@ function loadFullConfigSafe(cwd: string): HawkeyeConfig {
 
 function matchesPattern(command: string, pattern: string): boolean {
   if (pattern.includes('*')) {
-    const regex = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*/g, '.*');
+    const regex = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
     return new RegExp(regex, 'i').test(command);
   }
   return command.toLowerCase().includes(pattern.toLowerCase());

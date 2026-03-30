@@ -50,7 +50,16 @@ export interface TraceEvent {
   timestamp: Date;
   sequence: number;
   type: EventType;
-  data: CommandEvent | FileEvent | ApiEvent | LlmEvent | DecisionEvent | GitEvent | ErrorEvent | GuardrailEventData | DriftAlertEventData;
+  data:
+    | CommandEvent
+    | FileEvent
+    | ApiEvent
+    | LlmEvent
+    | DecisionEvent
+    | GitEvent
+    | ErrorEvent
+    | GuardrailEventData
+    | DriftAlertEventData;
   driftScore?: number;
   driftFlag?: DriftFlag;
   costUsd?: number;
@@ -141,20 +150,27 @@ export interface DriftAlertEventData {
   actionsAnalyzed: number;
 }
 
-export type Result<T, E = Error> =
-  | { ok: true; value: T }
-  | { ok: false; error: E };
+export type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export interface GuardrailRule {
   name: string;
-  type: 'file_protect' | 'command_block' | 'cost_limit' | 'token_limit' | 'directory_scope' | 'network_lock' | 'review_gate' | 'pii_filter' | 'prompt_shield';
+  type:
+    | 'file_protect'
+    | 'command_block'
+    | 'cost_limit'
+    | 'token_limit'
+    | 'directory_scope'
+    | 'network_lock'
+    | 'review_gate'
+    | 'pii_filter'
+    | 'prompt_shield';
   action: 'warn' | 'block';
 }
 
 export interface DriftConfig {
   enabled: boolean;
   checkEvery: number;
-  provider: 'ollama' | 'anthropic' | 'openai' | 'deepseek' | 'mistral' | 'google';
+  provider: 'ollama' | 'anthropic' | 'openai' | 'lmstudio' | 'deepseek' | 'mistral' | 'google';
   model: string;
   thresholds: {
     warning: number;
@@ -163,6 +179,7 @@ export interface DriftConfig {
   contextWindow: number;
   autoPause: boolean;
   ollamaUrl?: string;
+  lmstudioUrl?: string;
 }
 
 export interface AppConfig {

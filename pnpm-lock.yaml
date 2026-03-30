@@ -135,6 +135,8 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@25.3.5)
 
+  packages/vscode-extension: {}
+
 packages:
 
   '@alloc/quick-lru@5.2.0':

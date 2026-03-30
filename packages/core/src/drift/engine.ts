@@ -7,6 +7,7 @@ import {
   createOllamaProvider,
   createAnthropicProvider,
   createOpenAIProvider,
+  createLmStudioProvider,
   createDeepSeekProvider,
   createMistralProvider,
   createGoogleProvider,
@@ -91,6 +92,10 @@ export function createDriftEngine(
         case 'openai':
           llmProvider = createOpenAIProvider(config.model);
           logger.info(`DriftDetect: using OpenAI (${config.model})`);
+          break;
+        case 'lmstudio':
+          llmProvider = createLmStudioProvider(config.model, config.lmstudioUrl);
+          logger.info(`DriftDetect: using LM Studio (${config.model})`);
           break;
         case 'deepseek':
           llmProvider = createDeepSeekProvider(config.model);
@@ -180,9 +185,7 @@ export function createDriftEngine(
 
       const result = await this.check(allRecentEvents);
 
-      logger.info(
-        `Drift check: score=${result.score} flag=${result.flag} source=${result.source}`,
-      );
+      logger.info(`Drift check: score=${result.score} flag=${result.flag} source=${result.source}`);
 
       if (result.flag !== 'ok') {
         for (const cb of alertCallbacks) {
