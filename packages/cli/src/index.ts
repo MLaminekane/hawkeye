@@ -32,9 +32,13 @@ import { statsCommand } from './commands/stats.js';
 import { swarmCommand } from './commands/swarm.js';
 import { startInteractive } from './interactive.js';
 
+import { checkForUpdate } from './update-check.js';
+
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const packageJson = JSON.parse(readFileSync(join(currentDir, '..', 'package.json'), 'utf8')) as { version?: string };
-const cliVersion = packageJson.version ?? '0.2.0';
+const cliVersion = packageJson.version ?? '0.3.0';
+
+checkForUpdate(cliVersion);
 
 const program = new Command();
 const compareCommands = (left: Command, right: Command) => left.name().localeCompare(right.name());
