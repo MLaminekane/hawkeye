@@ -16,8 +16,8 @@
     "@mklamine/hawkeye-core": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-router-dom": "^7.1.0",
-    "recharts": "^2.15.0"
+    "react-router-dom": "^7.13.2",
+    "recharts": "^3.0.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
