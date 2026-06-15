@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20, 22]
+        node-version: [20, 22, 26]
 
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +31,9 @@ jobs:
 
       - name: Type check & build
         run: pnpm build
+
+      - name: Check publish manifests
+        run: pnpm check:publish
 
       - name: Run tests
         run: pnpm test

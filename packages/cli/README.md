@@ -47,6 +47,8 @@ If you want the full product overview and repo-level architecture, see the root 
 
 ## Install
 
+Requires Node.js 20+.
+
 ### npm
 
 ```bash
@@ -64,6 +66,8 @@ npx hawkeye-ai
 ```bash
 brew install MLaminekane/hawkeye/hawkeye-ai
 ```
+
+If an old install fails with `workspace:*` or a native SQLite error, reinstall `hawkeye-ai@latest`.
 
 ### From source
 

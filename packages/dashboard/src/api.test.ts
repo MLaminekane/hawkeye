@@ -55,7 +55,7 @@ async function loadApiModule() {
   });
   vi.stubGlobal('WebSocket', MockWebSocket);
 
-  return import('./api');
+  return import('./api.ts');
 }
 
 beforeEach(() => {

@@ -65,6 +65,26 @@ export interface PromptShieldRule {
   scope: 'input' | 'output' | 'both';
 }
 
+export interface SupplyChainAuditRule {
+  name: string;
+  type: 'supply_chain_audit';
+  action: 'warn' | 'block';
+  /** Block on vulnerability severity at or above this level */
+  blockSeverity: 'critical' | 'high' | 'moderate' | 'low';
+  /** Also audit before pnpm/yarn install */
+  packageManagers: ('npm' | 'pnpm' | 'yarn' | 'bun')[];
+}
+
+export interface EgressMonitorRule {
+  name: string;
+  type: 'egress_monitor';
+  action: 'warn' | 'block';
+  /** Allowed outbound hosts for child processes (empty = alert on all non-localhost) */
+  allowedHosts: string[];
+  /** Check interval in milliseconds */
+  checkIntervalMs: number;
+}
+
 export type GuardrailRuleConfig =
   | FileProtectRule
   | CommandBlockRule
@@ -74,7 +94,9 @@ export type GuardrailRuleConfig =
   | NetworkLockRule
   | ReviewGateRule
   | PiiFilterRule
-  | PromptShieldRule;
+  | PromptShieldRule
+  | SupplyChainAuditRule
+  | EgressMonitorRule;
 
 export interface GuardrailViolation {
   ruleName: string;

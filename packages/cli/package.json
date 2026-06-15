@@ -1,6 +1,6 @@
 {
   "name": "hawkeye-ai",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "The flight recorder for AI agents - observability, security, multi-agent orchestration, and autonomous control for Claude Code, Aider, Codex, Cursor, and more",
   "license": "MIT",
   "homepage": "https://github.com/MLaminekane/hawkeye#readme",
@@ -38,6 +38,12 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "dashboard"
@@ -47,15 +53,16 @@
     "dev": "tsc --watch",
     "test": "vitest run --passWithNoTests",
     "lint": "eslint src/",
+    "prepublishOnly": "node ../../scripts/ensure-supported-node.cjs && node ../../scripts/require-pnpm-publish.cjs && npm run build && node ../../scripts/check-publish-manifests.cjs",
     "prepack": "node -e \"const{cpSync,existsSync,mkdirSync,rmSync}=require('fs');const{join}=require('path');const src=join(__dirname,'..','dashboard','dist');const dst=join(__dirname,'dashboard');if(existsSync(src)){if(existsSync(dst)){rmSync(dst,{recursive:true,force:true});console.log('Cleaned old dashboard bundle')}mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Bundled dashboard dist into CLI package')}else{console.warn('Dashboard dist not found — run pnpm build first')}\""
   },
   "dependencies": {
-    "@mklamine/hawkeye-core": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@mklamine/hawkeye-core": "workspace:^",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "chalk": "^5.4.1",
     "commander": "^12.1.0",
     "pdfkit": "^0.17.2",
-    "ws": "^8.19.0",
+    "ws": "^8.20.1",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
   },
@@ -63,6 +70,6 @@
     "@types/node": "^22.10.0",
     "@types/pdfkit": "^0.17.5",
     "@types/ws": "^8.18.1",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.6"
   }
 }

@@ -894,6 +894,59 @@ export const serveCommand = new Command('serve')
       } catch {}
     }, 30_000).unref();
 
+    // Fleet-wide health monitoring — checks every 60s, fires webhooks on critical
+    let lastFleetStatus: string = 'healthy';
+    const fleetHealthInterval = setInterval(() => {
+      try {
+        const agents = Array.from(liveAgents.values());
+        const running = agents.filter((a) => a.status === 'running');
+        if (running.length === 0) return; // No agents running — skip
+
+        const sessions = storage.listSessions({ status: 'recording', limit: 100 });
+        const activeSessions = sessions.ok ? sessions.value : [];
+
+        let totalCost = 0;
+        let criticalDriftCount = 0;
+        let guardrailBlockCount = 0;
+
+        for (const s of activeSessions) {
+          totalCost += s.total_cost_usd || 0;
+          if (s.final_drift_score !== null && s.final_drift_score !== undefined && s.final_drift_score <= 30) {
+            criticalDriftCount++;
+          }
+          const violations = storage.getViolations(s.id);
+          if (violations.ok) guardrailBlockCount += violations.value.length;
+        }
+
+        let status: 'healthy' | 'warning' | 'critical' = 'healthy';
+        const alerts: string[] = [];
+
+        if (criticalDriftCount > 0) { status = 'critical'; alerts.push(`${criticalDriftCount} agent(s) critical drift`); }
+        if (totalCost > 50) { status = status === 'critical' ? 'critical' : 'warning'; alerts.push(`Fleet cost: $${totalCost.toFixed(2)}`); }
+        if (guardrailBlockCount > 10) { status = 'critical'; alerts.push(`${guardrailBlockCount} guardrail violations`); }
+
+        // Fire webhook if status changed to warning/critical
+        if (status !== 'healthy' && status !== lastFleetStatus) {
+          const cfg = loadConfig(cwd);
+          if (cfg.webhooks && cfg.webhooks.length > 0) {
+            fireWebhooks(cfg.webhooks, 'fleet_alert', {
+              status,
+              agents: { total: agents.length, running: running.length },
+              activeSessions: activeSessions.length,
+              totalCost,
+              criticalDriftCount,
+              guardrailBlockCount,
+              alerts,
+            });
+          }
+          broadcast({ type: 'fleet_alert', status, alerts });
+          console.log(chalk.red(`  Fleet alert (${status}): ${alerts.join(', ')}`));
+        }
+
+        lastFleetStatus = status;
+      } catch {}
+    }, 60_000).unref();
+
     // Poll for new events and broadcast to WebSocket clients
     const sessionEventCounts = new Map<string, number>();
     const pollInterval = setInterval(() => {
@@ -2145,6 +2198,70 @@ async function handleApi(url: string, storage: Storage, res: ServerResponse, dbP
         agents: agents.ok ? agents.value : [],
         conflicts: conflicts.ok ? conflicts.value : [],
       }));
+      return;
+    }
+
+    // GET /api/fleet/health — Fleet-wide health check
+    if (url === '/api/fleet/health') {
+      try {
+        const agents = Array.from(liveAgents.values());
+        const running = agents.filter((a) => a.status === 'running');
+        const sessions = storage.listSessions({ status: 'recording', limit: 100 });
+        const activeSessions = sessions.ok ? sessions.value : [];
+
+        // Compute fleet-wide metrics
+        let totalCost = 0;
+        let highDriftCount = 0;
+        let criticalDriftCount = 0;
+        let guardrailBlockCount = 0;
+
+        for (const s of activeSessions) {
+          totalCost += s.total_cost_usd || 0;
+          if (s.final_drift_score !== null && s.final_drift_score !== undefined) {
+            if (s.final_drift_score <= 30) criticalDriftCount++;
+            else if (s.final_drift_score <= 60) highDriftCount++;
+          }
+          // Count recent guardrail violations
+          const violations = storage.getViolations(s.id);
+          if (violations.ok) guardrailBlockCount += violations.value.length;
+        }
+
+        // Determine fleet health status
+        let status: 'healthy' | 'warning' | 'critical' = 'healthy';
+        const alerts: string[] = [];
+
+        if (criticalDriftCount > 0) {
+          status = 'critical';
+          alerts.push(`${criticalDriftCount} agent(s) with critical drift`);
+        }
+        if (highDriftCount >= 3) {
+          status = status === 'critical' ? 'critical' : 'warning';
+          alerts.push(`${highDriftCount} agent(s) with high drift`);
+        }
+        if (totalCost > 50) {
+          status = status === 'critical' ? 'critical' : 'warning';
+          alerts.push(`Fleet cost: $${totalCost.toFixed(2)} across active sessions`);
+        }
+        if (guardrailBlockCount > 10) {
+          status = 'critical';
+          alerts.push(`${guardrailBlockCount} guardrail violations across fleet`);
+        }
+
+        const health = {
+          status,
+          timestamp: new Date().toISOString(),
+          agents: { total: agents.length, running: running.length },
+          sessions: { active: activeSessions.length },
+          metrics: { totalCost, highDriftCount, criticalDriftCount, guardrailBlockCount },
+          alerts,
+        };
+
+        res.writeHead(200);
+        res.end(JSON.stringify(health));
+      } catch (err) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: String(err) }));
+      }
       return;
     }
 

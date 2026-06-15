@@ -3,91 +3,80 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Command } from 'commander';
-import { analyzeCommand } from './commands/analyze.js';
-import { approveCommand } from './commands/approve.js';
-import { autocorrectCommand } from './commands/autocorrect.js';
-import { ciCommand } from './commands/ci.js';
-import { initCommand } from './commands/init.js';
-import { compareCommand } from './commands/compare.js';
-import { daemonCommand } from './commands/daemon.js';
-import { endCommand } from './commands/end.js';
-import { exportCommand } from './commands/export.js';
-import { hookHandlerCommand } from './commands/hook-handler.js';
-import { hooksCommand } from './commands/hooks.js';
-import { inspectCommand } from './commands/inspect.js';
-import { mcpCommand } from './commands/mcp.js';
-import { memoryCommand } from './commands/memory.js';
-import { otelExportCommand } from './commands/otel-export.js';
-import { overnightCommand } from './commands/overnight.js';
-import { policyCommand } from './commands/policy.js';
-import { recordCommand } from './commands/record.js';
-import { replayCommand } from './commands/replay.js';
-import { reportCommand } from './commands/report.js';
-import { restartCommand } from './commands/restart.js';
-import { revertCommand } from './commands/revert.js';
-import { serveCommand } from './commands/serve.js';
-import { sessionsCommand } from './commands/sessions.js';
-import { statsCommand } from './commands/stats.js';
-import { swarmCommand } from './commands/swarm.js';
-import { startInteractive } from './interactive.js';
+import {
+  isNativeSqliteBindingError,
+  printNativeSqliteHelp,
+  warnIfUntestedNodeVersion,
+} from './node-version.js';
 
-import { checkForUpdate } from './update-check.js';
+function readCliVersion(): string {
+  const currentDir = dirname(fileURLToPath(import.meta.url));
+  const packageJson = JSON.parse(readFileSync(join(currentDir, '..', 'package.json'), 'utf8')) as {
+    version?: string;
+  };
+  return packageJson.version ?? '0.3.0';
+}
 
-const currentDir = dirname(fileURLToPath(import.meta.url));
-const packageJson = JSON.parse(readFileSync(join(currentDir, '..', 'package.json'), 'utf8')) as { version?: string };
-const cliVersion = packageJson.version ?? '0.3.0';
+function printBootstrapHelp(): void {
+  console.log(`Usage: hawkeye [options] [command]
 
-checkForUpdate(cliVersion);
+The flight recorder for AI agents
 
-const program = new Command();
-const compareCommands = (left: Command, right: Command) => left.name().localeCompare(right.name());
+Options:
+  -V, --version     output the version number
+  -h, --help        display help for command
 
-program
-  .name('hawkeye')
-  .description('The flight recorder for AI agents')
-  .version(cliVersion);
+Commands:
+  analyze           analyze a recorded session
+  approve           manage approval records
+  autocorrect       run autocorrection workflows
+  ci                run CI guardrail checks
+  compare           compare recorded sessions
+  daemon            manage background task execution
+  end               end an active session
+  export            export session data
+  hooks             manage agent hooks
+  init              initialize Hawkeye in this repo
+  inspect           inspect a session
+  mcp               start the MCP server
+  memory            inspect session memory
+  otel-export       export OpenTelemetry data
+  overnight         run overnight automation
+  policy            manage policies
+  record            record a command
+  replay            replay a session
+  report            generate reports
+  restart           restart a session
+  revert            revert session changes
+  serve             serve the dashboard
+  sessions          list sessions
+  shield            run supply-chain and firewall checks
+  stats             show statistics
+  swarm             coordinate multi-agent work
 
-[
-  analyzeCommand,
-  approveCommand,
-  autocorrectCommand,
-  ciCommand,
-  compareCommand,
-  daemonCommand,
-  endCommand,
-  exportCommand,
-  hookHandlerCommand,
-  hooksCommand,
-  initCommand,
-  inspectCommand,
-  mcpCommand,
-  memoryCommand,
-  otelExportCommand,
-  overnightCommand,
-  policyCommand,
-  recordCommand,
-  replayCommand,
-  reportCommand,
-  restartCommand,
-  revertCommand,
-  serveCommand,
-  sessionsCommand,
-  statsCommand,
-  swarmCommand,
-]
-  .sort(compareCommands)
-  .forEach((command) => program.addCommand(command));
+Run hawkeye <command> --help for command-specific options.`);
+}
 
-// If no subcommand is given, launch interactive mode
-const knownCommands = program.commands.flatMap((c) => [c.name(), ...c.aliases()]);
 const userArgs = process.argv.slice(2);
-const hasSubcommand =
-  userArgs.length > 0 &&
-  (knownCommands.includes(userArgs[0]) || userArgs[0] === '--help' || userArgs[0] === '-h' || userArgs[0] === '--version' || userArgs[0] === '-V');
+if (userArgs.includes('--version') || userArgs.includes('-V')) {
+  console.log(readCliVersion());
+  process.exit(0);
+}
 
-if (hasSubcommand) {
-  program.parse();
-} else {
-  startInteractive();
+if (userArgs[0] === '--help' || userArgs[0] === '-h') {
+  printBootstrapHelp();
+  process.exit(0);
+}
+
+warnIfUntestedNodeVersion();
+
+try {
+  await import('./main.js');
+} catch (error) {
+  if (isNativeSqliteBindingError(error)) {
+    printNativeSqliteHelp();
+    process.exit(1);
+  }
+
+  throw error;
 }

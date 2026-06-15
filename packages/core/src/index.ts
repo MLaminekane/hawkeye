@@ -93,10 +93,67 @@ export type {
   ReviewGateRule,
   PiiFilterRule,
   PromptShieldRule,
+  SupplyChainAuditRule,
+  EgressMonitorRule,
 } from './guardrails/rules.js';
 
 export { scanContent } from './guardrails/content-scanner.js';
 export type { PiiMatch, ContentScanResult } from './guardrails/content-scanner.js';
+
+export {
+  detectPackageManager,
+  isInstallCommand,
+  runAudit,
+} from './guardrails/supply-chain.js';
+export type { AuditResult, AuditVulnerability, VulnSeverity } from './guardrails/supply-chain.js';
+
+export {
+  scanEgressConnections,
+  analyzeEgress,
+  getChildPids,
+  postCommandEgressScan,
+} from './guardrails/egress-monitor.js';
+export type { EgressConnection, EgressScanResult } from './guardrails/egress-monitor.js';
+
+export {
+  loadIocDatabase,
+  saveIocDatabase,
+  matchPackage,
+  matchDomain,
+  matchHash,
+  matchAll,
+  hashFile,
+  updateFromFeed,
+  addIocPackage,
+  addIocDomain,
+  addIocHash,
+  iocStats,
+  getIocPath,
+} from './guardrails/ioc.js';
+export type {
+  IocDatabase,
+  IocPackage,
+  IocDomain,
+  IocHash,
+  IocMatch,
+} from './guardrails/ioc.js';
+
+export {
+  scanPackages,
+  parseInstallCommand,
+} from './guardrails/package-scanner.js';
+export type { PackageScanResult, ScanTarget } from './guardrails/package-scanner.js';
+
+export {
+  detectExfiltration,
+  scanDiffContent,
+  checkGitPushContent,
+  scanToolOutput,
+  EXFILTRATION_PATTERNS,
+  SECRET_PATTERNS,
+  SUSPICIOUS_CODE_PATTERNS,
+} from './guardrails/agent-firewall.js';
+export type { ExfiltrationPattern, SecretPattern } from './guardrails/agent-firewall.js';
 
 export {
   createLlmProvider,

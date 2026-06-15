@@ -903,6 +903,10 @@ class HawkeyeWs {
 
   disconnect(): void {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.ws) {
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+    }
     this.ws?.close();
     this.ws = null;
   }

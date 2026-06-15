@@ -1,6 +1,8 @@
 import { resolve } from 'node:path';
 import type { TraceEvent, CommandEvent, FileEvent, ApiEvent, LlmEvent } from '../types.js';
-import type { GuardrailRuleConfig, GuardrailViolation, PiiFilterRule, PromptShieldRule } from './rules.js';
+import type { GuardrailRuleConfig, GuardrailViolation, PiiFilterRule, PromptShieldRule, SupplyChainAuditRule, EgressMonitorRule } from './rules.js';
+import { isInstallCommand, detectPackageManager, runAudit } from './supply-chain.js';
+import { postCommandEgressScan } from './egress-monitor.js';
 import { scanContent } from './content-scanner.js';
 import { Logger } from '../logger.js';
 
@@ -208,6 +210,62 @@ export function createGuardrailEnforcer(
     return null;
   }
 
+  function evaluateSupplyChainAudit(
+    event: TraceEvent,
+    rule: SupplyChainAuditRule,
+  ): GuardrailViolation | null {
+    if (event.type !== 'command') return null;
+
+    const data = event.data as CommandEvent;
+    const fullCommand = `${data.command} ${data.args.join(' ')}`.trim();
+
+    if (!isInstallCommand(fullCommand)) return null;
+
+    const pm = detectPackageManager(fullCommand);
+    if (!pm) return null;
+    if (!rule.packageManagers.includes(pm)) return null;
+
+    const cwd = data.cwd || process.cwd();
+    const audit = runAudit(cwd, pm, rule.blockSeverity);
+
+    if (!audit.passed) {
+      return {
+        ruleName: rule.name,
+        severity: rule.action,
+        description: audit.summary,
+        actionTaken: rule.action === 'block' ? 'blocked' : 'logged',
+      };
+    }
+
+    return null;
+  }
+
+  function evaluateEgressMonitor(
+    event: TraceEvent,
+    rule: EgressMonitorRule,
+  ): GuardrailViolation | null {
+    if (event.type !== 'command') return null;
+
+    const data = event.data as CommandEvent;
+    // Only scan after commands that might spawn network-active child processes
+    const fullCommand = `${data.command} ${data.args.join(' ')}`.trim();
+    const networkCommands = /\b(npm|pnpm|yarn|bun|curl|wget|pip|cargo|go get|docker)\b/;
+    if (!networkCommands.test(fullCommand)) return null;
+
+    const scan = postCommandEgressScan(undefined, rule.allowedHosts);
+
+    if (scan.suspicious.length > 0) {
+      return {
+        ruleName: rule.name,
+        severity: rule.action,
+        description: scan.summary,
+        actionTaken: rule.action === 'block' ? 'blocked' : 'logged',
+      };
+    }
+
+    return null;
+  }
+
   function evaluatePiiFilter(
     event: TraceEvent,
     rule: PiiFilterRule,
@@ -295,6 +353,12 @@ export function createGuardrailEnforcer(
             break;
           case 'prompt_shield':
             violation = evaluatePromptShield(event, rule);
+            break;
+          case 'supply_chain_audit':
+            violation = evaluateSupplyChainAudit(event, rule);
+            break;
+          case 'egress_monitor':
+            violation = evaluateEgressMonitor(event, rule);
             break;
           // cost_limit and token_limit are checked separately
         }

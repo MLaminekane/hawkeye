@@ -29,6 +29,9 @@ Thumbs.db
 *.log
 .aider*
 
+# npm pack artifacts
+*.tgz
+
 # Test coverage
 coverage/
 
@@ -41,6 +44,9 @@ step.txt
 
 # CLI bundled dashboard (created by prepack)
 packages/cli/dashboard/
+
+# Dashboard JS emitted next to TS/TSX sources
+packages/dashboard/src/**/*.js
 
 # MCP config (contains personal API tokens — use .mcp.example.json as template)
 .mcp.json

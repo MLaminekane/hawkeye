@@ -17,8 +17,8 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { Storage, scoreHeuristic, slidingDriftScore, scanContent, evaluateAndCorrect, buildCorrectionHint, getDefaultAutocorrectConfig } from '@mklamine/hawkeye-core';
-import type { TraceEvent, EventType, DriftFlag, AutocorrectConfig, AutocorrectContext, CorrectionRecord } from '@mklamine/hawkeye-core';
+import { Storage, scoreHeuristic, slidingDriftScore, scanContent, evaluateAndCorrect, buildCorrectionHint, getDefaultAutocorrectConfig, isInstallCommand, detectPackageManager, runAudit, postCommandEgressScan, loadIocDatabase, matchDomain, scanPackages, parseInstallCommand } from '@mklamine/hawkeye-core';
+import type { TraceEvent, EventType, DriftFlag, AutocorrectConfig, AutocorrectContext, CorrectionRecord, VulnSeverity } from '@mklamine/hawkeye-core';
 import { getDeveloperName } from '../config.js';
 import { analyzeImpact, formatImpactPreview, shouldBlockAction, shouldWarnAction } from '../impact.js';
 import type { ImpactPreview } from '../impact.js';
@@ -252,6 +252,19 @@ interface ContentGuardrailConfig {
   } | null;
 }
 
+interface SupplyChainAuditConfig {
+  enabled: boolean;
+  action: string;
+  blockSeverity: VulnSeverity;
+  packageManagers: string[];
+}
+
+interface EgressMonitorConfig {
+  enabled: boolean;
+  action: string;
+  allowedHosts: string[];
+}
+
 interface GuardrailConfig {
   protectedFiles: string[];
   dangerousCommands: string[];
@@ -259,6 +272,8 @@ interface GuardrailConfig {
   reviewGatePatterns: string[];
   networkLock: NetworkLockConfig | null;
   contentGuardrails: ContentGuardrailConfig;
+  supplyChainAudit: SupplyChainAuditConfig | null;
+  egressMonitor: EgressMonitorConfig | null;
   autoPause: boolean;
   webhooks: WebhookConfig[];
   autocorrect: AutocorrectConfig;
@@ -276,9 +291,11 @@ function loadGuardrailConfig(): GuardrailConfig {
       '> /dev/sda',
     ],
     blockedDirs: ['/etc', '/usr', '/var', '/sys', '/boot', '~/.ssh', '~/.gnupg', '~/.aws'],
-    reviewGatePatterns: [],
+    reviewGatePatterns: ['npm install', 'pnpm install', 'yarn add', 'bun install'],
     networkLock: null,
     contentGuardrails: { piiFilter: null, promptShield: null },
+    supplyChainAudit: null,
+    egressMonitor: null,
     autoPause: true,
     webhooks: [],
     autocorrect: getDefaultAutocorrectConfig(),
@@ -338,6 +355,21 @@ function loadGuardrailConfig(): GuardrailConfig {
             enabled: true,
             action: rule.action || 'warn',
             scope: (rule.config.scope as string) || 'input',
+          };
+        }
+        if (rule.type === 'supply_chain_audit' && rule.config) {
+          defaults.supplyChainAudit = {
+            enabled: true,
+            action: rule.action || 'block',
+            blockSeverity: (rule.config.blockSeverity as VulnSeverity) || 'critical',
+            packageManagers: (rule.config.packageManagers as string[]) || ['npm', 'pnpm', 'yarn', 'bun'],
+          };
+        }
+        if (rule.type === 'egress_monitor' && rule.config) {
+          defaults.egressMonitor = {
+            enabled: true,
+            action: rule.action || 'warn',
+            allowedHosts: (rule.config.allowedHosts as string[]) || [],
           };
         }
       }
@@ -890,6 +922,64 @@ function checkNetworkLock(
   return null;
 }
 
+// ── Supply chain audit check ──
+
+function checkSupplyChain(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  config: GuardrailConfig,
+): string | null {
+  if (toolName !== 'Bash') return null;
+
+  const cmd = String(toolInput.command || '');
+  if (!cmd) return null;
+
+  // Only check install commands
+  if (!isInstallCommand(cmd)) return null;
+
+  // ── IOC check (always runs, even without supply_chain_audit config) ──
+  const iocDb = loadIocDatabase();
+  const cmdTargets = parseInstallCommand(cmd);
+  if (cmdTargets.length > 0) {
+    const iocScan = scanPackages(process.cwd(), iocDb, cmdTargets);
+    const criticalThreats = iocScan.threats.filter((t) => t.severity === 'critical');
+    if (criticalThreats.length > 0) {
+      process.stderr.write(`[hawkeye] IOC ALERT: ${iocScan.summary}\n`);
+      return `IOC BLOCKED: Known compromised package(s) — ${criticalThreats.map((t) => t.indicator).join(', ')}. ${criticalThreats[0].description}`;
+    }
+    if (iocScan.threats.length > 0) {
+      process.stderr.write(`[hawkeye] IOC WARNING: ${iocScan.summary}\n`);
+    }
+  }
+
+  // ── npm audit check (if configured) ──
+  if (config.supplyChainAudit) {
+    const pm = detectPackageManager(cmd);
+    if (!pm) return null;
+
+    const { blockSeverity, packageManagers } = config.supplyChainAudit;
+    if (!packageManagers.includes(pm)) return null;
+
+    process.stderr.write(`[hawkeye] Running supply chain audit before "${cmd.slice(0, 80)}"...\n`);
+
+    const auditResult = runAudit(
+      process.cwd(),
+      pm as 'npm' | 'pnpm' | 'yarn' | 'bun',
+      blockSeverity as VulnSeverity,
+    );
+
+    if (!auditResult.passed) {
+      return `Supply chain audit BLOCKED: ${auditResult.summary}`;
+    }
+
+    if (auditResult.totalVulnerabilities > 0) {
+      process.stderr.write(`[hawkeye] Supply chain audit: ${auditResult.summary}\n`);
+    }
+  }
+
+  return null;
+}
+
 // ── Content guardrail checks ──
 
 function checkContentGuardrails(
@@ -897,12 +987,12 @@ function checkContentGuardrails(
   toolInput: Record<string, unknown>,
   toolOutput: string | undefined,
   config: GuardrailConfig,
-): { piiWarnings: string[]; injectionWarnings: string[] } {
+): { piiWarnings: string[]; injectionWarnings: string[]; exfiltrationWarnings: string[] } {
   const piiWarnings: string[] = [];
   const injectionWarnings: string[] = [];
+  const exfiltrationWarnings: string[] = [];
 
   const { piiFilter, promptShield } = config.contentGuardrails;
-  if (!piiFilter && !promptShield) return { piiWarnings, injectionWarnings };
 
   // Collect text to scan from tool input/output
   const textsToScan: string[] = [];
@@ -919,6 +1009,9 @@ function checkContentGuardrails(
     const newStr = toolInput.new_string ? String(toolInput.new_string) : '';
     if (oldStr) textsToScan.push(oldStr);
     if (newStr) textsToScan.push(newStr);
+  } else if (toolName === 'Read') {
+    // Scan file content returned by Read tool for prompt injection
+    if (toolOutput) textsToScan.push(toolOutput);
   }
 
   for (const text of textsToScan) {
@@ -933,18 +1026,145 @@ function checkContentGuardrails(
       }
     }
 
-    // Prompt injection scanning
-    if (promptShield) {
+    // Prompt injection scanning — ALWAYS runs (not just when prompt_shield is configured)
+    // This catches injections hiding in file content, API responses, and command output
+    // that will be fed back to the LLM context
+    {
       const result = scanContent(text);
       if (result.promptInjection) {
         injectionWarnings.push(
-          `Prompt injection patterns detected: ${result.injectionPatterns.join(', ')}`,
+          `Tool output injection detected in ${toolName}: ${result.injectionPatterns.join(', ')}`,
         );
       }
     }
   }
 
-  return { piiWarnings, injectionWarnings };
+  // ── Exfiltration detection ──
+  // Detect when Bash commands send source code to external hosts
+  if (toolName === 'Bash') {
+    const cmd = String(toolInput.command || '');
+    const exfilWarning = detectExfiltration(cmd);
+    if (exfilWarning) exfiltrationWarnings.push(exfilWarning);
+  }
+
+  return { piiWarnings, injectionWarnings, exfiltrationWarnings };
+}
+
+// ── Exfiltration detection ──
+
+const EXFILTRATION_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
+  // curl/wget POST with data flag sending to external host
+  { name: 'curl_post_data', pattern: /\bcurl\b.*(?:-d\b|--data\b|--data-raw\b|--data-binary\b|--upload-file\b).*(?:https?:\/\/)/i },
+  // curl with file upload (@file or < file)
+  { name: 'curl_file_upload', pattern: /\bcurl\b.*(?:@\S+|<\s*\S+).*(?:https?:\/\/)/i },
+  // piping file content to curl/wget
+  { name: 'pipe_to_curl', pattern: /\b(?:cat|base64|tar|gzip|zip)\b.*\|.*\b(?:curl|wget|nc|ncat)\b/i },
+  // base64 encoding then sending (common exfil technique)
+  { name: 'base64_exfil', pattern: /\bbase64\b.*\|.*\b(?:curl|wget|nc)\b/i },
+  // tar/zip then send
+  { name: 'archive_exfil', pattern: /\b(?:tar|zip|gzip)\b.*\|.*\b(?:curl|wget|nc)\b/i },
+  // netcat with file redirect
+  { name: 'netcat_exfil', pattern: /\b(?:nc|ncat)\b.*<\s*\S+/i },
+  // scp/rsync to external (non-localhost)
+  { name: 'scp_exfil', pattern: /\b(?:scp|rsync)\b.*\S+@(?!localhost|127\.0\.0\.1)\S+:/i },
+  // posting environment variables (often contain secrets)
+  { name: 'env_exfil', pattern: /\b(?:env|printenv|set)\b.*\|.*\b(?:curl|wget|nc)\b/i },
+  // reading source files and encoding them
+  { name: 'source_encode', pattern: /\b(?:cat|head|tail)\b.*\.(?:ts|js|py|go|rs|java|rb|php|env|key|pem)\b.*\|.*\b(?:base64|xxd|od)\b/i },
+];
+
+function detectExfiltration(command: string): string | null {
+  for (const { name, pattern } of EXFILTRATION_PATTERNS) {
+    if (pattern.test(command)) {
+      return `Potential code exfiltration detected (${name}): command appears to send file content to an external host`;
+    }
+  }
+
+  // Detect reading sensitive files and sending to external URLs in same command
+  const readsSensitiveFile = /\b(?:cat|less|head|tail|xxd)\b.*(?:\.env|\.key|\.pem|id_rsa|credentials|\.secret|\.aws)/i.test(command);
+  const sendsExternal = /\b(?:curl|wget|nc|ncat|scp|rsync)\b/i.test(command);
+  if (readsSensitiveFile && sendsExternal) {
+    return 'Potential secret exfiltration: command reads sensitive files and uses a network tool';
+  }
+
+  return null;
+}
+
+// ── Git push content inspection ──
+
+function checkGitPushContent(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): string | null {
+  if (toolName !== 'Bash') return null;
+  const cmd = String(toolInput.command || '');
+  if (!/\bgit\s+push\b/.test(cmd)) return null;
+
+  try {
+    // Get the diff of unpushed commits
+    const diff = execSync('git diff @{push}..HEAD --stat --diff-filter=ACMR 2>/dev/null || git diff origin/HEAD..HEAD --stat --diff-filter=ACMR 2>/dev/null || echo ""', {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    if (!diff) return null;
+
+    // Get actual diff content for inspection (limit to 50KB)
+    const diffContent = execSync('git diff @{push}..HEAD --diff-filter=ACMR 2>/dev/null || git diff origin/HEAD..HEAD --diff-filter=ACMR 2>/dev/null || echo ""', {
+      encoding: 'utf-8',
+      timeout: 10000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).slice(0, 50000);
+
+    if (!diffContent) return null;
+
+    const warnings: string[] = [];
+
+    // Check for secrets in diff
+    const secretPatterns: Array<{ name: string; pattern: RegExp }> = [
+      { name: 'AWS key', pattern: /AKIA[A-Z0-9]{16}/ },
+      { name: 'private key', pattern: /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/ },
+      { name: 'API key (generic)', pattern: /(?:api[_-]?key|apikey|secret[_-]?key)\s*[:=]\s*['"][a-zA-Z0-9_\-]{20,}['"]/i },
+      { name: 'GitHub token', pattern: /ghp_[a-zA-Z0-9]{36}/ },
+      { name: 'Slack token', pattern: /xox[bprs]-[a-zA-Z0-9-]+/ },
+      { name: 'JWT', pattern: /eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/ },
+    ];
+
+    // Only check added lines (lines starting with +)
+    const addedLines = diffContent.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+    const addedContent = addedLines.join('\n');
+
+    for (const { name, pattern } of secretPatterns) {
+      if (pattern.test(addedContent)) {
+        warnings.push(`Secret detected in commit diff: ${name}`);
+      }
+    }
+
+    // Check for suspicious code patterns in added lines
+    const suspiciousPatterns: Array<{ name: string; pattern: RegExp }> = [
+      { name: 'eval/exec injection', pattern: /\beval\s*\(\s*(?:atob|Buffer\.from|decodeURIComponent)\b/i },
+      { name: 'obfuscated code', pattern: /\\x[0-9a-f]{2}\\x[0-9a-f]{2}\\x[0-9a-f]{2}\\x[0-9a-f]{2}/i },
+      { name: 'hardcoded C2-style IP', pattern: /['"]https?:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?\/[a-z]/i },
+      { name: 'reverse shell', pattern: /\b(?:nc|ncat|bash)\b.*(?:-e\s*\/bin\/(?:sh|bash)|\/dev\/tcp\/)/i },
+      { name: 'environment variable theft', pattern: /process\.env\b.*(?:fetch|axios|http|request)\b/i },
+      { name: 'suspicious postinstall', pattern: /"(?:pre|post)install"\s*:\s*".*(?:curl|wget|node\s+-e|eval)/i },
+    ];
+
+    for (const { name, pattern } of suspiciousPatterns) {
+      if (pattern.test(addedContent)) {
+        warnings.push(`Suspicious code in commit: ${name}`);
+      }
+    }
+
+    if (warnings.length > 0) {
+      return `Git push content inspection: ${warnings.join('; ')}`;
+    }
+  } catch {
+    // git diff failed — don't block
+  }
+
+  return null;
 }
 
 // ── Event mapping ──
@@ -1306,6 +1526,18 @@ export const hookHandlerCommand = new Command('hook-handler')
           if (dirCheck) violations.push(dirCheck);
           const networkCheck = checkNetworkLock(toolName, toolInput, config);
           if (networkCheck) violations.push(networkCheck);
+
+          // Supply chain audit — run npm audit before allowing install commands
+          const supplyChainCheck = checkSupplyChain(toolName, toolInput, config);
+          if (supplyChainCheck) violations.push(supplyChainCheck);
+
+          // Exfiltration detection — scan commands for data exfil patterns
+          const exfilCheck = detectExfiltration(String(toolInput.command || ''));
+          if (exfilCheck && toolName === 'Bash') violations.push(exfilCheck);
+
+          // Git push content inspection — scan commit diffs for secrets/malicious code
+          const gitPushCheck = checkGitPushContent(toolName, toolInput);
+          if (gitPushCheck) violations.push(gitPushCheck);
 
           // Review gate check — separate from other violations because it uses
           // a file-based approval system instead of immediate blocking
@@ -1723,6 +1955,103 @@ export const hookHandlerCommand = new Command('hook-handler')
                   actionTaken: shieldAction === 'block' ? 'blocked' : 'logged',
                 },
               );
+            }
+          }
+
+          // ── Exfiltration detection (post-execution logging) ──
+          if (contentScan.exfiltrationWarnings.length > 0) {
+            for (const warning of contentScan.exfiltrationWarnings) {
+              process.stderr.write(`[hawkeye] Exfiltration alert: ${warning}\n`);
+              storage.insertGuardrailViolation(
+                session.hawkeyeSessionId,
+                eventId,
+                {
+                  ruleName: 'exfiltration_detect',
+                  severity: 'block',
+                  description: warning,
+                  actionTaken: 'logged',
+                },
+              );
+            }
+            // Webhook notification
+            if (guardConfig.webhooks.length > 0) {
+              fireWebhooks(guardConfig.webhooks, 'guardrail_block', {
+                sessionId: session.hawkeyeSessionId,
+                violations: contentScan.exfiltrationWarnings,
+                tool: toolName,
+                type: 'exfiltration',
+              });
+            }
+          }
+
+          // ── Egress monitoring (post-command network scan) + IOC domain matching ──
+          if (toolName === 'Bash') {
+            const cmd = String(toolInput.command || '');
+            // Only scan after commands that might spawn network-active processes
+            if (/\b(npm|pnpm|yarn|bun|curl|wget|pip|cargo|go get|docker)\b/.test(cmd) && guardConfig.egressMonitor) {
+              try {
+                const egressScan = postCommandEgressScan(undefined, guardConfig.egressMonitor.allowedHosts);
+
+                // Cross-reference suspicious connections with IOC domain database
+                const iocDb = loadIocDatabase();
+                for (const conn of egressScan.connections) {
+                  const iocMatch = matchDomain(conn.remoteHost, iocDb);
+                  if (iocMatch && !egressScan.suspicious.includes(conn)) {
+                    egressScan.suspicious.push(conn);
+                  }
+                  if (iocMatch) {
+                    egressScan.summary = `IOC DOMAIN MATCH: ${conn.process}(${conn.pid}) connected to known malicious host ${conn.remoteHost}:${conn.remotePort} — ${iocMatch.description}`;
+                  }
+                }
+
+                if (egressScan.suspicious.length > 0) {
+                  const egressAction = guardConfig.egressMonitor.action || 'warn';
+                  process.stderr.write(`[hawkeye] Egress monitor (${egressAction}): ${egressScan.summary}\n`);
+                  const egressSeq = storage.getNextSequence(session.hawkeyeSessionId);
+                  storage.insertEvent({
+                    id: randomUUID(),
+                    sessionId: session.hawkeyeSessionId,
+                    timestamp: new Date(),
+                    sequence: egressSeq,
+                    type: (egressAction === 'block' ? 'guardrail_block' : 'guardrail_trigger') as EventType,
+                    data: {
+                      ruleName: 'egress_monitor',
+                      severity: egressAction,
+                      description: egressScan.summary,
+                      connections: egressScan.suspicious.map((c) => ({
+                        pid: c.pid,
+                        process: c.process,
+                        remote: `${c.remoteHost}:${c.remotePort}`,
+                        protocol: c.protocol,
+                      })),
+                    } as unknown as TraceEvent['data'],
+                    durationMs: 0,
+                    costUsd: 0,
+                  });
+                  storage.insertGuardrailViolation(
+                    session.hawkeyeSessionId,
+                    eventId,
+                    {
+                      ruleName: 'egress_monitor',
+                      severity: egressAction as 'warn' | 'block',
+                      description: egressScan.summary,
+                      actionTaken: egressAction === 'block' ? 'blocked' : 'logged',
+                    },
+                  );
+                  // Webhook notification for suspicious egress
+                  if (guardConfig.webhooks.length > 0) {
+                    fireWebhooks(guardConfig.webhooks, 'guardrail_block', {
+                      sessionId: session.hawkeyeSessionId,
+                      violations: [egressScan.summary],
+                      tool: toolName,
+                      command: cmd.slice(0, 200),
+                      suspiciousConnections: egressScan.suspicious.map((c) => `${c.process}(${c.pid})→${c.remoteHost}:${c.remotePort}`),
+                    });
+                  }
+                }
+              } catch (egressErr) {
+                process.stderr.write(`[hawkeye] Egress monitor error: ${String(egressErr)}\n`);
+              }
             }
           }
 

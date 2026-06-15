@@ -17,7 +17,18 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm -r publish --access public --no-git-checks
+      - run: pnpm check:publish
+      - name: Publish core package
+        run: pnpm --filter @mklamine/hawkeye-core publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish CLI package
+        run: pnpm --filter hawkeye-ai publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Deprecate broken CLI releases
+        run: npm deprecate 'hawkeye-ai@<0.3.2' 'Broken install package: older releases may contain workspace dependencies or unsupported native Node bindings. Please install hawkeye-ai@latest.'
+        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - uses: softprops/action-gh-release@v2

@@ -60,6 +60,8 @@ export const GUARDRAIL_TYPES = [
   { value: 'pii_filter', label: 'PII Filter' },
   { value: 'prompt_shield', label: 'Prompt Shield' },
   { value: 'impact_threshold', label: 'Impact Threshold' },
+  { value: 'supply_chain_audit', label: 'Supply Chain Audit' },
+  { value: 'egress_monitor', label: 'Egress Monitor' },
 ];
 
 export const DEFAULT_RULES: GuardrailRule[] = [
@@ -108,9 +110,9 @@ export const DEFAULT_RULES: GuardrailRule[] = [
   {
     name: 'review_gate',
     type: 'review_gate',
-    enabled: false,
+    enabled: true,
     action: 'block',
-    config: { patterns: ['git push --force', 'git push -f', 'migrate', 'DROP DATABASE'] },
+    config: { patterns: ['git push --force', 'git push -f', 'migrate', 'DROP DATABASE', 'npm install', 'pnpm install', 'yarn add', 'bun install'] },
   },
   {
     name: 'pii_filter',
@@ -126,6 +128,20 @@ export const DEFAULT_RULES: GuardrailRule[] = [
     action: 'warn',
     config: { scope: 'input' },
   },
+  {
+    name: 'supply_chain_audit',
+    type: 'supply_chain_audit',
+    enabled: true,
+    action: 'block',
+    config: { blockSeverity: 'critical', packageManagers: ['npm', 'pnpm', 'yarn', 'bun'] },
+  },
+  {
+    name: 'egress_monitor',
+    type: 'egress_monitor',
+    enabled: false,
+    action: 'warn',
+    config: { allowedHosts: [], checkIntervalMs: 5000 },
+  },
 ];
 
 export const POLICY_RULE_TYPES = [
@@ -137,6 +153,8 @@ export const POLICY_RULE_TYPES = [
   { value: 'network_lock', label: 'Network Lock', description: 'Control allowed/blocked hosts' },
   { value: 'review_gate', label: 'Review Gate', description: 'Require human approval for commands' },
   { value: 'impact_threshold', label: 'Impact Threshold', description: 'Block high-impact actions' },
+  { value: 'supply_chain_audit', label: 'Supply Chain Audit', description: 'Audit npm packages before install' },
+  { value: 'egress_monitor', label: 'Egress Monitor', description: 'Detect suspicious outbound connections' },
 ] as const;
 
 export function defaultConfigForType(type: string): Record<string, unknown> {
@@ -161,6 +179,10 @@ export function defaultConfigForType(type: string): Record<string, unknown> {
       return { scope: 'input' };
     case 'impact_threshold':
       return { blockAbove: 'critical', warnAbove: 'high' };
+    case 'supply_chain_audit':
+      return { blockSeverity: 'critical', packageManagers: ['npm', 'pnpm', 'yarn', 'bun'] };
+    case 'egress_monitor':
+      return { allowedHosts: [], checkIntervalMs: 5000 };
     default:
       return {};
   }
@@ -195,6 +217,15 @@ export function describeRule(rule: GuardrailRule): string {
     }
     case 'prompt_shield':
       return `Detects prompt injection (scope: ${c.scope || 'input'})`;
+    case 'supply_chain_audit': {
+      const severity = c.blockSeverity || 'critical';
+      const pms = (c.packageManagers as string[]) || ['npm'];
+      return `Blocks install if ${severity}+ vulns found (${pms.join(', ')})`;
+    }
+    case 'egress_monitor': {
+      const hosts = (c.allowedHosts as string[]) || [];
+      return hosts.length > 0 ? `Allowed: ${hosts.join(', ')}` : 'Alerts on all unknown outbound connections';
+    }
     default:
       return '';
   }
@@ -229,6 +260,12 @@ export function describePolicyRule(rule: PolicyRuleType): string {
       return Array.isArray(c.patterns) ? (c.patterns as string[]).join(', ') : '';
     case 'impact_threshold':
       return `Block: ${c.blockAbove || '-'}, Warn: ${c.warnAbove || '-'}`;
+    case 'supply_chain_audit':
+      return `Block severity: ${c.blockSeverity || 'critical'}, managers: ${((c.packageManagers as string[]) || []).join(', ')}`;
+    case 'egress_monitor': {
+      const allowed = (c.allowedHosts as string[]) || [];
+      return allowed.length > 0 ? `Allowed: ${allowed.join(', ')}` : 'All unknown hosts flagged';
+    }
     default:
       return '';
   }

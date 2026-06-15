@@ -55,6 +55,8 @@ Hawkeye is especially useful once your workflow stops being "one CLI prompt in o
 
 ### Install
 
+Requires Node.js 20+.
+
 ```bash
 npm install -g hawkeye-ai
 ```
@@ -70,6 +72,8 @@ Homebrew is also supported:
 ```bash
 brew install MLaminekane/hawkeye/hawkeye-ai
 ```
+
+If an old install fails with `workspace:*` or a native SQLite error, reinstall `hawkeye-ai@latest`.
 
 ### First 5 minutes
 
